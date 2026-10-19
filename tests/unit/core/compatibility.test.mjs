@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SOFTWARE, meetsVersion, softwareSchema } from '../../../src/core/software.js';
+import pkg from '../../../package.json' with { type: 'json' };
 import { registrySchema, parseBody } from '../../../src/core/schemas.js';
 import { selectCommittee } from '../../../src/core/committee.js';
 import { STEP_BUDGET_MS } from '../../../src/core/terms.js';
@@ -20,7 +21,7 @@ const message = (s, kind, body, extra = {}) => step(s, { type: 'message', messag
 const fresh = { observedSlot: 100, finalizedAgeMs: 0, tipSlot: 132, tipAgeMs: 0 };
 
 test('semver precedence, prereleases and metadata gate software from package.json', () => {
-  assert.equal(SOFTWARE, '0.1.0');
+  assert.equal(SOFTWARE, pkg.version);
   for (const [version, minimum, ok] of [['0.1.0', '0.1.0', true], ['0.1.0', '0.2.0', false], ['1.0.0', '0.99.0', true],
     ['1.0.0-alpha', '1.0.0', false], ['1.0.0', '1.0.0-alpha', true], ['1.0.0-beta.10', '1.0.0-beta.2', true],
     ['1.0.0-alpha.1', '1.0.0-alpha', true], ['1.0.0-2', '1.0.0-a', false], ['1.0.0-z', '1.0.0-a', true],

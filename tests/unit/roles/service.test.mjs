@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import pkg from '../../../package.json' with { type: 'json' };
 import { EventEmitter } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -630,7 +631,7 @@ test('service status announces software and latest metadata without starting wor
   s.service.latest = { version: '0.2.0', commit: 'a'.repeat(40), sha256: random32() };
   await s.service.start(); s.service.stop();
   const status = s.bridge.sent.find(x => x.envelope.kind === 'status').envelope.body;
-  assert.equal(status.software, '0.1.0'); assert.deepEqual(status.latest, s.service.latest);
+  assert.equal(status.software, pkg.version); assert.deepEqual(status.latest, s.service.latest);
   assert.equal(s.service.host.trades.size, 0); assert.equal(s.calls.escrow, 0);
 });
 

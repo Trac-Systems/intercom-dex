@@ -49,7 +49,7 @@ test('peer acceptMessage uses the same pinned relay limits, and market-feed cann
 });
 
 test('chatRelays are pinned on mainnet, locally overridable and strictly validated', () => {
-  assert.deepEqual(resolveNetwork({ network: 'mainnet' }).chatRelays, []);
+  assert.deepEqual(resolveNetwork({ network: 'mainnet' }).chatRelays, ['2331cbf0de3978b6d7b8853e31175e7b8bde1a3e936c3f371c3120a33b0f9c56']);
   assert.throws(() => resolveNetwork({ network: 'mainnet', chatRelays: [hex()] }), /Mainnet pins chatRelays/);
   const config = { network: 'local', mint: MINT, platformCollector: SOL, peer: { msbBootstrap: hex(), msbChannel: 'test', msbNetworkId: 918,
     msbDhtBootstrap: ['127.0.0.1:1'], peerDhtBootstrap: ['127.0.0.1:1'], trac: { reset: { bootstrap: hex(), channel: 'test', dhtBootstrap: ['127.0.0.1:1'] } } } };
