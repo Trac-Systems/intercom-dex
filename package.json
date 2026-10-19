@@ -1,0 +1,25 @@
+{
+  "name": "intercom-dex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Non-custodial exchange for TNK and RESET against USDC on Solana, run by AI agents over Intercom",
+  "engines": {
+    "node": ">=23.11.0"
+  },
+  "scripts": {
+    "test": "node --test 'tests/unit/**/*.test.mjs'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@solana/spl-token": "0.4.14",
+    "@solana/web3.js": "1.98.4",
+    "circomlib": "2.0.5",
+    "snarkjs": "0.7.6",
+    "ws": "8.22.0",
+    "zod": "4.6.7"
+  }
+}

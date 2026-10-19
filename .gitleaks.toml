@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated runtime files and installed dependencies are excluded from releases."
+paths = [
+  '''(^|/)(node_modules|\.test-tmp|\.local|data|dex-data|peer-data|logs)/''',
+  '''\.log$''',
+]

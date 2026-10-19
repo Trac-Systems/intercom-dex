@@ -1,0 +1,105 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { Signer, MAX_HELD_TRADES, MAX_HELD_PER_TRADER } from '../../../src/roles/signer.js';
+import { seal } from '../../../src/core/envelope.js';
+import { encodeKey } from '../../../src/core/keys.js';
+import { selectCommittee } from '../../../src/core/committee.js';
+import { tradeId, buildTerms } from '../../../src/core/terms.js';
+import { SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
+import { fixture, hex } from '../core/helpers.mjs';
+
+async function setup() {
+  const f = fixture(), now = Math.floor(Date.now() / 1000);
+  f.terms.sendBy = now + 900; f.terms.refundAfter = now + 86400;
+  f.terms.committee = selectCommittee(f.registry, f.terms.R, { pair: f.terms.pair, n: 5, k: 3, quoteAmount: f.terms.quoteAmount }).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
+  const member = f.signers.find(s => encodeKey(s.identity.publicKey) === f.terms.committee[0].dexKey);
+  const bridge = new EventEmitter(), sent = [], records = new Map();
+  bridge.setRelays = async keys => { bridge.relays = keys; }; bridge.join = async () => {}; bridge.send = async (_ch, envelope) => sent.push(envelope);
+  const store = { list: () => [], get: k => records.get(k), put: (k, v) => records.set(k, structuredClone(v)) };
+  const signer = new Signer({ bridge, store, trac: null, log: () => {}, serviceKey: encodeKey(f.service.publicKey),
+    identity: { publicKey: encodeKey(member.identity.publicKey), secretKey: member.identity.secretKey },
+    box: { publicKey: encodeKey(member.box.publicKey), secretKey: member.box.secretKey } });
+  signer.registry.current = f.registry;
+  await signer.start(); signer.stop();
+  const id = tradeId(f.terms), ch = 'intercom-dex:t:' + id;
+  const envelope = (identity, kind, body, channel) => seal({ kind, ch: channel, body }, identity.secretKey, { ts: now, nonce: hex() });
+  const summonTerms = terms => {
+    const tid = tradeId(terms), tch = 'intercom-dex:t:' + tid;
+    return signer.host.hooks.unrouted[0]('intercom-dex:signers', envelope(f.buyer, 'summon', { tradeId: tid, terms,
+      sigs: [f.buyer, f.seller].map(i => envelope(i, 'termsSig', { tradeId: tid }, tch)) }, 'intercom-dex:signers'));
+  };
+  const summon = () => summonTerms(f.terms);
+  return { signer, f, summon, summonTerms, sent, member, now, id, ch, envelope };
+}
+
+const held = (signer, key, buyer, seller) => signer.host.trades.set(key, { key, role: 'signer',
+  state: { phase: 'holding', terms: { buyer: { dexKey: buyer }, seller: { dexKey: seller } } } });
+
+test('signers gate new summons by self version, advertised capabilities and pinned profile', async () => {
+  for (const reason of ['self-version', 'asset', 'profile', 'eligible']) {
+    const { signer, f, summon } = await setup();
+    const me = f.registry.signers.find(s => s.dexKey === signer.identity.publicKey);
+    if (reason === 'self-version') f.registry.minSoftware = '9.0.0';
+    if (reason === 'asset') me.assets = ['RESET'];
+    if (reason === 'profile') signer.profile = { mint: f.terms.mint, platformCollector: f.terms.seller.solRecipient };
+    await summon();
+    assert.equal(signer.host.trades.size, reason === 'eligible' ? 1 : 0, reason);
+    if (reason === 'self-version') assert.equal(signer.status().message, 'update required');
+  }
+});
+
+test('an existing signer continues holding and serving after minSoftware rises', async () => {
+  const { signer, f, summon } = await setup(); await summon();
+  const record = [...signer.host.trades.values()][0];
+  record.state.phase = 'holding'; record.state.share = hex(); record.state.H = hex();
+  const held = record.state.share;
+  signer.registry.current = { ...f.registry, version: 2, minSoftware: '9.0.0' };
+  await signer.host.deliver(record.key, { type: 'tick' });
+  assert.equal(record.state.phase, 'holding'); assert.equal(record.state.share, held);
+  assert.equal(signer.status().updateRequired, true);
+});
+
+test('signers accept a summon only inside the registry send window with the pinned refund distance', async () => {
+  const { signer, f, summonTerms, now } = await setup(), p = f.registry.params;
+  const shifted = (sendBy, refundAfter = sendBy + p.refundSec - p.sendWindowSec) => buildTerms({ ...f.terms, sendBy, refundAfter });
+  for (const terms of [shifted(now + p.sendWindowSec + SUMMON_SKEW_SEC + 1), shifted(now + 365 * 86400), shifted(now),
+    shifted(now + 600, now + 600 + p.refundSec - p.sendWindowSec - 1)]) await summonTerms(terms);
+  assert.equal(signer.host.trades.size, 0);
+  await summonTerms(shifted(now + p.sendWindowSec + SUMMON_SKEW_SEC));
+  assert.equal(signer.host.trades.size, 1);
+});
+
+test('signers cap unfinished held trades in total and per trader key', async () => {
+  const { signer, f, summon } = await setup();
+  for (let i = 0; i < MAX_HELD_PER_TRADER; i++) held(signer, `fake-${i}`, hex(), f.terms.seller.dexKey);
+  await summon(); assert.equal(signer.host.trades.size, MAX_HELD_PER_TRADER, 'the seller key holds its maximum');
+  signer.host.trades.get('fake-0').state.phase = 'published';
+  await summon(); assert.equal(signer.host.trades.size, MAX_HELD_PER_TRADER + 1, 'a finished trade frees its slot');
+  const other = await setup();
+  for (let i = 0; i < MAX_HELD_TRADES; i++) held(other.signer, `fake-${i}`, hex(), hex());
+  await other.summon(); assert.equal(other.signer.host.trades.size, MAX_HELD_TRADES);
+  other.signer.host.trades.get('fake-0').state.phase = 'expired';
+  await other.summon(); assert.equal(other.signer.host.trades.size, MAX_HELD_TRADES + 1);
+});
+
+test('a holding signer repeats its ack only until sendBy, then sends it only to members that announce themselves', async t => {
+  const timers = [];
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { const timer = { fn, ms }; timers.push(timer); return timer; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { signer, f, summon, sent, member, now, id, ch, envelope } = await setup();
+  const clock = { t: now }; signer.host.now = () => clock.t;
+  await summon();
+  const trade = [...signer.host.trades.values()][0], tick = timers.find(x => x.ms === 1000).fn;
+  trade.state.phase = 'holding';
+  trade.outbox[ch] = [envelope(member.identity, 'ack', { tradeId: id, H: hex(), holdUntil: f.terms.refundAfter }, ch)];
+  const acks = () => sent.filter(e => e.kind === 'ack').length;
+  const run = async seconds => { clock.t += seconds; tick(); await trade.queue; };
+  await run(0); await run(10); await run(10);
+  assert.equal(acks(), 2);
+  clock.t = f.terms.sendBy; await run(0); await run(10); await run(10);
+  assert.equal(acks(), 2, 'no periodic ack after sendBy');
+  signer.bridge.emit('message', ch, seal({ kind: 'present', ch, body: { ref: id } }, f.buyer.secretKey, { ts: clock.t, nonce: hex() }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(acks(), 3, 'a member that announces itself still gets the ack');
+});

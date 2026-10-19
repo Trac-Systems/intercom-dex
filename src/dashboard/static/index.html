@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>intercom-dex</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="name">intercom-dex</span> <span id="role" class="muted"></span> <span id="network" class="badge"></span></div>
+  <nav id="tabs" class="tabs" role="tablist"></nav>
+  <button id="theme" class="ghost" type="button" title="Switch light / dark">◐</button>
+</header>
+<main id="main"><p class="muted">Loading…</p></main>
+<p id="stale" class="stale" hidden>Not updating — is the role still running?</p>
+<dialog id="dialog"><form method="dialog" id="dialog-body"></form></dialog>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

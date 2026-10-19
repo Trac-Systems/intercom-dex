@@ -1,0 +1,33 @@
+{
+  "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "programId": "4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF",
+  "platformCollector": "REQUIRED: platform fee collector from deployed escrow config",
+  "peer": {
+    "environment": "development",
+    "msbBootstrap": "REQUIRED: live MSB bootstrap",
+    "msbChannel": "REQUIRED: live MSB channel",
+    "msbNetworkId": "REQUIRED: live MSB networkId",
+    "msbDhtBootstrap": [
+      "REQUIRED: live MSB DHT bootstrap"
+    ],
+    "peerDhtBootstrap": [
+      "REQUIRED: live peer DHT bootstrap"
+    ],
+    "trac": {
+      "reset": {
+        "bootstrap": "REQUIRED: live RESET subnet bootstrap",
+        "channel": "REQUIRED: live RESET channel",
+        "dhtBootstrap": [
+          "REQUIRED: live RESET DHT bootstrap"
+        ],
+        "beaconOptions": null,
+        "source": {
+          "commit": "b9747f1517bdb7508c329ef6e80aebfe47e092e8",
+          "manifestSha256": "3daaa29bc64bc69bc81749eef8347fd2a7cc59c8f04bd52f4b7570ae1dc83542",
+          "directory": null
+        }
+      }
+    }
+  },
+  "chatRelays": []
+}
