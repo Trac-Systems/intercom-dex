@@ -180,7 +180,9 @@ export function negotiationStep(state, event, message) {
           stableJSON(b.taker) !== stableJSON(participant(s.draft, s.role === 'buyer' ? 'seller' : 'buyer'))) throw new Error('Invalid take');
       if (event.eligibleOnline !== undefined && event.eligibleOnline < s.draft.k + 1) return abortTransition(s, 'Not enough signers online');
       s.peerCommit = b.commitment;
-      s.acceptSlot = event.observedSlot;
+      // The newest slot, not the finalized one: on mainnet finalization trails the tip by about 32 slots, which would
+      // leave the reveal only a few seconds before the cutoff.
+      s.acceptSlot = event.tipSlot;
       s.phase = 'awaitReveal';
       actions.push(sendAction(s, 'accept', { offerId: s.offerId, takeCommitment: s.peerCommit, commitment: sha256Hex(hexToBytes(s.nonce, 32)), slot: s.acceptSlot }),
         sendAction(s, 'reveal', { offerId: s.offerId, takeCommitment: s.peerCommit, nonce: s.nonce }));

@@ -131,7 +131,7 @@ export function simulation(options = {}) {
   dispatch('buyer', { type: 'tick' }); dispatch('seller', { type: 'tick' }); drain();
   assert.equal(nodes.get('buyer').state.phase, 'awaitRandomness', 'Buyer completed reveals');
   assert.equal(nodes.get('seller').state.phase, 'awaitRandomness', 'Seller completed reveals');
-  const chain = { acceptSlot: 100, slot: 196, finalized: true, firstFinalized: true, blockhash: hex() };
+  const chain = { acceptSlot: 132, slot: 228, finalized: true, firstFinalized: true, blockhash: hex() };
   dispatch('buyer', { type: 'tick', chain }); dispatch('seller', { type: 'tick', chain });
   const terms = nodes.get('buyer').state.terms;
   assert.ok(terms && nodes.get('seller').state.terms, 'Both traders computed terms');

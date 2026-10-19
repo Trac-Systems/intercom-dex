@@ -184,14 +184,14 @@ test('maker signs accept.slot before either reveal, and reveal cannot carry a re
   const sim = simulation({ capturePhases: true });
   const messages = sim.log.filter(x => x.action.type === 'send');
   const acceptIndex = messages.findIndex(x => x.action.kind === 'accept');
-  assert.equal(messages[acceptIndex].action.body.slot, 100);
+  assert.equal(messages[acceptIndex].action.body.slot, 132);
   assert.ok(messages.every((x, i) => x.action.kind !== 'reveal' || i > acceptIndex));
   for (const x of messages.filter(x => x.action.kind === 'reveal')) {
     assert.equal(Object.hasOwn(x.action.body, 'slot'), false);
     assert.throws(() => parseBody('reveal', { ...x.action.body, slot: 999 }));
   }
-  assert.equal(sim.state('buyer').acceptSlot, 100);
-  assert.equal(sim.state('seller').acceptSlot, 100);
+  assert.equal(sim.state('buyer').acceptSlot, 132);
+  assert.equal(sim.state('seller').acceptSlot, 132);
 });
 
 test('taker only accepts a slot whose randomness block is still ahead (-12 .. +150) and ignores malformed accept messages', () => {

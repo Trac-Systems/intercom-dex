@@ -413,7 +413,8 @@ its age in milliseconds as `event.finalizedAgeMs` when delivering `take`,
 be finite and `0 <= finalizedAgeMs < 15000`. Missing, stale or negative observations
 leave the original state and clock unchanged, with no actions; the runner must
 deliver a fresh retransmission. Other message kinds do not require these fields.
-The maker signs that observation in `accept.slot` before sending its reveal.
+The maker signs its tip observation (`tipSlot`, below) in `accept.slot` before sending its reveal; finalization
+trails the tip by about 32 slots on mainnet, and a finalized accept slot would leave the reveal only seconds.
 The taker accepts only `observedSlot - 12 <= accept.slot <= observedSlot + 150`.
 Both traders store this fixed value as `state.acceptSlot`. The runner also supplies `tipSlot` and `tipAgeMs`, a highest-processed-slot
 view with `0 <= tipAgeMs < 6000`. Ages use a monotonic clock and include request
