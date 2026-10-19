@@ -16,6 +16,7 @@ import DexBridge, { DEX_CHANNELS } from '../features/dex-bridge.js';
 import { openResetReader } from '../src/trac/reset-reader.js';
 import { verifyResetSource } from '../src/trac/source.js';
 import { subnetChannel } from './subnet-channel.js';
+import { fanOutValidatorSends } from './fanout.js';
 import { resolveProfile } from '../../src/net/profile-core.js';
 
 const hex32 = /^[0-9a-f]{64}$/;
@@ -103,6 +104,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     if (mc.networkId !== config.msbNetworkId) throw new Error('MSB networkId differs from the network profile');
     const options = { networkPrefix: mc.addressPrefix, derivationPath: mc.derivationPath };
     bus = new MainSettlementBus(mc, await walletAt(mc.keyPairPath, PeerWallet, options)); await bus.ready();
+    fanOutValidatorSends(bus.network);
     if (devnet) {
       await bus.network.tryConnect(config.validatorKey, 'validator');
       await until(() => bus.state.getAdminEntry(), 'local MSB synchronized');
