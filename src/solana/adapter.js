@@ -490,19 +490,33 @@ export function createSolanaAdapter({
     slotNumber(minSlot);
     const tip = await finalizedSlot();
     if (tip < minSlot) throw new Error('Requested slot is not finalized yet');
-    const firstAvailable = await quorum('getFirstAvailableBlock', [], slotNumber);
-    if (minSlot < firstAvailable) throw new Error('Requested block history has been pruned; first slot cannot be established');
+    // Each node keeps its own amount of history, so the first available block differs between nodes by design. Each is
+    // asked on its own, and only nodes that still hold minSlot take part in the block search.
+    const firsts = await Promise.allSettled(urls.map(url => rpcCall(url, 'getFirstAvailableBlock', [], { timeoutMs })));
+    const answered = firsts.filter(r => r.status === 'fulfilled');
+    const holding = urls.filter((url, i) => firsts[i].status === 'fulfilled' && slotNumber(firsts[i].value) <= minSlot);
+    if (holding.length < need) {
+      throw new Error(answered.length >= need && answered.length - holding.length > answered.length - need
+        ? 'Requested block history has been pruned; first slot cannot be established'
+        : 'Too few endpoints hold the requested block history');
+    }
+    const search = async (method, params, select) => (await readRpcQuorum(method, params, { ...quorumOptions, endpoints: holding, select })).value;
     const deadline = Date.now() + confirmationTimeoutMs;
     for (let start = minSlot; start <= tip; start += 512) {
       if (Date.now() >= deadline) throw new Error('Finalized block search timed out');
       const end = Math.min(tip, start + 511);
-      const slots = await quorum('getBlocks', [start, end, { commitment: 'finalized' }], result => {
+      // Only the first block counts. A node that has not finalized the whole range yet still names the same first
+      // block; an empty answer from a node that is behind counts as no answer.
+      const slot = await search('getBlocks', [start, end, { commitment: 'finalized' }], result => {
         if (!Array.isArray(result) || result.some((slot, i) => slotNumber(slot) < start || slot > end || i > 0 && slot <= result[i - 1])) throw new Error('Invalid finalized block range');
-        return result;
+        if (!result.length) throw new Error('No finalized block in range on this endpoint');
+        return result[0];
+      }).catch(error => {
+        if (error.name === 'QuorumError' && error.reports?.every(r => r.message === 'No finalized block in range on this endpoint')) return null;
+        throw error;
       });
-      if (!slots.length) continue;
-      const slot = slots[0];
-      const blockhash = await quorum('getBlock', [slot, { commitment: 'finalized', transactionDetails: 'none', rewards: false, maxSupportedTransactionVersion: 0 }], result => {
+      if (slot === null) continue;
+      const blockhash = await search('getBlock', [slot, { commitment: 'finalized', transactionDetails: 'none', rewards: false, maxSupportedTransactionVersion: 0 }], result => {
         if (!result) throw new Error('Finalized block unavailable');
         return new PublicKey(result.blockhash).toBuffer().toString('hex');
       });
@@ -719,7 +733,8 @@ export function createSolanaAdapter({
     }
     const signature = await submit(key, instructions, intent, { afterSign });
     const saved = pending.get(key);
-    const receipt = await quorum('getTransaction', [signature, { commitment: 'finalized', encoding: 'base64', maxSupportedTransactionVersion: 0 }], value => {
+    // A transaction just finalized on one node can take a few seconds to reach the others, so the receipt is read again.
+    const readReceipt = () => quorum('getTransaction', [signature, { commitment: 'finalized', encoding: 'base64', maxSupportedTransactionVersion: 0 }], value => {
       if (!value || value.meta?.err !== null || !Array.isArray(value.transaction) || value.transaction[0] !== saved.wire) throw new Error('Finalized withdrawal transaction is unavailable or mismatched');
       const tx = Transaction.from(Buffer.from(value.transaction[0], 'base64'));
       const addresses = tx.compileMessage().accountKeys;
@@ -735,6 +750,13 @@ export function createSolanaAdapter({
       if (units(pre, vault, true) - units(post, vault, true) !== n || units(post, target, true) - units(pre, target, false) !== n) throw new Error('Finalized withdrawal balances do not match amount');
       return { signature, slot: slotNumber(value.slot), vaultAfter: units(post, vault, true).toString() };
     });
+    let receipt;
+    for (let attempt = 1; ; attempt++) {
+      try { receipt = await readReceipt(); break; } catch (error) {
+        if (attempt >= 20 || error.name !== 'QuorumError') throw error;
+        await delay(3000);
+      }
+    }
     return { ok: true, ...receipt };
   }
 

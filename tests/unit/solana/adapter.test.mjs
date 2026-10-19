@@ -75,6 +75,24 @@ test('quorum reads canonicalize object order, reject disagreement and expose pro
   await assert.rejects(readRpcQuorum('getSlot', [], { endpoints, select: () => { throw new Error('bad format'); } }), e => e.reports.every(r => r.message === 'bad format'));
 });
 
+test('nodes with different history and a node that is behind still agree on the first finalized block', async t => {
+  const three = ['http://127.0.0.1:18899', 'http://localhost:18899', 'http://127.0.0.2:18899'];
+  let behind = false;
+  t.mock.method(globalThis, 'fetch', async (url, request) => {
+    const { method, params } = JSON.parse(request.body), node = three.map(u => new URL(u).href).indexOf(new URL(url).href);
+    if (method === 'getSlot') return response(20);
+    // Real providers keep different amounts of history; the third no longer holds slot 5.
+    if (method === 'getFirstAvailableBlock') return response([0, 4, 9][node]);
+    if (method === 'getBlocks') { assert.notEqual(node, 2); return response(behind ? (node === 0 ? [7, 9] : []) : node === 1 ? [7] : [7, 9, 11]); }
+    if (method === 'getBlock') { assert.equal(params[0], 7); return response({ blockhash: key(8).toBase58() }); }
+    assert.fail(method);
+  });
+  const a = createSolanaAdapter({ endpoints: three, sendEndpoint: three[0] });
+  assert.deepEqual(await a.firstFinalizedBlockAtLeast(5), { slot: 7, blockhash: '08'.repeat(32), finalized: true });
+  // One node has the block and one is behind: undecided, never a later block.
+  behind = true; await assert.rejects(a.firstFinalizedBlockAtLeast(5), /quorum/);
+});
+
 test('finality requires quorum for finalized tip, skipped slots and blockhash; refuses pruned history', async t => {
   let pruned = false, divergent = false;
   t.mock.method(globalThis, 'fetch', async (url, request) => {
