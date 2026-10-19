@@ -1,8 +1,66 @@
 # intercom-dex
 
-People and their agents swap TNK or RESET for USDC on Solana, directly with each other. Nobody holds your funds in
-between: the USDC waits in a lock on Solana, and the coins go straight from the seller to the buyer on Trac Network.
-Each side runs a small program on its own computer, and the agent talks to that program.
+An exchange where people and their AI agents swap TNK or RESET for USDC on Solana, directly with each other. Nobody
+holds your funds in between: the USDC waits in a lock on Solana, and the coins go straight from the seller to the
+buyer on Trac Network. You tell your agent what you want to trade, and the agent and a small program on your own
+computer do the rest.
+
+## Trade by talking to your agent
+
+Once intercom-dex is set up, you talk to your agent in plain words. Some things you can say, and what the agent
+does with them:
+
+- **"What do I need to start trading?"** The agent shows your Solana and Trac addresses and your balances, and says
+  what is missing: USDC and a little SOL to buy, or the coins plus a little TNK and SOL to sell.
+- **"Sell 100 TNK for at least 0.05 USDC each."** The agent checks that you have the coins and the fees, looks at
+  the open offers, and then tells you the price, the amount and the fees. It takes a matching offer or posts your
+  own only after you say yes.
+- **"Buy 10 RESET, up to 1.20 each."** Same in the other direction: it checks your USDC, finds the best offers
+  and waits for your yes.
+- **"How is my trade going?"** It explains where the trade is and what happens next. A trade finishes on its own,
+  usually within two or three minutes, also when the agent stops watching.
+- **"Send my USDC to my own wallet."** It withdraws, to your payout address if you set one.
+
+A short example:
+
+```text
+You:   I want to sell my 1 RESET for 1.15 USDC.
+Agent: You hold 1 RESET and enough SOL and TNK for the fees. The last trade was at 1.10, and the
+       best other offer sells at 1.10. Post a sell offer for 1 RESET at 1.15 USDC? The buyer pays
+       the fees, so you receive the full 1.15 USDC.
+You:   Yes.
+Agent: Posted. It is open for an hour. When someone takes it, your program sends the RESET after the
+       buyer's USDC is locked, and the USDC arrives in your Solana wallet a minute or two later.
+```
+
+Agents learn the tools and the rules from [`SKILL.md`](SKILL.md). The private dashboard further down is a fallback
+for when you want to look yourself.
+
+## Set it up with your agent
+
+Give your agent this prompt. It installs a tagged release, checks it and connects itself. Only the password stays
+with you: the agent never asks for it.
+
+```text
+Install intercom-dex for me from https://github.com/Trac-Systems/intercom-dex. Use only a tagged
+release, never main, and read README.md and SKILL.md of that release first.
+1. Download the newest release archive, compare its sha256 with the release page, unpack it, and
+   run npm ci and npm ci --prefix peer in the release folder.
+2. Build the proving key with node bin/proof-setup.mjs.
+3. Write peer.json and trader.json in a data folder outside the release folder, with the venue keys
+   from the release page. Use the built-in public Solana servers, unless I give you my own Solana
+   RPC URL.
+4. Start the peer so that it keeps running and starts again with my computer.
+5. Add the intercom-dex MCP server to your configuration. Leave DEX_KEY_PASSWORD empty and tell me
+   where to type my password myself. Never ask me for the password.
+6. After I have set the password and restarted you, call dex_wallets and tell me where to send funds.
+```
+
+The steps it follows are listed under [Install by hand](#install-by-hand), in case you want to do them yourself.
+
+**Solana servers.** The program comes with six public Solana servers and works with them: two of them have to
+agree on every read. They limit how many requests each user may send, which is fine for occasional trading. If you
+trade a lot or run an agent that trades all day, you can add your own Solana RPC URL to the config.
 
 ## How a trade works
 
@@ -43,7 +101,39 @@ pays the normal network fees: a little SOL on Solana and a little TNK on Trac.
   it stopped, but a seller that stays offline past the refund time can lose the payment for coins it already sent.
 - Use a tagged release. The `main` branch is development and not for trading.
 
-## Install
+## Built on Intercom
+
+intercom-dex runs on [Intercom](https://github.com/Trac-Systems/intercom), the peer-to-peer network for agents on
+Trac Network. Peers find each other and talk directly over Hyperswarm and HyperDHT, without a central server. Each
+trader, signer and the venue runs one Intercom peer under the Pear runtime, and the exchange uses its parts like
+this:
+
+- **Sidechannels** carry the offers, each trade's messages, the signers' heartbeats and the market chat. Every
+  message is signed by its sender, offers and trade messages also carry a proof of work, and peers drop anything
+  that fails these checks.
+- **The local bridge** connects the peer to the program that holds the keys, through an authenticated WebSocket on
+  your computer. The MCP server talks to that program, and your agent talks to the MCP server.
+- **The MSB client** sends and checks TNK transfers on Trac Network's settlement layer.
+- **A RESET subnet reader** follows the RESET contract, so RESET transfers can be checked on your own node.
+- **Blind relays** forward encrypted traffic between peers that cannot reach each other directly, without being able
+  to read it. Signers and the venue serve as relays.
+
+```text
+  You  <->  your agent  <->  MCP server  <->  trading program (keys, wallets, trade logic)
+                                                   |  local bridge (WebSocket, token)
+                                                   v
+                                  Intercom peer (Pear runtime)
+                       +---------------------+---------------------+
+                       |                     |                     |
+                  Sidechannels           MSB client          RESET reader
+              offers, trades, chat     TNK transfers       RESET transfers
+                       |
+                  other traders, signers, the venue  (Hyperswarm, blind relays)
+
+  The trading program also talks to Solana: the USDC lock, the claim and the refund.
+```
+
+## Install by hand
 
 You need [Node.js](https://nodejs.org) 23.11 or newer, about 1 GB of disk space and 4 GB of free memory.
 
@@ -98,9 +188,10 @@ release page. `/path/to/dex-data/peer.json`:
 }
 ```
 
-The RESET gateway is only needed to sell RESET. Without a `solana` block the program uses six public Solana
-servers and needs two of them to agree on every read. To use your own Solana RPC, add for example
-`"solana": { "endpoints": ["<your RPC>", "https://solana-rpc.publicnode.com"], "sendEndpoint": "<your RPC>" }`.
+The RESET gateway is only needed to sell RESET. Without a `solana` block the program uses six public Solana servers
+and needs two of them to agree on every read. That suits occasional trading; their rate limits can slow down an agent
+that trades all day. To use your own Solana RPC instead, add `"solana": { "endpoints": ["<your RPC URL>"] }`. With
+one endpoint of your own, the program trusts its answers.
 
 **4. Start the network connection.** The program talks to the network through a separate process, the peer. Create
 its access token once, then start it and leave it running in its own terminal:
@@ -206,7 +297,7 @@ name/text pairs suppressed for 10 minutes. Set `marketFeed.port` and `marketFeed
 to a private 0600 bearer-key file). HTTP binds to `127.0.0.1`; a reverse proxy exposes these three routes.
 See [the role and HTTP contract](src/core/API.md#market-feed).
 
-## The dashboard
+## The dashboard (fallback)
 
 With `"dashboard"` in the config, the program serves a private page on your computer. It shows each trade in plain
 words with its deadlines, your balances, the offers and the signers. You can post, take and cancel offers and

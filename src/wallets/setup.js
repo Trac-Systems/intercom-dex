@@ -77,6 +77,12 @@ function payoutAdvice(config) {
   return missing.length ? { payoutLock: `Recommended: set ${missing.map(chain => `payout.${chain}`).join(' and ')} in the config to your own wallet ${missing.length > 1 ? 'addresses' : 'address'}. Withdrawals can then only go there, whoever asks. Agents: propose this to the user and let them choose the addresses.` } : {};
 }
 
+// The built-in public Solana servers suit occasional trading; they rate-limit busy clients.
+export function rpcAdvice(config) {
+  if (!['trader', 'service'].includes(config.role) || config.solana?.endpoints?.length) return {};
+  return { solanaRpc: 'This program uses the built-in public Solana servers. That is fine for occasional trading. They limit requests per user; for frequent trading, an own Solana RPC URL can be added to the config as "solana": {"endpoints": ["<URL>"]}.' };
+}
+
 export async function setupWallets(config, profile, { password, tracPassword = password, importSolana, mnemonic, resetKeystore, resetPassword, onMnemonic = () => {} } = {}) {
   absolute(config.dataDir); validatePayout(config.payout);
   if (!['trader', 'service', 'signer'].includes(config.role)) throw new Error('Invalid role');
@@ -100,7 +106,7 @@ export async function setupWallets(config, profile, { password, tracPassword = p
     if (config.role === 'trader') wallet = await createWallet(tracFile, tracPassword, { profile, mnemonic, onMnemonic });
     const pub = await createKeyring(keyFile, password, { solanaSecret: imported, withSolana: config.role !== 'signer' });
     return { dexKey: pub.dexKey, addresses: { solana: pub.solana ? new PublicKey(Buffer.from(pub.solana, 'hex')).toBase58() : null,
-      trac: wallet?.address ?? null }, minimumFees: { SOL: MIN_SOL, TNK: config.role === 'trader' ? MIN_TNK : '0' }, ...payoutAdvice(config) };
+      trac: wallet?.address ?? null }, minimumFees: { SOL: MIN_SOL, TNK: config.role === 'trader' ? MIN_TNK : '0' }, ...payoutAdvice(config), ...rpcAdvice(config) };
   } finally { wallet?.close(); imported?.fill(0); }
 }
 

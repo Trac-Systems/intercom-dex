@@ -75,6 +75,15 @@ test('quorum reads canonicalize object order, reject disagreement and expose pro
   await assert.rejects(readRpcQuorum('getSlot', [], { endpoints, select: () => { throw new Error('bad format'); } }), e => e.reports.every(r => r.message === 'bad format'));
 });
 
+test('the finalized slot is the highest one that two nodes have reached, also when they differ', async t => {
+  const three = ['http://127.0.0.1:18899', 'http://localhost:18899', 'http://127.0.0.2:18899'].map(u => new URL(u).href);
+  let slots = [100, 101, 103];
+  t.mock.method(globalThis, 'fetch', async url => response(slots[three.indexOf(new URL(url).href)]));
+  const a = createSolanaAdapter({ endpoints: three, sendEndpoint: three[0] });
+  assert.equal(await a.finalizedSlot(), 101);
+  slots = [100, 'x', 'y']; await assert.rejects(a.finalizedSlot(), /quorum/);
+});
+
 test('nodes with different history and a node that is behind still agree on the first finalized block', async t => {
   const three = ['http://127.0.0.1:18899', 'http://localhost:18899', 'http://127.0.0.2:18899'];
   let behind = false;

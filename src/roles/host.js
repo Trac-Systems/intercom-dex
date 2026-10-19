@@ -54,6 +54,9 @@ export function isFinished(trade) {
   return DONE[trade.role].includes(s.phase);
 }
 
+const NEGOTIATING = new Set(['new', 'awaitTake', 'awaitAccept', 'awaitReveal']);
+const FINISHED = new Set(['complete', 'aborted', 'refunded', 'lost']);
+
 // Runs trades for one identity: verifies and routes channel messages, buffers out-of-order input, re-sends its own
 // messages to members who announce themselves late, and carries out the state machines' actions.
 export class TradeHost {
@@ -71,7 +74,7 @@ export class TradeHost {
     this.bridge.on('message', (channel, message) => { this.#route(channel, message).catch(e => this.log('route error', e.message)); });
     if (this.solana) await this.#refreshSlot();
     this.timer = setInterval(() => this.#tickAll(), this.tickMs);
-    this.slotTimer = this.solana ? setInterval(() => this.#refreshSlot().catch(() => {}), 2000) : null;
+    this.slotTimer = this.solana ? setInterval(() => this.#needsChain() ? this.#refreshSlot().catch(() => {}) : null, 2000) : null;
     for (const name of this.store.list('trade-')) {
       const record = this.store.get(name);
       if (record) await this.#install(record, { resume: true });
@@ -91,6 +94,16 @@ export class TradeHost {
       this.solana.tipSlot().then(v => { if (started >= (this.tipAt ?? -1)) { this.tip = v; this.tipAt = started; } }),
     ]);
     if (this.#chainFresh()) for (const trade of this.trades.values()) if (trade.buffer.length) this.#enqueue(trade, () => this.#drain(trade));
+  }
+
+  // Only a negotiation, or a message waiting for a fresh view, needs the chain view. An idle trader doesn't poll
+  // Solana, which keeps it under the public RPC servers' rate limits.
+  #needsChain() {
+    for (const trade of this.trades.values()) {
+      if (FINISHED.has(trade.state.phase)) continue;
+      if (trade.buffer.length || NEGOTIATING.has(trade.state.phase)) return true;
+    }
+    return false;
   }
 
   #chainFresh() {

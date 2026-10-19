@@ -162,6 +162,8 @@ Call it when the user asks how to trade, and before any trade. It returns:
 - `withdrawals`: withdrawals that are not confirmed yet.
 - `storage`: `dataDir`, `keyringFile`, `tracWalletFile`, `passwordEnv`, `tracPasswordEnv` and `encryption`.
 - `backup`: `instruction`, `exportCommand` and `exportInstruction`.
+- `solanaRpc`: present when the program uses the built-in public Solana servers. That is fine for occasional
+  trading. If the user trades often and reads keep failing, mention that their own RPC URL can be added to the config.
 
 Explain it to the user like this:
 
@@ -278,6 +280,15 @@ Seller:
 How to tell a trade finished: a buyer is finished in `complete`, `refunded` or `aborted`; a seller in `complete`,
 `lost` or `aborted`. A buyer whose USDC was locked always ends `complete` or `refunded`.
 
+Only the buyer's USDC is ever locked. A seller's coins are not locked anywhere: the seller's program sends them on
+Trac after it has seen the buyer's lock and the signers' confirmations. Never tell a seller that their coins are in
+escrow.
+
+Usual timing on mainnet: from the take to `awaitTerms` about 30 to 60 seconds (`awaitRandomness` waits for a
+finalized Solana block), the lock about 10 seconds, and from the lock to `complete` about 30 to 60 seconds. Don't
+call a trade stuck before it has spent 5 minutes in one phase. The trade runs on by itself when you stop checking,
+so if your session ends, tell the user the trade continues and that they can ask you for the result later.
+
 ## Declines
 
 A maker answers a take it can't serve with a decline. Your trade then ends `aborted` with the decline reason:
@@ -349,6 +360,12 @@ restart:
 A trade that was still negotiating when the program stopped usually ends `aborted` with a timeout. That is harmless.
 
 ## Explaining a trade to the user
+
+Users say what they want in plain words, for example "sell 100 TNK for at least 0.05 each" or "buy 10 RESET, up to
+1.20". Then: call `dex_wallets` and `dex_status`, say what is missing if anything is, look at `dex_book` for
+matching offers, and propose either taking the best matching offer or posting a new one, with the numbers below.
+Act after the user's yes.
+
 
 Before a take, say the pair, buy or sell, the amount in tokens, the price, the USDC amount, the fees and the total
 the buyer locks. Say that the coins must be sent within 15 minutes and that a stalled trade refunds after 48 hours.

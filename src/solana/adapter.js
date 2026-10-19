@@ -91,6 +91,44 @@ export function createSolanaAdapter({
     }
   };
   const quorum = async (method, params, select) => (await readRpcQuorum(method, params, { ...quorumOptions, select })).value;
+  // A value that moves with every slot (finalized slot, block height) differs slightly between nodes, so exact
+  // agreement is rare. The highest value that at least `need` nodes have reached is used instead: every one of them
+  // has seen it, and it never runs ahead of the chain.
+  const reached = async (method, params) => {
+    const results = await Promise.allSettled(urls.map(url => rpcCall(url, method, params, { timeoutMs })));
+    const values = [], reports = [];
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') { reports.push({ endpoint: urls[i], status: 'error', message: r.reason.message }); return; }
+      try { values.push(slotNumber(r.value)); reports.push({ endpoint: urls[i], status: 'agreed' }); }
+      catch (error) { reports.push({ endpoint: urls[i], status: 'error', message: error.message }); }
+    });
+    if (values.length < need) throw new QuorumError(`No RPC quorum for ${method}`, reports);
+    return values.sort((a, b) => b - a)[need - 1];
+  };
+  // Each node names its own newest blockhash. One that `need` nodes name together is used; otherwise the newest one
+  // that `need` nodes confirm as valid. Its lastValidBlockHeight comes from the node that named it.
+  const latestBlockhash = async () => {
+    const results = await Promise.allSettled(urls.map(url => rpcCall(url, 'getLatestBlockhash', [{ commitment }], { timeoutMs })));
+    const answers = [];
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      try { const v = r.value?.value; new PublicKey(v?.blockhash); slotNumber(v?.lastValidBlockHeight); answers.push(v); } catch {}
+    }
+    const counts = new Map();
+    for (const a of answers) counts.set(a.blockhash, (counts.get(a.blockhash) ?? 0) + 1);
+    const agreed = answers.filter(a => counts.get(a.blockhash) >= need).sort((a, b) => b.lastValidBlockHeight - a.lastValidBlockHeight)[0];
+    if (agreed) return agreed;
+    const seen = new Set();
+    for (const a of answers.sort((x, y) => y.lastValidBlockHeight - x.lastValidBlockHeight)) {
+      if (seen.has(a.blockhash)) continue;
+      seen.add(a.blockhash);
+      try {
+        await readRpcQuorum('isBlockhashValid', [a.blockhash, { commitment }], { ...quorumOptions, select: v => { if (v?.value !== true) throw new Error('Blockhash not valid on this node'); return true; } });
+        return a;
+      } catch {}
+    }
+    throw new QuorumError('No blockhash confirmed by enough endpoints', []);
+  };
   const signer = expected => {
     if (!keypair) throw new Error('Read-only adapter has no signer');
     if (expected && !keypair.publicKey.equals(new PublicKey(expected))) throw new Error('Signer does not match trade role');
@@ -169,7 +207,7 @@ export function createSolanaAdapter({
         reason: status.err ? `Transaction failed: ${JSON.stringify(status.err)}` : null };
     }
     entry = { ...entry, observedConfirmed: false };
-    const height = await quorum('getBlockHeight', [{ commitment: 'finalized' }], slotNumber);
+    const height = await reached('getBlockHeight', [{ commitment: 'finalized' }]);
     if (height <= entry.height) return entry;
     // Fence subsequent account reads at a finalized slot observed after expiry.
     const minContextSlot = await finalizedSlot();
@@ -296,11 +334,7 @@ export function createSolanaAdapter({
         if (intent.kind === 'platform-config' && keypair.publicKey.toBase58() !== intent.collector &&
             !signers.some(s => s.publicKey.toBase58() === intent.collector)) throw new Error('Platform authority keypair required to sign');
         if (signBefore !== null && Date.now() / 1000 >= signBefore) throw new Error('Signing window closed');
-        const latest = await quorum('getLatestBlockhash', [{ commitment }], result => {
-          const value = result?.value;
-          new PublicKey(value?.blockhash); slotNumber(value?.lastValidBlockHeight);
-          return value;
-        });
+        const latest = await latestBlockhash();
         if (signBefore !== null && Date.now() / 1000 >= signBefore) throw new Error('Signing window closed');
         const tx = new Transaction({ feePayer: keypair.publicKey, recentBlockhash: latest.blockhash }).add(...instructions);
         tx.sign(keypair, ...signers.filter(s => !s.publicKey.equals(keypair.publicKey)));
@@ -309,7 +343,7 @@ export function createSolanaAdapter({
           height: latest.lastValidBlockHeight, sent: false, createdAt: entry?.createdAt ?? Date.now(), attempt: (entry?.attempt ?? 0) + 1 };
         await saveEntry(id, fresh); // Never send bytes whose durable write failed.
         entry = fresh;
-        const height = await quorum('getBlockHeight', [{ commitment: 'finalized' }], slotNumber);
+        const height = await reached('getBlockHeight', [{ commitment: 'finalized' }]);
         if (height > entry.height) lastError = 'Fresh blockhash already expired';
         continue;
       }
@@ -477,13 +511,7 @@ export function createSolanaAdapter({
   }
 
   async function finalizedSlot() {
-    // Exact matching slots can straddle a moving tip; bounded retries resample all providers.
-    let error;
-    for (let i = 0; i < 5; i++) {
-      try { return await quorum('getSlot', [{ commitment: 'finalized' }], slotNumber); }
-      catch (cause) { error = cause; await delay(100); }
-    }
-    throw error;
+    return reached('getSlot', [{ commitment: 'finalized' }]);
   }
 
   async function firstFinalizedBlockAtLeast(minSlot) {

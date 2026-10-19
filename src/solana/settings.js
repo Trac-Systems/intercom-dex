@@ -6,5 +6,6 @@ import { DEFAULT_ENDPOINTS } from './constants.js';
 export function solanaSettings(config, profile) {
   const endpoints = config.solana?.endpoints ?? (profile.network === 'mainnet' ? [...DEFAULT_ENDPOINTS] : null);
   if (!endpoints) return null;
-  return { endpoints, sendEndpoint: config.solana?.sendEndpoint ?? endpoints[0], need: config.solana?.need ?? 2 };
+  // One own endpoint is trusted on its own answer; several need two that agree.
+  return { endpoints, sendEndpoint: config.solana?.sendEndpoint ?? endpoints[0], need: config.solana?.need ?? Math.min(2, endpoints.length) };
 }

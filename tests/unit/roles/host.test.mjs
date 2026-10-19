@@ -48,6 +48,8 @@ test('request at 100.01 and receipt at 106.91 is stale; fresh observations relea
 test('observation dates are monotonic, independent and cannot be replaced by a slower older request', async t => {
   const clock = { ms: 100010 }, solana = { finalizedSlot: async () => 100, tipSlot: async () => 132 };
   const { host, refresh } = hostFixture(t, solana, clock); await host.start();
+  const state = structuredClone(transcript.snapshots.get('buyer:awaitReveal'));
+  await host.addTrade({ key: state.offerId, role: 'buyer', state, lifetimeSec: 86400 });
   const oldFinal = deferred(), oldTip = deferred();
   solana.finalizedSlot = () => oldFinal.promise; solana.tipSlot = () => oldTip.promise;
   clock.ms = 101020; const old = refresh();
@@ -61,6 +63,18 @@ test('observation dates are monotonic, independent and cannot be replaced by a s
   solana.finalizedSlot = async () => { throw Error('RPC unavailable'); }; solana.tipSlot = async () => 135;
   await refresh();
   assert.equal(host.slotAt, 102030); assert.equal(host.tipAt, 103040);
+});
+
+test('an idle trader does not poll Solana; a negotiation or a waiting message does', async t => {
+  const clock = { ms: 100010 }; let reads = 0;
+  const solana = { finalizedSlot: async () => { reads++; return 100; }, tipSlot: async () => { reads++; return 132; } };
+  const { host, refresh } = hostFixture(t, solana, clock); await host.start();
+  reads = 0; await refresh(); await refresh();
+  assert.equal(reads, 0);
+  const state = structuredClone(transcript.snapshots.get('buyer:awaitReveal'));
+  await host.addTrade({ key: state.offerId, role: 'buyer', state, lifetimeSec: 86400 });
+  await refresh();
+  assert.equal(reads, 2);
 });
 
 test('deciding-block timeout ticks while the chain request is pending, independently of wall-clock time', async t => {

@@ -2,7 +2,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountBalances, amountUnits, withdrawalDestination, validatePayout, MIN_SOL, MIN_TNK } from './accounting.js';
-import { walletFile } from './setup.js';
+import { walletFile, rpcAdvice } from './setup.js';
 import { SystemProgram } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { calculateFees } from '../solana/escrow.js';
@@ -108,7 +108,7 @@ export class WalletManager {
     let balances = null, balanceError;
     try { await this.recover(); balances = await this.displayBalances(); } catch (e) { balanceError = `Balances unavailable right now: ${e.message}`; }
     const result = { addresses: this.addresses, balances, ...(balanceError ? { balanceError } : {}), minimumFees: { SOL: MIN_SOL, TNK: this.addresses.trac ? MIN_TNK : '0', units: 'base units' },
-      payout: this.config.payout ?? {}, withdrawals: this.pending().map(w => this.publicWithdrawal(w)) };
+      payout: this.config.payout ?? {}, withdrawals: this.pending().map(w => this.publicWithdrawal(w)), ...rpcAdvice(this.config) };
     if (short) return result;
     const bin = fileURLToPath(new URL('../../bin/dex.mjs', import.meta.url));
     const passwordEnv = this.config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD';

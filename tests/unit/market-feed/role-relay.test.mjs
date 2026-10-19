@@ -160,7 +160,7 @@ test('CLI dispatches market-feed without wallet/proof startup and refuses wallet
   const replacements = {
     '/src/net/bridge.js': `export class Bridge { async connect(){return this} async info(){return {info:${JSON.stringify({ role: config.role, servicePeerKey: config.servicePeerKey, networkProfile: profile })}}} on(){} close(){} }`,
     '/src/proof/lockproof.js': `export async function checkProofFiles(){throw Error('unexpected proof startup')} export async function makeLockCertificate(){} export async function verifyLock(){} export async function proveLock(){}`,
-    '/src/wallets/setup.js': `export async function ensureWallets(){throw Error('unexpected wallet startup')} export async function setupWallets(){} export async function exportWallets(){} export function walletFile(){throw Error('unexpected wallet file')}`,
+    '/src/wallets/setup.js': `export async function ensureWallets(){throw Error('unexpected wallet startup')} export async function setupWallets(){} export async function exportWallets(){} export function walletFile(){throw Error('unexpected wallet file')} export function rpcAdvice(){return {}}`,
     '/src/market-feed/runtime.js': `export async function startMarketFeed({config}){if(config.role!=='market-feed') throw Error('wrong role'); return {feed:{identity:{publicKey:'${'ef'.repeat(32)}'}},close:async()=>{}}}`,
   };
   const loader = join(dir, 'loader.mjs');
