@@ -12,19 +12,20 @@ import { registryPair } from '../market/assets.js';
 import { BookView } from '../market/book-feed.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 import { MarketView } from '../market-feed/view.js';
+import { TradeHistory } from '../market-feed/history.js';
 
 const MAIN = 'intercom-dex', OFFERS = 'intercom-dex:offers';
 const viewerInput = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/), name: z.string().min(1).max(256), text: z.string() }).strict();
 
 // Public data only. No trade host, proof worker, chain adapter or wallet is constructed.
 export class MarketFeed {
-  constructor({ bridge, identity, store, serviceKey, profile, now = nowSec, log = () => {} }) {
+  constructor({ bridge, identity, store, serviceKey, profile, now = nowSec, log = () => {}, history = new TradeHistory() }) {
     hexKey.parse(serviceKey); hexKey.parse(identity.publicKey);
-    Object.assign(this, { bridge, identity, store, serviceKey, profile, now, log });
+    Object.assign(this, { bridge, identity, store, serviceKey, profile, now, log, history });
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.verify = publicReceiver(now);
-    this.market = new MarketView({ store, now });
+    this.market = new MarketView({ store, now, history });
     this.books = new BookView();
     this.chat = new MarketChat({ now, chatRelays: profile?.chatRelays ?? [] });
     this.epoch = randomBytes(8).toString('hex'); this.seq = 0; this.messages = [];
@@ -103,6 +104,12 @@ export class MarketFeed {
   }
 
   view() { return this.market.snapshot(this.registry.usable); }
+
+  historyPair(pair) { return registryPair(this.registry.usable, pair, { open: false }); }
+
+  readCandles(query) { this.historyPair(query.pair); return this.history.candles(query); }
+
+  readTrades(query) { return this.history.trades({ ...query, decimals: this.historyPair(query.pair).base.decimals }); }
 
   #line(record) {
     const viewer = record.viewer || record.from === this.identity.publicKey;

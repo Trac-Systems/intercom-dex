@@ -25,6 +25,9 @@ const ACCEPTS = {
 const DONE = { buyer: ['complete', 'refunded'], seller: ['complete', 'aborted', 'lost'], signer: ['published', 'expired', 'aborted'] };
 export const tradeChannel = ref => `intercom-dex:t:${ref}`;
 const MAX_PER_SENDER = 400;
+// A published signer repeats its share on its own at 10, 20, 40 ... 640 seconds and then only answers requests: every
+// repeat costs a fresh work stamp, and a seller that still misses shares asks for them (shareRequest) every 30 s.
+export const PUBLICATION_LAST_DELAY_SEC = 640;
 // What one sender may have waiting in a trade's buffer: a flood from one member never pushes out another's messages.
 const BUFFER_PER_SENDER = 100, BUFFER_BYTES_PER_SENDER = 4_000_000;
 const sizes = new WeakMap();
@@ -121,11 +124,15 @@ export class TradeHost {
     if (resume) { trade.state.stepElapsedMs = 0; trade.state.connectedAtMs = null; }
     this.trades.set(trade.key, trade);
     this.#save(trade);
-    this.#joinChannels(trade).then(() => this.#presence(trade)).catch(e => this.log('join', e.message));
+    // A published signer past its repeat schedule only answers share requests: a restart re-publishes nothing for it
+    // (re-publishing every recent trade at once queued hundreds of work stamps ahead of the heartbeats).
+    const quiet = this.#serving(trade) && ((trade.publicationDelay ?? 10) > PUBLICATION_LAST_DELAY_SEC ||
+      this.now() - (trade.publicationAt ?? 0) >= 2 * PUBLICATION_LAST_DELAY_SEC);
+    this.#joinChannels(trade, { announce: !quiet }).then(() => quiet ? null : this.#presence(trade)).catch(e => this.log('join', e.message));
     if (resume) {
       // Re-issue whatever was outstanding when the process stopped (the state machines know which actions).
       this.log('resumed', trade.key, trade.role, trade.state.phase);
-      if (!isFinished(trade) || this.#serving(trade)) this.deliver(trade.key, { type: 'resume' });
+      if (!quiet && (!isFinished(trade) || this.#serving(trade))) this.deliver(trade.key, { type: 'resume' });
     }
   }
 
@@ -142,7 +149,7 @@ export class TradeHost {
     return refs.map(tradeChannel);
   }
 
-  async #joinChannels(trade) {
+  async #joinChannels(trade, { announce = true } = {}) {
     for (const ch of this.#channels(trade)) {
       if (!this.byChannel.has(ch)) this.byChannel.set(ch, new Set());
       this.byChannel.get(ch).add(trade.key);
@@ -150,7 +157,7 @@ export class TradeHost {
         await this.bridge.join(ch);
         this.joined.add(ch);
       }
-      if (!trade.presentSent.includes(ch)) {
+      if (announce && !trade.presentSent.includes(ch)) {
         trade.presentSent.push(ch);
         await this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false });
       }
@@ -470,8 +477,9 @@ export class TradeHost {
     for (const trade of this.trades.values()) {
       const s = trade.state;
       if (this.#serving(trade)) {
-        if (now - (trade.publicationAt ?? 0) >= (trade.publicationDelay ?? 10)) {
-          trade.publicationAt = now; trade.publicationDelay = Math.min(600, (trade.publicationDelay ?? 10) * 2);
+        const delay = trade.publicationDelay ?? 10;
+        if (delay <= PUBLICATION_LAST_DELAY_SEC && now - (trade.publicationAt ?? 0) >= delay) {
+          trade.publicationAt = now; trade.publicationDelay = delay * 2;
           this.#save(trade); this.#resendAll(trade);
         }
         continue;

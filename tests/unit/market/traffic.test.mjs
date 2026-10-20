@@ -68,3 +68,17 @@ test('full books carry at most 200 remaining amounts; inventory-only changes wai
   const delta = feed.next('TNK/USDC', 1, [], 165, () => ++seq);
   assert.deepEqual(Object.keys(delta.body).sort(), ['pair', 'removes', 'seq', 'upserts']);
 });
+
+test('BookView keeps full per-offer inventory apart from reconstructed deltas and ignores stale full snapshots', () => {
+  const view = new BookView(), o = offer(1);
+  const full = { pair: o.pair, registryVersion: 1, seq: 1, ts: 100, levels: priceLevels([o]), remaining: [{ offerId: o.offerId, amount: '60' }] };
+  view.full(full);
+  view.delta({ pair: o.pair, seq: 1, upserts: [{ side: 'sell', price: '1', baseAmount: '40', offers: 1 }], removes: [] }, 110);
+  assert.deepEqual(view.inventory.get(o.pair).remaining, full.remaining);
+  assert.equal(view.inventory.get(o.pair).ts, 100);
+  assert.equal(view.books.get(o.pair).remaining, undefined);
+  assert.equal(view.full({ ...full, remaining: [] }), false);
+  assert.deepEqual(view.inventory.get(o.pair).remaining, full.remaining);
+  view.full({ ...full, seq: 2, ts: 120, levels: [], remaining: [] });
+  assert.deepEqual(view.inventory.get(o.pair).remaining, []);
+});

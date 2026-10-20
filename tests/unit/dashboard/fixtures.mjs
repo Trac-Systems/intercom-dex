@@ -10,6 +10,7 @@ import { fixture, hex, tracAddress } from '../core/helpers.mjs';
 import { encodeKey } from '../../../src/core/keys.js';
 import { accountBalances } from '../../../src/wallets/accounting.js';
 import { offerIdOf } from '../../../src/roles/common.js';
+import { availableOffer } from '../../../src/market/book.js';
 
 export const SECRETS = { entropy: 'e1'.repeat(32), nonce: 'a7'.repeat(32), secretHex: '5e'.repeat(32), share: '4f'.repeat(32) };
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -68,7 +69,7 @@ export function traderFixture({ now = nowSec() } = {}) {
   const calls = [];
   const role = {
     me, identity: { publicKey: me.dexKey }, serviceKey: encodeKey(f.service.publicKey), store,
-    offers: new Map([...theirs, mine].map(o => [o.offerId, { offer: o, from: o.maker.dexKey }])), mine: new Map([[mine.offerId, mine]]),
+    offers: new Map([...theirs, mine].map(o => [o.offerId, { offer: o, from: o.maker.dexKey, firstSeen: now - 10, lastSeen: now }])), mine: new Map([[mine.offerId, mine]]),
     host: { trades }, registry: { usable: f.registry, current: f.registry, conflict: null, snapshot: () => f.registry },
     book: new Map([['TNK/USDC', { pair: 'TNK/USDC', registryVersion: 1, seq: 4, ts: now - 3, levels: [
       { side: 'sell', price: '0.42', baseAmount: '5000000000000000000', offers: 1 }, { side: 'sell', price: '0.44', baseAmount: '10000000000000000000', offers: 1 },
@@ -77,6 +78,12 @@ export function traderFixture({ now = nowSec() } = {}) {
     status() {
       return { software: '0.1.0', updateRequired: false, registryConflict: null, registryVersion: 1, signersOnline: f.registry.signers.slice(0, 4).map(s => s.dexKey),
         mine: [...this.mine.values()].map(o => ({ ...o, available: '9000000000000000000', reserved: '1000000000000000000', filled: '0' })) };
+    },
+    availableOffer(id) {
+      const seen = this.offers.get(id);
+      if (!seen || seen.offer.maker.dexKey === this.me.dexKey) return null;
+      const book = this.book.get(seen.offer.pair);
+      return availableOffer(seen, book, this.bookView?.inventory.get(seen.offer.pair) ?? book, nowSec());
     },
     calls,
     async makeOffer(input) { calls.push(['offer', input]); return input; },

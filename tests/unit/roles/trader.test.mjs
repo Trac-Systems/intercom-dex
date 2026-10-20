@@ -16,6 +16,7 @@ import { fixture, tracAddress, SOL, SOL2, MINT } from '../core/helpers.mjs';
 import { SIGNER_ONLINE_SEC, DECLINES_PER_MINUTE } from '../../../src/roles/trader.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
+import { controlHandler } from '../../../src/roles/control.js';
 
 const OFFERS = 'intercom-dex:offers';
 
@@ -425,7 +426,7 @@ test('maker reannounces at 120 seconds; traders rebuild service books but still 
   await channelPost(traderRole, bridge, service, 'book', full, 'intercom-dex'); assert.equal(traderRole.book.size, 1);
   await channelPost(traderRole, bridge, service, 'bookDelta', { pair: o.pair, seq: 7, removes: [], upserts: [{ side: 'sell', price: '1', baseAmount: '200', offers: 2 }] }, 'intercom-dex');
   assert.equal(traderRole.status().book[o.pair].levels[0].baseAmount, '200');
-  await assert.rejects(traderRole.takeOffer(random32(), '100', '1'), /Unknown offer/);
+  await assert.rejects(traderRole.takeOffer(random32(), '100', '1'), /no longer announced by its maker/);
   await traderRole.cancelOffer(o.offerId); const count = bridge.sent.length;
   timers.find(x => x.ms === 120000).fn(); await new Promise(r => setImmediate(r)); assert.equal(bridge.sent.length, count);
 });
@@ -457,4 +458,106 @@ test('trader pushes cached relay keys on restart and replaces them after a signe
   assert.deepEqual(restarted.bridge.relays, [reg.serviceRelayKey]);
   await channelPost(restarted.t, restarted.bridge, party(), 'registry', { ...next, version: 3, serviceRelayKey: random32() }, 'intercom-dex');
   assert.deepEqual(restarted.bridge.relays, [reg.serviceRelayKey]);
+});
+
+test('verified announcements refresh lastSeen; status and takes expire at 300 seconds and reannouncement restores them', async ctx => {
+  let ms = Date.now(); ctx.mock.method(Date, 'now', () => ms);
+  const { registry } = fixture(), alice = party(), bob = party();
+  const { t: maker } = await trader(alice, { registry }), { t: taker, bridge } = await trader(bob, { registry });
+  const offer = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', offer);
+  const first = taker.offers.get(offer.offerId).firstSeen;
+  assert.equal(taker.offers.get(offer.offerId).lastSeen, first);
+  ms += 290000; await post(bridge, alice, 'offer', offer);
+  assert.equal(taker.offers.get(offer.offerId).firstSeen, first);
+  assert.equal(taker.offers.get(offer.offerId).lastSeen, first + 290);
+  const ch = OFFERS, forged = seal({ kind: 'offer', ch, body: offer }, alice.identity.secretKey, { ts: nowSec(), nonce: random32() });
+  forged.sig = '00'.repeat(64);
+  ms += 299000; bridge.emit('message', ch, forged); await new Promise(r => setImmediate(r));
+  assert.equal(taker.status().offers.length, 1);
+  ms += 1000;
+  const sent = bridge.sent.length;
+  await assert.rejects(taker.takeOffer(offer.offerId, undefined, '1'), /This offer is no longer announced by its maker\./);
+  assert.equal(taker.offers.has(offer.offerId), false); assert.equal(taker.status().offers.length, 0);
+  assert.equal(taker.host.trades.size, 0); assert.equal(bridge.sent.length, sent);
+  await post(bridge, alice, 'offer', offer); assert.equal(taker.status().offers.length, 1);
+  await assert.rejects(maker.takeOffer(offer.offerId, undefined, '1'), /Own offer/);
+  assert.equal(maker.status().offers.length, 0, 'own offers have their separate mine list');
+  assert.equal(maker.status().mine.length, 1);
+});
+
+test('full-book remainder survives deltas, limits takes and disappears from control/MCP status when gone', async () => {
+  const { registry } = fixture(), alice = party(), service = party();
+  const { t: maker } = await trader(alice, { registry });
+  const { t: taker, bridge } = await trader(party(), { registry, serviceKey: service.me.dexKey });
+  const offer = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', offer);
+  const ts = nowSec(), remainder = '500000000000000000';
+  const full = { pair: offer.pair, registryVersion: 1, seq: 10, ts, levels: [{ side: 'sell', price: '1', baseAmount: remainder, offers: 1 }],
+    remaining: [{ offerId: offer.offerId, amount: remainder }] };
+  await channelPost(taker, bridge, service, 'book', full, 'intercom-dex');
+  assert.equal(taker.status().offers[0].baseAmount, remainder);
+  assert.equal(taker.offers.get(offer.offerId).offer.baseAmount, offer.baseAmount, 'maker-signed amount is immutable');
+  await assert.rejects(taker.takeOffer(offer.offerId, offer.baseAmount, '1'), /offer size/);
+  assert.equal((await taker.takeOffer(offer.offerId, undefined, '1')).baseAmount, remainder);
+  taker.bookView.delta({ pair: offer.pair, seq: 10, upserts: [{ side: 'sell', price: '1', baseAmount: '300000000000000000', offers: 1 }], removes: [] }, ts + 1);
+  assert.equal(taker.book.get(offer.pair).remaining, undefined, 'deltas keep their protocol shape');
+  assert.equal(taker.status().offers[0].baseAmount, '300000000000000000');
+  taker.bookView.delta({ pair: offer.pair, seq: 10, upserts: [], removes: [{ side: 'sell', price: '1' }] }, ts + 2);
+  assert.deepEqual(taker.status().offers, []);
+  await assert.rejects(taker.takeOffer(offer.offerId, '1', '1'), /no longer announced/);
+  await channelPost(taker, bridge, service, 'book', { ...full, seq: 11, ts: ts + 3, levels: [], remaining: [] }, 'intercom-dex');
+  await post(bridge, alice, 'offer', offer);
+  assert.deepEqual(taker.status().offers, [], 'reannouncing the original signed amount cannot undo a known fill');
+});
+
+test('freshness and size are checked again after a slow wallet check, before a trade starts', async () => {
+  const { registry } = fixture(), alice = party(), { t: maker } = await trader(alice, { registry });
+  const { t: taker, bridge } = await trader(party(), { registry });
+  const offer = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', offer);
+  taker.wallets = { exclusive: fn => fn(), requireFunds: async () => { taker.offers.get(offer.offerId).lastSeen -= 300; } };
+  await assert.rejects(taker.takeOffer(offer.offerId, undefined, '1'), /no longer announced/);
+  assert.equal(taker.host.trades.size, 0);
+  assert.ok(!bridge.sent.some(m => m.envelope.kind === 'take'));
+});
+
+test('the regular announcement timer prunes other makers without removing own persisted offers', async ctx => {
+  const timers = []; ctx.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  ctx.mock.method(globalThis, 'clearInterval', () => {});
+  const { registry } = fixture(), alice = party(), { t: maker } = await trader(alice, { registry });
+  const { t: taker, bridge } = await trader(party(), { registry });
+  const offer = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  const own = await taker.makeOffer({ pair: 'TNK/USDC', side: 'buy', baseAmount: '1000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', offer);
+  taker.offers.get(offer.offerId).lastSeen -= 300;
+  timers.filter(t => t.ms === 120000).at(-1).fn(); await new Promise(r => setImmediate(r));
+  assert.equal(taker.offers.has(offer.offerId), false);
+  assert.ok(taker.mine.has(own.offerId)); assert.ok(taker.store.get('offer-' + own.offerId));
+});
+
+test('the HTTP status and take paths used by MCP share the trader freshness and remaining-size rules', async () => {
+  const { registry } = fixture(), alice = party(), { t: maker } = await trader(alice, { registry });
+  const { t: taker, bridge } = await trader(party(), { registry });
+  const offer = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', offer);
+  const handler = controlHandler({ token: 'unit-test', role: taker });
+  const call = (method, url, body) => new Promise(resolve => {
+    const req = Object.assign(new EventEmitter(), { method, url, headers: { authorization: 'Bearer unit-test' } });
+    let status;
+    handler(req, { writeHead: code => { status = code; }, end: data => resolve({ status, value: JSON.parse(data) }) });
+    if (body) req.emit('data', JSON.stringify(body));
+    req.emit('end');
+  });
+  const pair = offer.pair, remainder = '500000000000000000';
+  taker.bookView.full({ pair, registryVersion: 1, seq: 1, ts: nowSec(), levels: [{ side: 'sell', price: '1', baseAmount: remainder, offers: 1 }],
+    remaining: [{ offerId: offer.offerId, amount: remainder }] });
+  assert.equal((await call('GET', '/status')).value.offers[0].baseAmount, remainder);
+  const tooMuch = await call('POST', '/take', { offerId: offer.offerId, price: '1', baseAmount: offer.baseAmount });
+  assert.equal(tooMuch.status, 400); assert.match(tooMuch.value.error, /offer size/);
+  taker.offers.get(offer.offerId).lastSeen -= 300;
+  assert.deepEqual((await call('GET', '/status')).value.offers, []);
+  const stale = await call('POST', '/take', { offerId: offer.offerId, price: '1' });
+  assert.deepEqual(stale, { status: 400, value: { error: 'This offer is no longer announced by its maker.' } });
+  assert.equal(taker.host.trades.size, 0);
 });

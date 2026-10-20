@@ -105,7 +105,8 @@ test('wallet-free runtime opens only its identity keyring and public record stor
   const options = { config, profile: { chatRelays: [] }, bridge: new FakeBridge(), password: randomBytes(32).toString('hex') };
   const runtime = await startMarketFeed(options); t.after(() => runtime.close());
   const identity = runtime.feed.identity.publicKey;
-  assert.deepEqual(readdirSync(dir).sort(), ['keyring.json', 'records', 'viewer.token']);
+  assert.deepEqual(readdirSync(dir).sort(), ['keyring.json', 'market-history', 'market-history.lock', 'records', 'viewer.token']);
+  await assert.rejects(startMarketFeed({ ...options, bridge: new FakeBridge() }), /locked/);
   assert.equal(runtime.feed.wallet, undefined); assert.equal(runtime.server.address().address, '127.0.0.1');
   await runtime.close(); assert.equal(runtime.server.listening, false);
   const restarted = await startMarketFeed({ ...options, bridge: new FakeBridge() }); t.after(() => restarted.close());

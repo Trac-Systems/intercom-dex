@@ -18,13 +18,13 @@ const rules = [
   ['private hostname', /\b(?:[a-z0-9-]+\.)+(?:interna[l]|loca[l]|la[n])\b(?!\.[a-z])/i],
 ];
 const publicHosts = new Set([
-  'nodejs.org', 'github.com', 'explorer.solana.com', 'circom.info',
+  'nodejs.org', 'github.com', 'explorer.solana.com', 'circom.info', 'www.tradingview.com', 'reset.much.fun', 'www.apache.org', 'www.w3.org',
   'api.mainnet-beta.solana.com', 'public.rpc.solanavibestation.com', 'solana.api.pocket.network',
   'solana.leorpc.com', 'rpc.solanatracker.io', 'solana-rpc.publicnode.com',
   ['reset', 'open' + 'mayhem', 'ai'].join('.'),
 ]);
 const bootstrapIPs = [[116, 202, 214, 149], [157, 180, 12, 214]].map(parts => parts.join('.'));
-const localIP = ip => ip === '127.0.0.1' || ip === '0.0.0.0' || /^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.\d+$/.test(ip);
+const localIP = ip => /^127\.\d+\.\d+\.\d+$/.test(ip) || ip === '0.0.0.0' || /^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.\d+$/.test(ip);
 const excluded = file => /(^|\/)package-lock\.json$/.test(file) || file.startsWith('peer/vendor/reset/');
 const privateFile = file => /(^|\/)(?:node_modules|\.test-tmp|\.local|data|dex-data|peer-data|logs|\.idea|\.vscode)(\/|$)|(?:\.log|\.sw[op]|~)$|(^|\/)\.DS_Store$/i.test(file);
 

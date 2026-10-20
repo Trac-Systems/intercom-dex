@@ -6,6 +6,7 @@ import { TradeHost, tradeChannel, isFinished } from './host.js';
 import { RegistryView, buildDraft, publicReceiver, nowSec, random32, offerIdOf, validOffer } from './common.js';
 import { quoteAmount, registryPair, pairStatus } from '../market/assets.js';
 import { BookView } from '../market/book-feed.js';
+import { freshOffer, availableOffer, STALE_OFFER_MESSAGE } from '../market/book.js';
 import { RegistryRelays } from '../net/relays.js';
 import { CertificatePool } from './certificate-pool.js';
 import { SOFTWARE, meetsVersion } from '../core/software.js';
@@ -41,7 +42,7 @@ export class Trader {
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.receive = publicReceiver();
-    this.offers = new Map();     // all signed offers seen: offerId -> {offer, from}
+    this.offers = new Map();     // offerId -> {offer, from, firstSeen, lastSeen}
     this.mine = new Map();       // own active offers: offerId -> offer (sizes come from the trades, see #inventory)
     this.bookView = new BookView();
     this.book = this.bookView.books;       // pair -> latest service book
@@ -61,7 +62,7 @@ export class Trader {
     await this.#restoreOffers();
     this.#pruneDeclines();
     this.reannounce = setInterval(() => {
-      try { this.#pruneDeclines(); } catch (e) { this.log('decline markers', e.message); }
+      try { this.#pruneDeclines(); this.pruneOffers(); } catch (e) { this.log('prune', e.message); }
       this.#reannounce().catch(e => this.log('offer announce', e.message));
     }, 120000);
     this.certificates.start();
@@ -135,7 +136,11 @@ export class Trader {
       }
     } else if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from)) {
       try { this.#newPair(m.body.pair, m.body.registryVersion, m.body.software); } catch { return; }
-      if (m.body.expiresAt > nowSec()) this.offers.set(m.body.offerId, { offer: m.body, from: m.from });
+      const now = nowSec();
+      this.pruneOffers(now);
+      if (m.body.expiresAt > now) this.offers.set(m.body.offerId, {
+        offer: m.body, from: m.from, firstSeen: this.offers.get(m.body.offerId)?.firstSeen ?? now, lastSeen: now,
+      });
     } else if (channel === OFFERS && m.kind === 'cancel') {
       if (this.offers.get(m.body.offerId)?.from === m.from) this.offers.delete(m.body.offerId);
     } else if (channel.startsWith('intercom-dex:t:') && m.kind === 'take') {
@@ -214,7 +219,7 @@ export class Trader {
     this.mine.set(offer.offerId, offer);
     await this.bridge.join(tradeChannel(offer.offerId));
     await this.host.sendPublic(OFFERS, 'offer', offer);
-    this.offers.set(offer.offerId, { offer, from: this.identity.publicKey });
+    this.offers.set(offer.offerId, { offer, from: this.identity.publicKey, firstSeen: nowSec(), lastSeen: nowSec() });
     return offer;
   }
 
@@ -235,7 +240,7 @@ export class Trader {
       if (!rec?.offer || rec.cancelled || rec.offer.expiresAt <= now || rec.offer.maker.dexKey !== this.identity.publicKey) continue;
       if (rec.offer.offerId !== offerIdOf(rec.offer) || this.#inventory(rec.offer).filled >= BigInt(rec.offer.baseAmount)) continue;
       this.mine.set(rec.offer.offerId, rec.offer);
-      this.offers.set(rec.offer.offerId, { offer: rec.offer, from: this.identity.publicKey });
+      this.offers.set(rec.offer.offerId, { offer: rec.offer, from: this.identity.publicKey, firstSeen: now, lastSeen: now });
       await this.bridge.join(tradeChannel(rec.offer.offerId));
       this.log('offer restored', rec.offer.offerId.slice(0, 12));
     }
@@ -261,8 +266,23 @@ export class Trader {
       const inv = this.#inventory(offer);
       if (offer.expiresAt <= now || inv.filled >= BigInt(offer.baseAmount)) { this.mine.delete(id); continue; }
       try { this.#newPair(offer.pair, offer.registryVersion, offer.software); } catch { continue; }
-      if (inv.available > 0n) await this.host.sendPublic(OFFERS, 'offer', offer);
+      if (inv.available > 0n) {
+        await this.host.sendPublic(OFFERS, 'offer', offer);
+        this.offers.set(id, { offer, from: this.identity.publicKey, firstSeen: this.offers.get(id)?.firstSeen ?? now, lastSeen: nowSec() });
+      }
     }
+  }
+
+  pruneOffers(now = nowSec()) {
+    for (const [id, seen] of this.offers) if (!freshOffer(seen, now)) this.offers.delete(id);
+  }
+
+  availableOffer(offerId, now = nowSec()) {
+    const seen = this.offers.get(offerId);
+    if (!freshOffer(seen, now)) { this.offers.delete(offerId); return null; }
+    if (seen.offer.maker.dexKey === this.me.dexKey) return null;
+    const pair = seen.offer.pair;
+    return availableOffer(seen, this.book.get(pair), this.bookView.inventory.get(pair) ?? this.book.get(pair), now);
   }
 
   // Taker side. `price` is the price the caller saw; the take only starts when the offer has exactly that price.
@@ -272,11 +292,13 @@ export class Trader {
 
   async #takeOffer(offerId, baseAmount, price) {
     const seen = this.offers.get(offerId), reg = seen && this.registry.snapshot(seen.offer.registryVersion), now = nowSec();
-    if (!seen) throw new Error('Unknown offer');
+    if (!seen) throw new Error(STALE_OFFER_MESSAGE);
+    if (seen.offer.maker.dexKey === this.identity.publicKey) throw new Error('Own offer');
+    const offer = this.availableOffer(offerId, now);
+    if (!offer) throw new Error(STALE_OFFER_MESSAGE);
     if (!reg) throw new Error(this.registry.conflict ? 'The venue published two different registries; trading is paused' : 'No registry yet');
-    const offer = seen.offer, amount = String(baseAmount ?? offer.baseAmount);
+    const amount = String(baseAmount ?? offer.baseAmount);
     const pair = this.#newPair(offer.pair, offer.registryVersion, offer.software);
-    if (offer.maker.dexKey === this.identity.publicKey) throw new Error('Own offer');
     if (price === undefined || String(price) !== offer.price) throw new Error(`Offer price is ${offer.price}, not ${price}`);
     if (offer.expiresAt <= now + 60) throw new Error('Offer expires too soon');
     if (!/^[1-9][0-9]*$/.test(amount) || BigInt(amount) > BigInt(offer.baseAmount)) throw new Error('Amount must be 1 to the offer size in base units');
@@ -288,6 +310,9 @@ export class Trader {
     if (this.profile) checkProfileTerms(draft, this.profile);
     const role = offer.side === 'sell' ? 'buyer' : 'seller';
     if (this.wallets) await this.wallets.requireFunds({ role, ...draft });
+    const current = this.availableOffer(offerId);
+    if (!current) throw new Error(STALE_OFFER_MESSAGE);
+    if (BigInt(amount) > BigInt(current.baseAmount)) throw new Error('Amount must be 1 to the offer size in base units');
     const create = role === 'seller' ? createSeller : createBuyer;
     const state = create({ mode: 'taker', offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now });
     const key = `${offerId}-${random32()}`;
@@ -373,13 +398,14 @@ export class Trader {
   }
 
   status() {
+    this.pruneOffers();
     return {
       software: SOFTWARE, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '',
       pairs: pairStatus(this.registry.usable), serviceStatus: this.serviceStatus ?? null,
       me: this.me, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       signersOnline: this.onlineSigners(), certificatesReady: this.certificates.available().length,
-      offers: [...this.offers.values()].map(o => o.offer),
+      offers: [...this.offers.keys()].map(id => this.availableOffer(id)).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
         return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString() }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,

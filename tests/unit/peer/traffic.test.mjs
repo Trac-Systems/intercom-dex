@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import sodium from '../../../peer/node_modules/sodium-universal/index.js';
+import { powWorker } from '../../../peer/features/sidechannel/pow-client.js';
 import Sidechannel from '../../../peer/features/sidechannel/index.js';
 import { registerHooks } from 'node:module';
 const loader = registerHooks({ resolve(specifier, context, next) {
@@ -77,7 +77,8 @@ test('peer answers another bridge request while nonce search is running', async 
   const client = { authed: true };
   // Force two chunks without relying on a lucky/unlucky random proof.
   let answered = false;
-  t.mock.method(sodium, 'crypto_hash_sha256_final', (_state, out) => out.fill(answered ? 0 : 255));
+  const slice = powWorker.slice.bind(powWorker);
+  t.mock.method(powWorker, 'slice', job => answered ? slice(job) : Promise.resolve({ nonce: -1 }));
   const payload = { channel: 'test', id: 'test', from: null, origin: null, ts: Date.now(), message: {} };
   let working = true;
   const promise = sc._attachPow(payload).finally(() => { working = false; });
@@ -106,12 +107,12 @@ test('prefix-state hashing preserves the canonical proof across UTF-8 and SHA-25
 test('safety and negotiation stamps interrupt running background work, overtake queued announcements and declines, and retain valid proofs', async t => {
   const policy = dexTransport({ role: 'trader', servicePeerKey: 'a'.repeat(64) }).sidechannel;
   const sc = new Sidechannel({ wallet: wallet() }, { ...policy, powDifficulty: 4 });
-  const final = sodium.crypto_hash_sha256_final;
+  const slice = powWorker.slice.bind(powWorker);
   let held = true, attempts = 0, now = 100000;
   sc._now = () => now;
-  t.mock.method(sodium, 'crypto_hash_sha256_final', (state, out) => {
+  t.mock.method(powWorker, 'slice', job => {
     attempts++;
-    if (held) out.fill(255); else final(state, out);
+    return held ? Promise.resolve({ nonce: -1 }) : slice(job);
   });
   const order = [], stamp = (ch, kind) => sc._stampedPayload(ch, { kind }).then(p => { order.push(kind); return p; });
   const background = stamp('intercom-dex:offers', 'offer');
@@ -172,10 +173,10 @@ test('a stranger take flood above the stamping rate does not delay transferSent 
 
 test('the stamp cache never drops a pending stamp; re-sends share it and expire only after it finished', async t => {
   const sc = new Sidechannel({ wallet: wallet() }, { powEnabled: true, powDifficulty: 4 });
-  const final = sodium.crypto_hash_sha256_final;
+  const slice = powWorker.slice.bind(powWorker);
   let held = true, now = 100000;
   sc._now = () => now;
-  t.mock.method(sodium, 'crypto_hash_sha256_final', (state, out) => { if (held) out.fill(255); else final(state, out); });
+  t.mock.method(powWorker, 'slice', job => held ? Promise.resolve({ nonce: -1 }) : slice(job));
   const work = t.mock.method(sc, '_attachPow', sc._attachPow.bind(sc));
   const first = sc._stampedPayload('test', { kind: 'transferSent' });
   await new Promise(resolve => setTimeout(resolve, 0));

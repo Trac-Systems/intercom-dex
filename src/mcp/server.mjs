@@ -64,7 +64,7 @@ registerWalletTools(server, call);
 registerChatTools(server, call);
 server.registerTool('dex_status', { description: 'This trader: addresses, own offers, trades, registry pairs and update required status' },
   async () => text(await call('GET', '/status')));
-server.registerTool('dex_book', { description: 'Reconstructed best 50 price levels per side, 24 h ticker, and separately verified maker offers for a pair', inputSchema: { pair } },
+server.registerTool('dex_book', { description: 'Reconstructed best 50 price levels per side, 24 h ticker, and fresh other-maker offers with venue remaining sizes for a pair', inputSchema: { pair } },
   async ({ pair: p }) => { const s = await call('GET', '/status'); return text({ book: s.book[p] ?? null, ticker: s.tickers[p] ?? null, offers: s.offers.filter(o => o.pair === p) }); });
 server.registerTool('dex_offer', { description: 'Post an offer. side sell = sell the base asset for USDC; price = USDC per whole base token',
   inputSchema: { pair, side: z.enum(['buy', 'sell']), baseAmount: units, price: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,12})?$/), ttlSec: z.number().int().min(60).max(86400).optional() } },

@@ -33,7 +33,7 @@ const boundedJson = (limit, charge) => ({
   }
 });
 import crypto from 'crypto';
-import sodium from 'sodium-universal';
+import { powWorker } from './pow-client.js';
 import PeerWallet from 'trac-wallet';
 
 // Join topics must be deterministic and collision-resistant.
@@ -624,32 +624,17 @@ class Sidechannel extends Feature {
     if (!this._powRequired(payload?.channel ?? '')) return;
     const difficulty = this.powDifficulty, level = this._powClass(payload.message);
     const urgent = () => this.powPending.findIndex((n, i) => i < level && n > 0);
-    const base = b4a.alloc(sodium.crypto_hash_sha256_STATEBYTES), state = b4a.alloc(base.length), hash = b4a.alloc(32);
-    // Only the nonce and suffix change. Copying the prefix state preserves the exact wire hash.
-    let suffix;
-    const prepare = () => {
-      const parts = this._powParts(payload); suffix = parts[1];
-      sodium.crypto_hash_sha256_init(base);
-      sodium.crypto_hash_sha256_update(base, b4a.from(parts[0]));
-    };
-    prepare();
-    let nonce = 0;
-    for (;;) {
-      // A more urgent stamp interrupts this one at the next eight-millisecond yield.
-      for (let i = urgent(); i >= 0; i = urgent()) await this.powQueues[i];
-      if (this._now() - payload.ts >= 30000) { payload.ts = this._now(); nonce = 0; prepare(); }
-      const until = Date.now() + 8;
-      do {
-        b4a.copy(base, state);
-        sodium.crypto_hash_sha256_update(state, b4a.from(nonce + suffix));
-        sodium.crypto_hash_sha256_final(state, hash);
-        if (countLeadingZeroBits(hash) >= difficulty) {
-          payload.pow = { nonce, difficulty }; return;
-        }
-        nonce++;
-      } while (nonce % 256 !== 0 || Date.now() < until);
-      await new Promise(resolve => setTimeout(resolve, 0));
-    }
+    const job = await powWorker.open(...this._powParts(payload), difficulty);
+    try {
+      for (;;) {
+        // A more urgent stamp interrupts this one at the next eight-millisecond yield.
+        for (let i = urgent(); i >= 0; i = urgent()) await this.powQueues[i];
+        if (this._now() - payload.ts >= 30000) { payload.ts = this._now(); powWorker.prepare(job, ...this._powParts(payload), difficulty); }
+        const { nonce } = await powWorker.slice(job);
+        if (nonce >= 0) { payload.pow = { nonce, difficulty }; return; }
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } finally { powWorker.release(job); }
   }
 
   // Cache by content, including channel and invite. Concurrent sends share one stamp. A finished stamp is reused for

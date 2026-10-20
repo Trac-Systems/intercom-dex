@@ -11,6 +11,7 @@ import { fixture, hex, SIG } from '../core/helpers.mjs';
 import { seal } from '../../../src/core/envelope.js';
 import { generateIdentity, encodeKey } from '../../../src/core/keys.js';
 import { offerIdOf } from '../../../src/roles/common.js';
+import { HEARTBEAT_MS } from '../../../src/roles/signer.js';
 
 test('500 offers, 20 signers and 200 refund-window trades stay under 32 KB/s, including repair traffic', async () => {
   const sim = simulation(), f = sim.f, now = 1780000000, transportKey = generateIdentity();
@@ -45,7 +46,7 @@ test('500 offers, 20 signers and 200 refund-window trades stay under 32 KB/s, in
   perSecond['intercom-dex'] += bytes(await payload('intercom-dex', 'status', { software: '0.1.0', ts: now, status: 'online', message: '' }, f.service)) / 30;
   for (const pair of ['TNK/USDC', 'RESET/USDC']) perSecond['intercom-dex'] += bytes(await payload('intercom-dex', 'ticker', {
     registryVersion: 1, pair, ts: now, last: '1', volume24h: '1000000000000000000', high24h: '2', low24h: '1', trades24h: 200 }, f.service)) / 30;
-  perSecond['intercom-dex:signers'] += 20 * bytes(await payload('intercom-dex:signers', 'heartbeat', { registryVersion: 1, software: '0.1.0', status: 'online', holdCount: 50 }, sim.nodes.get('signer1').identity)) / 30;
+  perSecond['intercom-dex:signers'] += 20 * bytes(await payload('intercom-dex:signers', 'heartbeat', { registryVersion: 1, software: '0.1.0', status: 'online', holdCount: 50 }, sim.nodes.get('signer1').identity)) / (HEARTBEAT_MS / 1000);
   const publications = sim.log.filter(x => x.action.type === 'publishShare');
   for (const { name, action } of publications) perSecond['intercom-dex:signers'] += 200 * bytes(await payload('intercom-dex:signers', 'sharePublish', action.body, sim.nodes.get(name).identity)) / 600;
   const steady = Object.fromEntries(Object.entries(perSecond).map(([ch, n]) => [ch, Math.round(n * 100) / 100]));

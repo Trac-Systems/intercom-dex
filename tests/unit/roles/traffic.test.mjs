@@ -28,19 +28,19 @@ async function host(t, role, state, identity) {
   return { h, tr, clock, sent, tick, receive, records };
 }
 
-test('published signer repeats only publications at 10,20,40 seconds to 600 cap, persists schedule and stops at refund', async t => {
+test('published signer repeats only publications at 10,20,40 ... 640 seconds, persists schedule, then only answers requests', async t => {
   const node = sim.nodes.get('signer1'), f = await host(t, 'signer', node.state, node.identity);
   const pub = sim.log.find(x => x.name === 'signer1' && x.action.type === 'publishShare').action;
   for (const ch of pub.channels) f.tr.outbox[ch] = [seal({ kind: 'ack', ch, body: { tradeId: node.state.tradeId, H: pub.body.H, holdUntil: node.state.terms.refundAfter } }, node.identity.secretKey, { ts: f.clock.now, nonce: hex() }),
     seal({ kind: 'sharePublish', ch, body: pub.body }, node.identity.secretKey, { ts: f.clock.now, nonce: hex() })];
   f.tr.publicationAt = f.clock.now; f.tr.publicationDelay = 10;
-  for (const delay of [10, 20, 40, 80, 160, 320, 600, 600]) {
+  for (const delay of [10, 20, 40, 80, 160, 320, 640]) {
     const n = f.sent.length; await f.tick(delay - 1); assert.equal(f.sent.length, n);
     await f.tick(1); assert.equal(f.sent.length, n + 2);
     assert.ok(f.sent.every(x => x.envelope.kind === 'sharePublish'));
   }
-  assert.equal(f.records.get('trade-trade').publicationDelay, 600);
-  const count = f.sent.length; f.clock.now = node.state.terms.refundAfter; await f.tick(0); assert.equal(f.sent.length, count);
+  assert.equal(f.records.get('trade-trade').publicationDelay, 1280);
+  const count = f.sent.length; await f.tick(86400); assert.equal(f.sent.length, count);
 });
 
 test('publication recovery authenticates seller/service, rate limits each requester and does not exhaust the ordinary message cap', async t => {
@@ -70,4 +70,31 @@ test('seller requests missing valid shares every thirty seconds, stops at k or r
   await f.tick(20); assert.equal(f.sent.filter(x => x.envelope.kind === 'shareRequest').length, 2);
   f.tr.state.shares = Array.from({ length: state.terms.k }, (_, i) => ({ id: i + 1, share: hex() }));
   await f.tick(30); assert.equal(f.sent.filter(x => x.envelope.kind === 'shareRequest').length, 2);
+});
+
+test('a restarted signer re-publishes only trades still inside the repeat schedule, and still answers requests', async t => {
+  const node = sim.nodes.get('signer1'), pub = sim.log.find(x => x.name === 'signer1' && x.action.type === 'publishShare').action;
+  const published = sim.state('signer1');
+  for (const [delay, ago, expectSends] of [[1280, 5000, false], [600, 1300, false], [640, 600, true]]) {
+    const timers = [], sent = [], records = new Map(), clock = { now: published.now };
+    t.mock.method(globalThis, 'setInterval', fn => { timers.push(fn); return timers.length; });
+    const outbox = Object.fromEntries(pub.channels.map(ch => [ch, [seal({ kind: 'sharePublish', ch, body: pub.body }, node.identity.secretKey, { ts: clock.now, nonce: hex() })]]));
+    records.set('trade-trade', { key: 'trade', role: 'signer', state: structuredClone(published), lifetimeSec: 172800 + 3600, outbox, raw: [], buffer: [],
+      publicationAt: clock.now - ago, publicationDelay: delay });
+    const bridge = new EventEmitter(); bridge.join = async () => {}; bridge.send = async (ch, envelope) => sent.push({ ch, envelope });
+    const store = { list: p => [...records.keys()].filter(k => k.startsWith(p)), get: k => records.get(k), put: (k, v) => records.set(k, structuredClone(v)) };
+    const h = new TradeHost({ bridge, store, identity: { secretKey: node.identity.secretKey, publicKey: encodeKey(node.identity.publicKey) },
+      serviceKey: encodeKey(sim.f.service.publicKey), now: () => clock.now });
+    await h.start();
+    const tr = h.trades.get('trade');
+    for (let i = 0; i < 5; i++) { await tr.queue; await new Promise(r => setImmediate(r)); }
+    assert.equal(sent.length > 0, expectSends, `delay ${delay}: ${sent.map(x => x.envelope.kind)}`);
+    if (!expectSends) {
+      bridge.emit('message', tradeChannel(published.tradeId), seal({ kind: 'shareRequest', ch: tradeChannel(published.tradeId), body: { tradeId: published.tradeId } },
+        sim.f.seller.secretKey, { ts: clock.now, nonce: hex() }));
+      for (let i = 0; i < 5; i++) { await tr.queue; await new Promise(r => setImmediate(r)); }
+      assert.ok(sent.some(x => x.envelope.kind === 'sharePublish'), 'a share request is still answered');
+    }
+    h.stop(); t.mock.restoreAll();
+  }
 });

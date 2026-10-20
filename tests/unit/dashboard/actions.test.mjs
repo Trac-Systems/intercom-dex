@@ -81,7 +81,7 @@ test('take: shows the USDC locked (with fees) or the tokens sent, then calls tak
   assert.deepEqual(fx.role.calls[0], ['take', [sell.offerId, '2000000000000000000', '0.42']]);
   assert.deepEqual(p.lines, [['You lock', '0.84504 USDC (includes fees)'], ['You receive', '2 TNK']]);
   const s = await startFor(t, traderFixture()), post = input => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action: 'take', input } });
-  assert.match((await post({ offerId: hex() })).json().error, /no longer in the book/);
+  assert.match((await post({ offerId: hex() })).json().error, /no longer announced by its maker/);
   const fx2 = traderFixture(), s2 = await startFor(t, fx2);
   const buy = (await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId } } })).json();
   assert.deepEqual(buy.lines, [['You send', '8 TNK'], ['You receive', '3.12 USDC']]);
@@ -164,4 +164,25 @@ test('Service.markPaid records only final, unpaid credits for that signer, all o
   const again = make();
   assert.deepEqual(again.payouts[a].map(p => [p.tradeId, p.paid]).sort(), [[t1, true], [t2, true], [t3, false]].sort());
   assert.ok(again.payouts[b].every(p => !p.paid), 'another signer’s credit on the same trade stays unpaid');
+});
+
+test('take previews reject stale, expired, own and removed offers and default to the remaining amount', async t => {
+  const fx = traderFixture(), s = await startFor(t, fx), offer = fx.theirs[0];
+  const preview = (id, amount) => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie,
+    body: { action: 'take', input: { offerId: id, ...(amount ? { amount } : {}) } } });
+  const seen = fx.role.offers.get(offer.offerId);
+  seen.lastSeen -= 300;
+  assert.deepEqual((await preview(offer.offerId)).json(), { error: 'This offer is no longer announced by its maker.' });
+  seen.lastSeen += 300;
+  const expiry = offer.expiresAt; offer.expiresAt = fx.now - 1;
+  assert.equal((await preview(offer.offerId)).status, 400); offer.expiresAt = expiry;
+  assert.equal((await preview(fx.mine.offerId)).status, 400);
+  const book = fx.role.book.get(offer.pair); book.ts = fx.now;
+  book.remaining = [{ offerId: offer.offerId, amount: '1000000000000000000' }];
+  const p = (await preview(offer.offerId)).json();
+  assert.equal(p.input.baseAmount, '1000000000000000000');
+  assert.match((await preview(offer.offerId, '2')).json().error, /only 1 TNK/);
+  book.remaining = [];
+  assert.equal((await preview(offer.offerId)).status, 400);
+  assert.deepEqual(fx.role.calls, []);
 });

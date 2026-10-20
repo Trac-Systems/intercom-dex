@@ -11,6 +11,9 @@ const MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 // Unfinished trades a signer holds at once, in total and per trader key (buyer or seller). Summons beyond them are
 // refused; buyers repeat summons, so a refused trade is taken once a slot frees.
 export const MAX_HELD_TRADES = 32, MAX_HELD_PER_TRADER = 8;
+// Traders count a signer online for 90 s after its last heartbeat. Every 10 s leaves room for several lost ones (a
+// stamp waiting behind trade messages, or a send the peer times out) before a signer looks offline.
+export const HEARTBEAT_MS = 10_000;
 
 // A committee signer: joins trades it is summoned to (only when it is really in the signed terms' committee and the
 // registry it trusts lists it), holds its encrypted share, verifies the seller's transfer on its own node, publishes.
@@ -28,10 +31,16 @@ export class Signer {
     for (const ch of [MAIN, SIGNERS]) await this.bridge.join(ch);
     this.host.hooks.unrouted.push((ch, m) => this.#public(ch, m));
     await this.host.start();
-    this.heartbeat = setInterval(() => this.#heartbeat().catch(() => {}), 30000);
+    this.heartbeat = setInterval(() => this.#beat(), HEARTBEAT_MS);
   }
 
   stop() { this.host.stop(); clearInterval(this.heartbeat); }
+
+  // One heartbeat at a time; a failed one (the peer timed out the send) is sent again at once.
+  #beat() {
+    this.beating ??= this.#heartbeat().catch(() => this.#heartbeat()).catch(() => {}).finally(() => { this.beating = null; });
+    return this.beating;
+  }
 
   async #heartbeat() {
     if (!this.registry.current) return;

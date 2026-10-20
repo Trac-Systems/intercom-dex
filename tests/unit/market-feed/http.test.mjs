@@ -20,6 +20,65 @@ async function http(t) {
   return { ...s, server, url, post, token, viewerKeyFile, dir };
 }
 
+test('public history routes preserve decimals, page exclusively and use five-second ETags', async t => {
+  const s = await http(t), pair = 'RESET/USDC', query = '?pair=RESET%2FUSDC';
+  const records = [s.trade({ ts: 199800, price: '1', quoteAmount: '1000001' }),
+    s.trade({ ts: 199801, price: '2', quoteAmount: '2000002' }), s.trade({ ts: 199920, price: '3', quoteAmount: '3000003' })];
+  for (const record of records) assert.ok(await s.send('tradeLog', record));
+  const paths = ['/v1/market/candles' + query + '&interval=1m', '/v1/market/trades' + query];
+  for (const path of paths) {
+    const res = await fetch(s.url + path), etag = res.headers.get('etag'), body = await res.json();
+    assert.equal(res.status, 200); assert.equal(res.headers.get('cache-control'), 'max-age=5'); assert.match(etag, /^"[a-f0-9]{64}"$/);
+    for (const match of [etag, 'W/' + etag, '"other", ' + etag, '*']) {
+      const cached = await fetch(s.url + path, { headers: { 'if-none-match': match } });
+      assert.equal(cached.status, 304); assert.equal(await cached.text(), ''); assert.equal(cached.headers.get('etag'), etag);
+    }
+    assert.deepEqual(body, path.includes('/candles') ? { pair, interval: '1m', candles: [
+      { t: 199800, o: '1', h: '2', l: '1', c: '2', v: '3.000003' },
+      { t: 199920, o: '3', h: '3', l: '3', c: '3', v: '3.000003' },
+    ] } : { rows: [...records].reverse().map(r => ({ id: r.tradeId, t: r.ts, side: null, price: r.price, amount: '1200', usdc: r.price + '.' + String(Number(r.price)).padStart(6, '0') })), next: null });
+    s.clock.t++;
+    assert.equal((await fetch(s.url + path, { headers: { 'if-none-match': etag } })).status, 304);
+  }
+  const page = await (await fetch(s.url + paths[1] + '&limit=2')).json();
+  assert.equal(page.rows.length, 2); assert.equal(typeof page.next, 'string');
+  const older = await (await fetch(s.url + paths[1] + '&limit=2&before=' + page.next)).json();
+  assert.deepEqual(older.rows.map(r => r.id), [records[0].tradeId]); assert.equal(older.next, null);
+  const candles = await (await fetch(s.url + paths[0] + '&limit=1&before=199920')).json();
+  assert.deepEqual(candles.candles.map(c => c.t), [199800]);
+  const before = await fetch(s.url + paths[0]), etag = before.headers.get('etag'); await before.arrayBuffer();
+  assert.ok(await s.send('tradeLog', s.trade({ ts: 199930, price: '4' })));
+  assert.equal((await fetch(s.url + paths[0], { headers: { 'if-none-match': etag } })).status, 200);
+  assert.deepEqual(await (await fetch(s.url + '/v1/market/trades?pair=TNK%2FUSDC')).json(), { rows: [], next: null });
+});
+
+test('history endpoints reject unknown/duplicate parameters, unknown pairs, invalid limits and cursors', async t => {
+  const s = await http(t), pair = 'pair=RESET%2FUSDC';
+  for (const route of ['candles', 'trades']) {
+    const base = pair + (route === 'candles' ? '&interval=1m' : '');
+    for (const query of ['', 'pair=UNKNOWN%2FUSDC', base + '&x=1', base + '&pair=RESET%2FUSDC',
+      ...['', '0', '-1', '01', '1.5', '1e2', '2010', '1%0a'].map(limit => base + '&limit=' + limit),
+      base + '&limit=1&limit=2', base + '&before=&before=1', base + '&before=']) {
+      const res = await fetch(s.url + `/v1/market/${route}?${query}`);
+      assert.equal(res.status, 400, `${route} ${query}`); assert.equal(res.headers.get('cache-control'), 'no-store');
+    }
+    assert.equal((await fetch(s.url + `/v1/market/${route}?${base}`, { method: 'POST' })).status, 404);
+  }
+  for (const extra of ['interval=2m', 'interval=1m&interval=5m', 'interval=', 'interval=1m&before=01',
+    'interval=1m&before=9007199254740992', 'interval=1m&before=1.5', 'interval=1m&before=1%0a', 'interval=1m&limit=501']) {
+    assert.equal((await fetch(s.url + '/v1/market/candles?' + pair + '&' + extra)).status, 400, extra);
+  }
+  for (const extra of ['interval=1m', 'limit=201', 'before=123', 'before=abc']) {
+    assert.equal((await fetch(s.url + '/v1/market/trades?' + pair + '&' + extra)).status, 400, extra);
+  }
+  const pairs = s.f.registry.pairs.map(p => ({ ...p, status: 'paused' }));
+  assert.ok(await s.send('registry', { ...s.f.registry, version: 2, pairs }));
+  assert.equal((await fetch(s.url + '/v1/market/trades?' + pair)).status, 200);
+  s.feed.history.trades = () => { throw new Error('internal failure'); };
+  const failure = await fetch(s.url + '/v1/market/trades?' + pair);
+  assert.equal(failure.status, 500); assert.deepEqual(await failure.json(), { ok: false, error: 'unavailable' });
+});
+
 test('loopback view serves exact cached bytes, strong ETag and 304 until a meaningful change', async t => {
   const s = await http(t); assert.equal(s.server.address().address, '127.0.0.1');
   const first = await fetch(s.url + '/v1/market/view'), etag = first.headers.get('etag'), bytes = await first.text();

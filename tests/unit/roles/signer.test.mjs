@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Signer, MAX_HELD_TRADES, MAX_HELD_PER_TRADER } from '../../../src/roles/signer.js';
+import { Signer, MAX_HELD_TRADES, MAX_HELD_PER_TRADER, HEARTBEAT_MS } from '../../../src/roles/signer.js';
 import { seal } from '../../../src/core/envelope.js';
 import { encodeKey } from '../../../src/core/keys.js';
 import { selectCommittee } from '../../../src/core/committee.js';
@@ -102,4 +102,27 @@ test('a holding signer repeats its ack only until sendBy, then sends it only to 
   signer.bridge.emit('message', ch, seal({ kind: 'present', ch, body: { ref: id } }, f.buyer.secretKey, { ts: clock.t, nonce: hex() }));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(acks(), 3, 'a member that announces itself still gets the ack');
+});
+
+test('signers beat every 10 s, one heartbeat at a time, and resend at once when the peer times out a send', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { signer, sent } = await setup();
+  let fail = 1, hold = null, attempts = 0;
+  signer.bridge.send = async (_ch, envelope) => {
+    attempts++;
+    if (hold) await hold;
+    if (fail-- > 0) throw new Error('Bridge timeout: send');
+    sent.push(envelope);
+  };
+  const beats = () => sent.filter(e => e.kind === 'heartbeat').length;
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  await signer.start();
+  t.mock.timers.tick(HEARTBEAT_MS); for (let i = 0; i < 5; i++) await settle();
+  assert.equal(attempts, 2); assert.equal(beats(), 1);
+  let release; hold = new Promise(resolve => { release = resolve; });
+  t.mock.timers.tick(HEARTBEAT_MS); t.mock.timers.tick(HEARTBEAT_MS); await settle();
+  assert.equal(attempts, 3);
+  release(); hold = null; for (let i = 0; i < 5; i++) await settle();
+  assert.equal(beats(), 2);
+  signer.stop();
 });

@@ -2,8 +2,9 @@ import { existsSync } from 'node:fs';
 import { isFinished } from '../roles/host.js';
 import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
 import { open, createReplayCache } from '../core/envelope.js';
-import { supportedBase, tradePrice, priceUnits } from '../market/assets.js';
+import { supportedBase, tradePrice, registryPair } from '../market/assets.js';
 import { amount, shortKey } from './format.js';
+import { buildBook } from './market.js';
 
 const DAY = 86400, ONLINE_SEC = 90, PAYOUT_DELAY = 7 * DAY;
 export const BALANCE_CACHE_MS = 30000;
@@ -172,29 +173,24 @@ function traderView({ role, config, wallet, expired, now }) {
   }
   const pairs = (reg?.pairs ?? []).filter(p => supportedBase(p.base));
   const market = pairs.map(p => {
-    const book = role.book.get(p.pair), ticker = role.tickers.get(p.pair), base = p.base.id;
-    const level = l => ({ price: l.price, amount: amount(l.baseAmount, base), offers: l.offers });
-    const takeable = [...role.offers.values()].map(o => o.offer).filter(o => o.pair === p.pair && o.expiresAt > now && o.maker.dexKey !== role.me.dexKey);
-    const row = o => ({ offerId: o.offerId, side: o.side, price: o.price, amount: amount(o.baseAmount, base), expiresAt: o.expiresAt, maker: shortKey(o.maker.dexKey) });
-    const cheaper = (a, b) => { const d = priceUnits(a.price) - priceUnits(b.price); return d === 0n ? a.expiresAt - b.expiresAt : d < 0n ? -1 : 1; };
-    const byPrice = side => takeable.filter(o => o.side === side).sort((a, b) => (side === 'sell' ? cheaper(a, b) : cheaper(b, a))).slice(0, 10).map(row);
-    return { pair: p.pair, base, status: p.status, minBase: amount(p.minBaseAmount, base), last: ticker && ticker.last !== '0' ? ticker.last : null,
-      volume24h: ticker ? amount(ticker.volume24h, 'USDC') : null, bookAt: book?.ts ?? null,
-      levels: { sell: (book?.levels ?? []).filter(l => l.side === 'sell').slice(0, 10).map(level), buy: (book?.levels ?? []).filter(l => l.side === 'buy').slice(0, 10).map(level) },
-      offers: { sell: byPrice('sell'), buy: byPrice('buy') } };
+    const book = traderBook(role, p, now, status.mine), ticker = role.tickers.get(p.pair), base = p.base.id;
+    const price = value => value && value !== '0' ? value : null;
+    return { pair: p.pair, base, status: p.status, minBase: amount(p.minBaseAmount, base), last: price(ticker?.last),
+      change24h: null, high24h: price(ticker?.high24h), low24h: price(ticker?.low24h),
+      volume24h: ticker ? amount(ticker.volume24h, 'USDC') : null, bestAsk: book.asks[0]?.price ?? null, bestBid: book.bids[0]?.price ?? null };
   });
   return {
     signersOnline: status.signersOnline.length, software: status.software, registryVersion: status.registryVersion,
     balances: wallet ? Object.fromEntries(['TNK', 'RESET', 'USDC', 'SOL'].map(a => [a, { total: amount(wallet.balances[a].balance, a), free: amount(wallet.balances[a].free, a) }])) : null,
-    attention: attention.sort((a, b) => (b.at ?? Infinity) - (a.at ?? Infinity)).slice(0, 20),
-    offers: status.mine.sort((a, b) => a.expiresAt - b.expiresAt).slice(0, 200).map(o => {
+    attention: attention.sort((a, b) => (b.at ?? Infinity) - (a.at ?? Infinity)),
+    offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {
       const base = o.pair.split('/')[0];
       return { offerId: o.offerId, pair: o.pair, side: o.side, price: o.price, size: amount(o.baseAmount, base), filled: amount(o.filled, base),
         reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt };
     }),
-    running: running.slice(0, 100).map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
-    history: finished.slice(0, 50).map(t => ({ ...tradeFacts(t), outcome: outcome(t) })),
-    market,
+    running: running.map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
+    history: finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t) })),
+    pairs: market,
   };
 }
 
@@ -223,7 +219,7 @@ function signerView({ role, now, health, venueAsks }) {
     verifyingTransfer: "Checking the seller's transfer",
     persistingTransfer: 'Transfer confirmed; releasing now',
   })[t.state.phase];
-  const recent = trades.filter(t => !HELD.includes(t.state.phase)).sort((a, b) => b.state.now - a.state.now).slice(0, 50).map(t => ({
+  const recent = trades.filter(t => !HELD.includes(t.state.phase)).sort((a, b) => b.state.now - a.state.now).map(t => ({
     tradeId: shortKey(t.state.tradeId), pair: t.state.terms.pair, at: t.state.now, base: amount(t.state.terms.baseAmount, t.state.terms.base.id),
     text: t.state.phase === 'published' ? 'Key piece released after the transfer was confirmed'
       : t.state.phase === 'expired' ? 'No transfer arrived in time; the key piece was never released'
@@ -234,7 +230,7 @@ function signerView({ role, now, health, venueAsks }) {
     healthy: health.peerConnected && health.trac && health.reset && heartbeatOk && !!reg,
     health: { ...health, lastHeartbeatAt: role.lastHeartbeatAt ?? null, heartbeatOk, registryVersion: reg?.version ?? null },
     pieces: { held: held.length, nextAt: held.length ? Math.min(...held.map(releaseAt)) : null,
-      list: held.sort((a, b) => releaseAt(a) - releaseAt(b)).slice(0, 100).map(t => ({ tradeId: shortKey(t.state.tradeId), pair: t.state.terms.pair,
+      list: held.sort((a, b) => releaseAt(a) - releaseAt(b)).map(t => ({ tradeId: shortKey(t.state.tradeId), pair: t.state.terms.pair,
         base: amount(t.state.terms.baseAmount, t.state.terms.base.id), text: pieceText(t), until: releaseAt(t) })) },
     earnings: { provisional: amount(sum(published.filter(t => now < finalAt(t)).map(credit)), 'USDC'),
       final: amount(sum(published.filter(t => now >= finalAt(t)).map(credit)), 'USDC'), paid: null, trades: published.length },
@@ -271,6 +267,23 @@ function serviceView({ role, now, health, midnight }) {
   };
 }
 
+function traderBook(role, pair, now, mine = role.status().mine) {
+  return buildBook({ pair, offers: role.offers.values(), mine, dexKey: role.me.dexKey, book: role.book.get(pair.pair),
+    inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now });
+}
+
+const LISTS = Object.freeze({ trader: ['offers', 'running', 'history', 'attention'], signer: ['pieces', 'recent'], service: ['signers'] });
+function listRows(view, name) { return name === 'pieces' ? view.pieces.list : view[name]; }
+function summary(view, kind) {
+  const out = { ...view, counts: Object.fromEntries(LISTS[kind].map(name => [name, listRows(view, name).length])) };
+  for (const name of LISTS[kind]) {
+    if (name === 'pieces') { const { list, ...pieces } = view.pieces; out.pieces = pieces; }
+    else if (name === 'attention') out.attention = view.attention.slice(0, 20);
+    else delete out[name];
+  }
+  return out;
+}
+
 // The dashboard's read model for whichever role runs in this process. Everything comes from the role objects in
 // memory; chain balances go through a 30-second cache, peer readings through short caches.
 export function createModel({ config, role, wallets = null, bridge, clock = () => Date.now() }) {
@@ -295,8 +308,27 @@ export function createModel({ config, role, wallets = null, bridge, clock = () =
     return [...offerRecords.values()].filter(r => !r.cancelled && r.offer.expiresAt <= sec && r.offer.maker.dexKey === role.me.dexKey).map(r => r.offer);
   }, 30000, clock);
 
+  const view = async (sec, wallet = null, health = {}) => {
+    if (kind === 'trader') return traderView({ role, config, wallet, expired: (await expired()).value ?? [], now: sec });
+    if (kind === 'signer') return signerView({ role, now: sec, venueAsks, health });
+    const midnight = new Date(clock()); midnight.setHours(0, 0, 0, 0);
+    return serviceView({ role, now: sec, midnight: Math.floor(midnight.getTime() / 1000), health });
+  };
+
   return {
     balances,
+    pair(name) { return registryPair(registryOf(role), name, { open: false }); },
+    book(name) {
+      if (kind !== 'trader') throw new Error('The order book is only available to traders');
+      return traderBook(role, registryPair(registryOf(role), name, { open: false }), now());
+    },
+    async list(name, offset = 0, limit = 100) {
+      const parts = typeof name === 'string' ? name.split('.') : [];
+      if (parts.length !== 2 || parts[0] !== kind || !LISTS[kind]?.includes(parts[1])) throw new Error('Unknown list for this role');
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000000 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error('Invalid list page');
+      const rows = listRows(await view(now()), parts[1]);
+      return { total: rows.length, rows: rows.slice(offset, offset + limit) };
+    },
     labels() {
       const reg = registryOf(role), out = {};
       for (const s of reg?.signers ?? []) out[s.dexKey] = s.label;
@@ -318,15 +350,15 @@ export function createModel({ config, role, wallets = null, bridge, clock = () =
       const peerConnected = bridge.ws?.readyState === 1;
       const out = { role: kind, network: config.network, generatedAt: sec,
         wallets: wallet ? { ...walletView(wallet.value, { network: config.network, role: kind }), error: wallet.ok ? null : wallet.error, readAt: Math.floor(wallet.at / 1000) } : null };
-      if (kind === 'trader') out.trader = traderView({ role, config, wallet: wallet?.value, expired: (await expired()).value ?? [], now: sec });
+      if (kind === 'trader') out.trader = summary(await view(sec, wallet?.value), kind);
       if (kind === 'signer') {
         const r = await readers();
-        out.signer = signerView({ role, now: sec, venueAsks, health: { peerConnected, trac: !!r.value?.trac, reset: !!r.value?.reset, checkedAt: Math.floor(r.at / 1000) } });
+        out.signer = summary(await view(sec, null, { peerConnected, trac: !!r.value?.trac, reset: !!r.value?.reset, checkedAt: Math.floor(r.at / 1000) }), kind);
       }
       if (kind === 'service') {
-        const s = await stats(), midnight = new Date(clock()); midnight.setHours(0, 0, 0, 0);
-        out.service = serviceView({ role, now: sec, midnight: Math.floor(midnight.getTime() / 1000), health: { peerConnected,
-          channels: s.value ? PUBLIC_CHANNELS.filter(c => s.value.channels.includes(c)).length : null, connections: s.value?.connectionCount ?? null } });
+        const s = await stats();
+        out.service = summary(await view(sec, null, { peerConnected,
+          channels: s.value ? PUBLIC_CHANNELS.filter(c => s.value.channels.includes(c)).length : null, connections: s.value?.connectionCount ?? null }), kind);
       }
       return out;
     },

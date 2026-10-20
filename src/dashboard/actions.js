@@ -5,6 +5,7 @@ import { calculateFees } from '../solana/escrow.js';
 import { amountUnits, withdrawalDestination } from '../wallets/accounting.js';
 import { amount, shortKey } from './format.js';
 import { withdrawalView } from './model.js';
+import { STALE_OFFER_MESSAGE } from '../market/book.js';
 
 export const CONFIRM_TTL_MS = 120000;
 const HEX64 = /^[0-9a-f]{64}$/, PRICE = /^(0|[1-9][0-9]*)(\.[0-9]{1,12})?$/;
@@ -67,9 +68,9 @@ export function createActions({ config, role, wallets = null, balances = null })
     run: { offer: input => role.makeOffer(input) },
 
     async take(input) {
-      const offerId = text(input.offerId, 64), seen = role.offers.get(offerId);
-      if (!HEX64.test(offerId) || !seen) throw new Error('This offer is no longer in the book');
-      const o = seen.offer, reg = role.registry.snapshot(o.registryVersion);
+      const offerId = text(input.offerId, 64), o = HEX64.test(offerId) ? role.availableOffer(offerId) : null;
+      if (!o) throw new Error(STALE_OFFER_MESSAGE);
+      const reg = role.registry.snapshot(o.registryVersion);
       if (!reg) throw new Error('No signer list for this offer');
       const pair = registryPair(reg, o.pair), base = pair.base.id;
       const baseAmount = input.amount ? amountUnits(base, text(input.amount, 100)).toString() : o.baseAmount;

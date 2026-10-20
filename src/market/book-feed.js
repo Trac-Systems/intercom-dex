@@ -40,10 +40,11 @@ export class BookFeed {
 }
 
 export class BookView {
-  constructor() { this.books = new Map(); this.bases = new Map(); }
+  constructor() { this.books = new Map(); this.bases = new Map(); this.inventory = new Map(); }
   full(body) {
     const b = parseBody('book', body), old = this.bases.get(b.pair);
     if (old && b.seq <= old.seq) return false;
+    if (b.remaining) this.inventory.set(b.pair, b);
     this.bases.set(b.pair, b); this.books.set(b.pair, b); return true;
   }
   delta(body, ts) {

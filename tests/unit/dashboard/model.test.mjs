@@ -79,24 +79,25 @@ test('finished trades and reasons in plain words', () => {
   assert.equal(plainReason('x'.repeat(500)).length, 160);
 });
 
-test('trader view: balances, signers online, attention, offers, trades, history and best-10 market with takeable offers', async () => {
-  const fx = traderFixture(), s = (await model(fx).state()).trader;
+test('trader summaries and paged lists retain balances, attention, offers, running trades and history', async () => {
+  const fx = traderFixture(), m = model(fx), s = (await m.state()).trader;
   assert.equal(s.signersOnline, 4);
   assert.equal(s.balances.USDC.free.unit, 'USDC'); assert.equal(s.balances.TNK.total.text, '12');
   assert.deepEqual(s.attention.map(a => a.kind).sort(), ['expired', 'failed', 'key']);
   assert.match(s.attention.find(a => a.kind === 'expired').text, /buy 4 TNK at 0\.30 USDC expired; 4 TNK were not traded/);
   assert.match(s.attention.find(a => a.kind === 'failed').text, /Called off: the other side took too long/);
-  assert.deepEqual(s.offers.map(o => [o.left.text, o.reserved.text, o.size.text]), [['9', '1', '10']]);
-  assert.deepEqual(s.running.map(r => r.key), ['t-sell', 't-locked', 't-acks']);
-  assert.deepEqual(s.history.map(r => [r.key, r.outcome.tone]), [['t-off', 'neutral'], ['t-done', 'good']]);
-  const m = s.market.find(p => p.pair === 'TNK/USDC');
-  assert.equal(m.last, '0.41'); assert.equal(m.volume24h.text, '123.45');
-  assert.deepEqual(m.levels.sell.map(l => l.price), ['0.42', '0.44', '0.45']);
-  assert.deepEqual(m.offers.sell.map(o => o.price), ['0.42', '0.45'], 'own offers are not offered for taking');
-  assert.deepEqual(m.offers.buy.map(o => o.price), ['0.39']);
-  for (let i = 0; i < 30; i++) fx.role.book.get('TNK/USDC').levels.push({ side: 'buy', price: `0.${10 + i}`, baseAmount: '1', offers: 1 });
-  assert.equal((await model(fx).state()).trader.market[0].levels.buy.length, 10);
-  assert.deepEqual(s.market.map(p => p.pair), ['TNK/USDC', 'RESET/USDC']);
+  assert.deepEqual((await m.list('trader.offers')).rows.map(o => [o.left.text, o.reserved.text, o.size.text]), [['9', '1', '10']]);
+  assert.deepEqual((await m.list('trader.running')).rows.map(r => r.key), ['t-sell', 't-locked', 't-acks']);
+  assert.deepEqual((await m.list('trader.history')).rows.map(r => [r.key, r.outcome.tone]), [['t-off', 'neutral'], ['t-done', 'good']]);
+  const pair = s.pairs.find(p => p.pair === 'TNK/USDC');
+  assert.equal(pair.last, '0.41'); assert.equal(pair.volume24h.text, '123.45');
+  assert.deepEqual([pair.bestAsk, pair.bestBid, pair.change24h, pair.high24h, pair.low24h], ['0.42', '0.39', null, null, null]);
+  assert.deepEqual(s.pairs.map(p => p.pair), ['TNK/USDC', 'RESET/USDC']);
+  assert.deepEqual(s.counts, { offers: 1, running: 3, history: 2, attention: 3 });
+  for (const name of ['market', 'offers', 'running', 'history']) assert.equal(Object.hasOwn(s, name), false);
+  assert.deepEqual(m.book('TNK/USDC').asks.map(l => l.price), ['0.42', '0.44', '0.45']);
+  assert.equal(m.book('TNK/USDC').asks[1].take, null);
+
 });
 
 test('needs attention is empty when nothing needs the owner; a refund in progress shows up', async () => {
@@ -138,9 +139,9 @@ test('signer view: health checks, key pieces with the next change, earnings, ven
   assert.equal(s.healthy, true);
   assert.deepEqual([s.health.peerConnected, s.health.trac, s.health.reset, s.health.heartbeatOk], [true, true, true, true]);
   assert.equal(s.pieces.held, 3); assert.equal(s.pieces.nextAt, fx.now);
-  assert.deepEqual(s.pieces.list.map(p => p.until - fx.now), [0, 400, 700]);
+  assert.deepEqual((await m.list('signer.pieces')).rows.map(p => p.until - fx.now), [0, 400, 700]);
   assert.equal(s.earnings.provisional.text, '0.0025'); assert.equal(s.earnings.final.text, '0.0025'); assert.equal(s.earnings.paid, null);
-  assert.deepEqual(s.recent.map(r => r.text.split(' ')[0]), ['Key', 'No', 'Key']);
+  assert.deepEqual((await m.list('signer.recent')).rows.map(r => r.text.split(' ')[0]), ['Key', 'No', 'Key']);
   assert.deepEqual(s.warnings, []);
   const published = [...fx.role.host.trades.values()].find(t => t.state.phase === 'published').state.tradeId;
   const ask = identity => seal({ kind: 'shareRequest', ch: 'intercom-dex:signers', body: { tradeId: published } }, identity.secretKey, { ts: nowSec(), nonce: hex() });
@@ -160,8 +161,8 @@ test('signer view: health checks, key pieces with the next change, earnings, ven
 test('venue view: signers with earned / owed / paid, today and 7-day trades, fees, reports waiting, book and health', async () => {
   const noon = new Date(); noon.setHours(12, 0, 0, 0);
   const now = Math.floor(noon.getTime() / 1000), fx = serviceFixture({ now }), [a, b, c] = fx.f.registry.signers;
-  const v = (await model(fx, () => now * 1000).state()).service;
-  const row = k => v.signers.find(s => s.dexKey === k);
+  const m = model(fx, () => now * 1000), v = (await m.state()).service, signers = (await m.list('service.signers')).rows;
+  const row = k => signers.find(s => s.dexKey === k);
   assert.deepEqual([row(a.dexKey).earned.text, row(a.dexKey).owed.text, row(a.dexKey).owedTrades, row(a.dexKey).paid.text, row(a.dexKey).online], ['0.012498', '0.008332', 2, '0', true]);
   assert.deepEqual([row(b.dexKey).owed.text, row(b.dexKey).paid.text], ['0.004166', '0.004166']);
   assert.deepEqual([row(c.dexKey).provisional.text, row(c.dexKey).owed.text, row(c.dexKey).online], ['0.004166', '0', false]);
@@ -172,5 +173,5 @@ test('venue view: signers with earned / owed / paid, today and 7-day trades, fee
   assert.deepEqual(v.book, { 'TNK/USDC': 3, 'RESET/USDC': 1 });
   assert.deepEqual([v.health.channels, v.health.connections, v.health.lastRegistryAt, v.health.registryVersion], [3, 6, now - 15, 1]);
   fx.role.registry = { ...fx.role.registry, signers: fx.role.registry.signers.slice(1), removed: [{ dexKey: a.dexKey, removedAt: now, reason: 'test' }] };
-  assert.equal((await model(fx, () => now * 1000).state()).service.signers.find(s => s.dexKey === a.dexKey).label, 'removed signer');
+  assert.equal((await m.list('service.signers')).rows.find(s => s.dexKey === a.dexKey).label, 'removed signer');
 });

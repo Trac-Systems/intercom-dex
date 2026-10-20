@@ -24,10 +24,11 @@ const change = (last, first) => {
 
 // Inputs have already passed envelope authentication and registry admission in MarketFeed.
 export class MarketView {
-  constructor({ store, now = nowSec }) {
-    this.store = store; this.now = now;
+  constructor({ store, now = nowSec, history }) {
+    this.store = store; this.now = now; this.history = history;
     this.seen = new Map(load(store, SEEN));
     this.trades = new Map(load(store, TRADE).map(([id, t]) => [id, parseBody('tradeLog', t)]));
+    for (const trade of this.trades.values()) history?.addTrade(trade);
     this.parties = new Map(load(store, PARTY));
     this.inventory = new Map(load(store, INVENTORY).map(([, { pair, ...book }]) => [pair, book]));
     this.truncatedUntil = store.get(META)?.truncatedUntil ?? 0;
@@ -109,7 +110,8 @@ export class MarketView {
 
   trade(body) {
     const trade = parseBody('tradeLog', body);
-    if (trade.ts > this.now() || this.trades.has(trade.tradeId)) return false;
+    if (trade.ts > this.now() || this.trades.has(trade.tradeId) || this.history?.ids.has(trade.tradeId)) return false;
+    this.history?.addTrade(trade);
     this.store.put(TRADE + trade.tradeId, trade);
     this.trades.set(trade.tradeId, trade);
     this.#associate(trade.tradeId); this.#prune(); this.dirty = true; return true;

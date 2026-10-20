@@ -209,7 +209,7 @@ registry versions, profile pins, pair definitions and software requirements befo
 `marketFeed.viewerKeyFile` names an absolute, user-owned regular file, mode 0600, containing a 32 to 256
 character bearer key (visible ASCII, without spaces), optionally followed by a newline. Symlinks are refused.
 Authentication compares SHA256 digests in constant time. `marketFeed.port` is an integer TCP port; 0 is useful
-for unit tests. HTTP binds only to `127.0.0.1`. There are exactly three routes:
+for unit tests. HTTP binds only to `127.0.0.1`. There are exactly five routes:
 
 - `GET /v1/market/view`: `{v:1,ts,pairs,offers,trades}`. `pairs` entries are
   `{pair,base,last,change24h,volume24h,bestBuy,bestSell,trades24h}`. `offers` entries are
@@ -236,6 +236,21 @@ for unit tests. HTTP binds only to `127.0.0.1`. There are exactly three routes:
   trades, until it fits. Pairs stay whole and statistics still use the retained history, including omitted rows.
   Serialized bytes and their strong SHA256 ETag are cached until content changes or expires; `ts` is build time.
   Responses set `cache-control: max-age=10`; matching `If-None-Match` yields 304.
+- `GET /v1/market/candles?pair=<pair>&interval=<interval>[&limit=<n>][&before=<t>]`:
+  `{pair,interval,candles:[{t,o,h,l,c,v}]}`. `interval` is one of `1m 3m 5m 15m 30m 1h 2h 4h 8h 12h 1d 2d 3d 1w 1mo 1y`;
+  buckets are UTC, `1w` starts on Monday, `1mo` and `1y` are calendar months and years. `t` is the bucket start in
+  Unix seconds; `o h l c` are decimal price strings and `v` is the USDC volume as a decimal string. Only buckets
+  with trades are returned, oldest first. `limit` is 1 to 500 (default 500); `before` is an exclusive bucket start
+  for older pages.
+- `GET /v1/market/trades?pair=<pair>[&limit=<n>][&before=<cursor>]`: `{rows:[{id,t,side,price,amount,usdc}],next}`,
+  newest first. `limit` is 1 to 200 (default 100); `next` is an opaque cursor for the following page, or null.
+  `side` is null because the trade log does not name the taker.
+  Both history routes read a permanent trade archive: every accepted venue trade log is appended to per-pair
+  JSONL segments under `dataDir/market-history/` (fsynced, duplicates ignored, a damaged last line is reported and
+  skipped), held under an exclusive lock while the role runs. Unknown or repeated parameters and unknown pairs give
+  400. Responses carry a strong ETag and `cache-control: max-age=5`. `node bin/feed-import-venue.mjs --venue-data
+  <dir> --feed-data <dir>` seeds the archive once from a venue's logged settlements, read-only, with the feed
+  stopped.
 - `GET /v1/market/chat?after=<seq>`: `{ok:true,epoch,now,next,oldest,more,messages}`.
   The last 100 accepted lines live only in memory; no cursor returns the last 20. `after` is a nonnegative
   safe integer and filters by sequence, not time. The complete response is at most 60,000 UTF-8 bytes;

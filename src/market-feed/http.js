@@ -2,6 +2,27 @@ import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { readPrivateFile } from '../roles/keyring.js';
+import { INTERVALS, parseTradeCursor } from './history.js';
+
+function historyQuery(params, candles, feed) {
+  const allowed = candles ? ['pair', 'interval', 'limit', 'before'] : ['pair', 'limit', 'before'];
+  for (const key of params.keys()) if (!allowed.includes(key) || params.getAll(key).length !== 1) throw new Error('parameters');
+  const pair = params.get('pair');
+  try { feed.historyPair(pair); } catch { throw new Error('pair'); }
+  const interval = params.get('interval');
+  if (candles && !INTERVALS.includes(interval)) throw new Error('interval');
+  const max = candles ? 500 : 200, rawLimit = params.get('limit');
+  if (rawLimit !== null && (!/^[1-9][0-9]{0,2}$(?![\s\S])/.test(rawLimit) || Number(rawLimit) > max)) throw new Error('limit');
+  const limit = rawLimit === null ? candles ? 500 : 100 : Number(rawLimit), rawBefore = params.get('before');
+  let before = rawBefore;
+  if (rawBefore !== null) {
+    if (candles) {
+      if (!/^(0|-?[1-9][0-9]{0,15})$(?![\s\S])/.test(rawBefore) || !Number.isSafeInteger(Number(rawBefore))) throw new Error('before');
+      before = Number(rawBefore);
+    } else parseTradeCursor(rawBefore, pair);
+  }
+  return { pair, ...(candles ? { interval } : {}), limit, before };
+}
 
 export async function startMarketFeedHttp({ feed, port, viewerKeyFile }) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid marketFeed.port');
@@ -19,6 +40,15 @@ export async function startMarketFeedHttp({ feed, port, viewerKeyFile }) {
       if (req.method === 'GET' && url.pathname === '/v1/market/view' && !url.search) {
         const { json, etag } = feed.view();
         const headers = { etag, 'cache-control': 'max-age=10' };
+        if (req.headers['if-none-match']?.split(',').some(v => v.trim() === '*' || v.trim().replace(/^W\//, '') === etag)) return send(304, undefined, headers);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', ...headers }); res.end(json); return;
+      }
+      if (req.method === 'GET' && ['/v1/market/candles', '/v1/market/trades'].includes(url.pathname)) {
+        const candles = url.pathname.endsWith('/candles'); let query;
+        try { query = historyQuery(url.searchParams, candles, feed); }
+        catch (error) { return send(400, { ok: false, error: error.message }); }
+        const json = JSON.stringify(candles ? feed.readCandles(query) : feed.readTrades(query));
+        const etag = '"' + createHash('sha256').update(json).digest('hex') + '"', headers = { etag, 'cache-control': 'max-age=5' };
         if (req.headers['if-none-match']?.split(',').some(v => v.trim() === '*' || v.trim().replace(/^W\//, '') === etag)) return send(304, undefined, headers);
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', ...headers }); res.end(json); return;
       }

@@ -12,4 +12,12 @@ export function formatUnits(units, decimals, places = 6) {
 
 export const amount = (units, asset) => ({ units: String(units), text: formatUnits(units, DECIMALS[asset]), unit: asset });
 
+export function decimalAmount(value, asset) {
+  const decimals = DECIMALS[asset];
+  if (typeof value !== 'string' || value.length > 100 || decimals === undefined ||
+      !new RegExp(`^(0|[1-9][0-9]*)(\\.[0-9]{1,${decimals}})?$(?![\\s\\S])`).test(value)) throw new Error('Invalid decimal amount');
+  const [whole, fraction = ''] = value.split('.');
+  return amount(BigInt(whole) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, '0')), asset);
+}
+
 export const shortKey = key => (typeof key === 'string' && key.length > 12 ? `${key.slice(0, 6)}…${key.slice(-4)}` : String(key ?? ''));

@@ -139,7 +139,7 @@ the offer's full posted size; take at most what the book shows as left. The resu
 baseAmount, quoteAmount}`. `role` is your side: taking a sell offer makes you the buyer. Follow the trade in
 `dex_status.trades` by its `key`. From here the trade runs by itself.
 
-Errors: `Unknown offer`, `No registry yet`, `The venue published two different registries; trading is paused`,
+Errors: `This offer is no longer announced by its maker.` (an unknown offer, or one its maker has not announced in the last five minutes), `No registry yet`, `The venue published two different registries; trading is paused`,
 `update required`, `Unknown registry pair`, `Pair paused`, `Pair needs a newer version`, `Own offer`,
 `Offer price is <price>, not <your price>`, `Offer expires too soon` (60 seconds or less left),
 `Amount must be 1 to the offer size in base units`, `Trade too small`, `Not enough signers online`,

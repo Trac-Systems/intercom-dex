@@ -289,19 +289,24 @@ ASCII letters, digits, spaces or `._-`; names that contain `venue`, `system`, `a
 received text. The venue listens without posting and includes `chat` in its status and
 dashboard state for a game listener to read through the existing access controls. See [the API](src/core/API.md#market-chat).
 
-The `market-feed` role serves the public market view at `GET /v1/market/view`, chat at `GET /v1/market/chat`,
-and authenticated viewer posts at `POST /v1/market/chat/viewer`. It listens to the venue and public offer/chat
+The `market-feed` role serves the public market view at `GET /v1/market/view`, chart history at
+`GET /v1/market/candles` and `GET /v1/market/trades`, chat at `GET /v1/market/chat`, and authenticated viewer posts
+at `POST /v1/market/chat/viewer`. It listens to the venue and public offer/chat
 channels, keeps bounded public history, and has no wallet or trading functions. Its separate DEX identity signs
 viewer messages; configured relay keys may send one message per second and 600 per hour, with duplicate
 name/text pairs suppressed for 10 minutes. Set `marketFeed.port` and `marketFeed.viewerKeyFile` (an absolute path
-to a private 0600 bearer-key file). HTTP binds to `127.0.0.1`; a reverse proxy exposes these three routes.
+to a private 0600 bearer-key file). HTTP binds to `127.0.0.1`; a reverse proxy exposes these routes.
 See [the role and HTTP contract](src/core/API.md#market-feed).
 
 ## The dashboard (fallback)
 
-With `"dashboard"` in the config, the program serves a private page on your computer. It shows each trade in plain
-words with its deadlines, your balances, the offers and the signers. You can post, take and cancel offers and
-withdraw funds there, and every action asks you to confirm what it will do. Open
+With `"dashboard"` in the config, the program serves a private page on your computer. For a trader it is a
+trading screen: a price chart (TradingView Lightweight Charts, 1 minute to 1 year), the order book with sells above
+and buys below, an order form, and lists of your offers, running trades, history and market trades. Each running
+trade is explained in plain words with its deadlines. Offers show only while their maker announced them in the last
+five minutes. You can post, take and cancel offers and withdraw funds there, and every action asks you to confirm
+what it will do. On mainnet the chart and market trades come from the public market feed at `reset.much.fun`, read
+only while the page is open. Open
 `http://127.0.0.1:47202/?t=` followed by the contents of `/path/to/dex-data/trader/dashboard.token`. The program
 writes a new token every time it starts, and nobody else can open the page without it.
 

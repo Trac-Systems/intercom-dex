@@ -1,5 +1,31 @@
 import { priceUnits } from './assets.js';
 
+export const OFFER_FRESH_SEC = 300;
+export const STALE_OFFER_MESSAGE = 'This offer is no longer announced by its maker.';
+
+export const freshOffer = (seen, now) => !!seen && Number.isSafeInteger(seen.lastSeen) &&
+  now - seen.lastSeen < OFFER_FRESH_SEC && seen.offer.expiresAt > now;
+
+// Full snapshots identify up to 200 offers. Deltas only identify levels; retain the last full inventory and
+// cap an individual offer by its level. Absence beyond either wire depth limit does not prove removal.
+export function availableOffer(seen, book, inventory, now) {
+  if (!freshOffer(seen, now)) return null;
+  const o = seen.offer, firstSeen = seen.firstSeen ?? seen.lastSeen;
+  let left = BigInt(o.baseAmount);
+  if (inventory?.registryVersion === o.registryVersion && inventory.remaining) {
+    const row = inventory.remaining.find(r => r.offerId === o.offerId);
+    if (row) left = left < BigInt(row.amount) ? left : BigInt(row.amount);
+    else if (inventory.ts >= firstSeen && inventory.remaining.length < 200) return null;
+  }
+  if (book?.registryVersion === o.registryVersion && book.ts >= firstSeen) {
+    const levels = book.levels.filter(l => l.side === o.side), price = priceUnits(o.price);
+    const level = levels.find(l => priceUnits(l.price) === price);
+    if (level) left = left < BigInt(level.baseAmount) ? left : BigInt(level.baseAmount);
+    else if (levels.length < 50 || levels.some(l => o.side === 'sell' ? price <= priceUnits(l.price) : price >= priceUnits(l.price))) return null;
+  }
+  return left > 0n ? { ...o, baseAmount: left.toString() } : null;
+}
+
 // Offers seen on intercom-dex:offers (already verified envelopes). Remaining size shrinks with logged trades.
 export class OfferBook {
   constructor() { this.offers = new Map(); this.cancelled = new Map(); }
@@ -28,12 +54,12 @@ export class OfferBook {
 
   get(offerId, now) {
     const o = this.offers.get(offerId);
-    return o && o.expiresAt > now && now - o.lastSeen < 300 ? o : null;
+    return o && o.expiresAt > now && now - o.lastSeen < OFFER_FRESH_SEC ? o : null;
   }
 
   // Sells ascending, buys descending; ties by expiry then id. Expired offers are dropped.
   snapshot(pair, now) {
-    for (const [id, o] of this.offers) if (o.expiresAt <= now || now - o.lastSeen >= 300) this.offers.delete(id);
+    for (const [id, o] of this.offers) if (o.expiresAt <= now || now - o.lastSeen >= OFFER_FRESH_SEC) this.offers.delete(id);
     // Retain the oldest 20 live offers per maker, across all pairs.
     const counts = new Map();
     const rows = [...this.offers.values()].sort((a, b) => a.firstSeen - b.firstSeen || a.offerId.localeCompare(b.offerId)).filter(o => {
