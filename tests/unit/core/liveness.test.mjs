@@ -88,7 +88,7 @@ test('step budgets use elapsed monotonic time, survive serialization and never c
 
 test('working notes extend the seller deal budget only while live, never beyond 150 seconds; lock edge waits until sendBy', () => {
   const s = snapshot('seller', 'awaitDeal');
-  assert.equal(step(s, 'tick', { elapsedMs: 30000 }).state.phase, 'aborted');
+  assert.equal(step(s, 'tick', { elapsedMs: 60000 }).state.phase, 'aborted');
   let current = s;
   for (let i = 0; i < 14; i++) {
     current = msg(current, 'working', { tradeId: s.tradeId, step: 'certificate' }, s.peer, { elapsedMs: 10000 }).state;
@@ -96,7 +96,7 @@ test('working notes extend the seller deal budget only while live, never beyond 
   }
   assert.equal(current.dealBudgetMs, 150000);
   assert.equal(step(current, 'tick', { elapsedMs: 10000 }).state.phase, 'aborted');
-  assert.equal(msg(s, 'working', { tradeId: s.tradeId, step: 'certificate' }, s.peer, { elapsedMs: 30000 }).state.phase, 'aborted');
+  assert.equal(msg(s, 'working', { tradeId: s.tradeId, step: 'certificate' }, s.peer, { elapsedMs: 60000 }).state.phase, 'aborted');
   for (const phase of ['checkingProof', 'awaitReady']) {
     const ready = snapshot('seller', phase);
     assert.equal(step(ready, 'tick', { elapsedMs: 999999 }).state.phase, phase);

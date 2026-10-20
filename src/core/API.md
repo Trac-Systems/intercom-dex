@@ -756,7 +756,7 @@ Aborted trades release reservations. Accept/reveal routing checks the commitment
 decline routing checks the saved take envelope nonce before buffering.
 
 `STEP_BUDGET_MS` in `terms.js` exports `accept:20000`, `connect:60000`,
-`randomness:120000`, `terms:30000`, `deal:30000`, `certificate:150000`,
+`randomness:120000`, `terms:30000`, `deal:60000`, `certificate:150000`,
 `working:10000`, `acks:60000`. The host supplies `stepElapsedMs` from its monotonic
 step entry observation on ticks/messages. A taker gets 60 seconds total including
 connecting, and 20 seconds after the maker peer is present on the offer channel.

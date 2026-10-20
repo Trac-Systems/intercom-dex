@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { cached, createModel, describeTrade, outcome, plainReason, walletView, BALANCE_CACHE_MS } from '../../../src/dashboard/model.js';
+import { cached, refreshing, createModel, describeTrade, outcome, plainReason, walletView, BALANCE_CACHE_MS } from '../../../src/dashboard/model.js';
 import { formatUnits, shortKey } from '../../../src/dashboard/format.js';
 import { seal } from '../../../src/core/envelope.js';
 import { hex } from '../core/helpers.mjs';
@@ -174,4 +174,27 @@ test('venue view: signers with earned / owed / paid, today and 7-day trades, fee
   assert.deepEqual([v.health.channels, v.health.connections, v.health.lastRegistryAt, v.health.registryVersion], [3, 6, now - 15, 1]);
   fx.role.registry = { ...fx.role.registry, signers: fx.role.registry.signers.slice(1), removed: [{ dexKey: a.dexKey, removedAt: now, reason: 'test' }] };
   assert.equal((await m.list('service.signers')).rows.find(s => s.dexKey === a.dexKey).label, 'removed signer');
+});
+
+test('refreshing returns the last result at once while the next read runs, and waits at most briefly for the first', async () => {
+  const clock = { t: 0 }, gate = {};
+  let n = 0;
+  const read = refreshing(() => new Promise(resolve => { n++; gate.open = () => resolve(n); }), 30000, () => clock.t, 20);
+  assert.deepEqual(await read(), { ok: false, error: 'still being read', value: null, at: null });
+  gate.open(); await new Promise(r => setTimeout(r, 0));
+  assert.equal((await read()).value, 1);
+  clock.t = 30000;
+  const started = Date.now(), stale = await read();
+  assert.equal(stale.value, 1); assert.ok(Date.now() - started < 15, 'a due refresh does not hold the caller');
+  assert.equal(n, 2); gate.open(); await new Promise(r => setTimeout(r, 0));
+  assert.equal((await read()).value, 2);
+});
+
+test('state stays available when the chains cannot be read: balances null, the read error shown, nothing throws', async () => {
+  const fx = traderFixture(), info = fx.wallets.info;
+  fx.wallets.info = async () => ({ ...(await info()), balances: null, balanceError: 'Balances unavailable right now: rpc down' });
+  const s = await model(fx).state();
+  assert.equal(s.trader.balances, null);
+  assert.deepEqual(s.wallets.assets, []);
+  assert.equal(s.wallets.error, 'Balances unavailable right now: rpc down');
 });

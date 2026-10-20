@@ -2,7 +2,7 @@ import { concatBytes, hexToBytes, sha256Hex, stableJSON, utf8 } from './canonica
 import { termsSchema } from './schemas.js';
 
 export const STEP_BUDGET_MS = Object.freeze({ accept: 20000, connect: 60000, randomness: 120000,
-  terms: 30000, deal: 30000, certificate: 150000, working: 10000, acks: 60000 });
+  terms: 30000, deal: 60000, certificate: 150000, working: 10000, acks: 60000 });
 
 export function validateTerms(terms) {
   stableJSON(terms);

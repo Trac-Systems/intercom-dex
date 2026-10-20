@@ -256,7 +256,7 @@ monotonic clock (`STEP_BUDGET_MS`):
 | `connect` | 60 s for the taker in total, connecting included |
 | `randomness` | 120 s for the deciding block, reveals included |
 | `terms` | 30 s for terms and signatures |
-| `deal` | 30 s for the seller and signers to receive the deal, plus 30 s per `working` note |
+| `deal` | 60 s (as long as the buyer waits for acks) for the seller and signers to receive the deal, plus 60 s per `working` note |
 | `certificate` | 150 s for the buyer's deal step, and the cap for the extended deal wait |
 | `working` | 10 s between the buyer's `working` notes |
 | `acks` | 60 s for k acks |

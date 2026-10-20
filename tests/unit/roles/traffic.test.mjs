@@ -98,3 +98,15 @@ test('a restarted signer re-publishes only trades still inside the repeat schedu
     h.stop(); t.mock.restoreAll();
   }
 });
+
+test('a signer still waiting for the dealing announces itself again every ten seconds, and only while it waits', async t => {
+  const state = sim.snapshots.get('signer1:awaitDeal'), node = sim.nodes.get('signer1');
+  const f = await host(t, 'signer', state, node.identity), ch = tradeChannel(state.tradeId);
+  const presents = () => f.sent.filter(x => x.envelope.kind === 'present' && x.ch === ch && x.envelope.body.ref === state.tradeId).length;
+  await f.tick(0); await f.tick(9); assert.equal(presents(), 0);
+  await f.tick(1); assert.equal(presents(), 1);
+  await f.tick(5); assert.equal(presents(), 1);
+  await f.tick(5); assert.equal(presents(), 2);
+  f.tr.state = { ...f.tr.state, phase: 'holding' };
+  await f.tick(30); assert.equal(presents(), 2);
+});

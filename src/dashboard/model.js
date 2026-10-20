@@ -27,6 +27,20 @@ export function cached(fn, ms, clock = () => Date.now()) {
   };
 }
 
+// Like `cached`, but a caller never waits for a refresh once a result exists: it gets the last result while the
+// next read runs in the background. Before the first result a caller waits at most `firstWaitMs`.
+export function refreshing(fn, ms, clock = () => Date.now(), firstWaitMs = 2000) {
+  const read = cached(fn, ms, clock);
+  let last = null;
+  return () => {
+    const next = read().then(result => (last = result));
+    if (last) return Promise.resolve(last);
+    let timer;
+    const waited = new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, error: 'still being read', value: null, at: null }), firstWaitMs); });
+    return Promise.race([next, waited]).finally(() => clearTimeout(timer));
+  };
+}
+
 const REASONS = [
   [/^Invalid (dealing|lock certificate)/, "the buyer's lock details did not check out"],
   [/^Timed out/, 'the other side took too long to answer'],
@@ -132,7 +146,8 @@ export function withdrawalView(w, network) {
 export function walletView(info, { network, role }) {
   if (!info) return null;
   const chainOf = asset => (['SOL', 'USDC'].includes(asset) ? 'solana' : 'trac');
-  const assets = Object.entries(info.balances).filter(([asset]) => info.addresses[chainOf(asset)]).map(([asset, b]) => {
+  // Balances are null while the chains cannot be read; addresses, storage and withdrawals still show.
+  const assets = Object.entries(info.balances ?? {}).filter(([asset]) => info.addresses[chainOf(asset)]).map(([asset, b]) => {
     const chain = chainOf(asset), lock = info.payout?.[chain] ?? null;
     return { asset, chain, address: info.addresses[chain], total: amount(b.balance, asset), inUse: amount(b.committed, asset), free: amount(b.free, asset),
       parts: Object.fromEntries(Object.entries(b.breakdown).map(([k, v]) => [k, amount(v, asset)])),
@@ -140,7 +155,7 @@ export function walletView(info, { network, role }) {
   });
   const notes = [];
   for (const asset of ['SOL', 'TNK']) {
-    const b = info.balances[asset];
+    const b = info.balances?.[asset];
     if (!b || !info.addresses[chainOf(asset)] || BigInt(b.breakdown.fees) === 0n || BigInt(b.wallet) >= BigInt(b.breakdown.fees)) continue;
     notes.push(`${asset} is below what fees need: keep at least ${amount(b.breakdown.fees, asset).text} ${asset} here (now ${amount(b.wallet, asset).text}).`);
   }
@@ -181,7 +196,7 @@ function traderView({ role, config, wallet, expired, now }) {
   });
   return {
     signersOnline: status.signersOnline.length, software: status.software, registryVersion: status.registryVersion,
-    balances: wallet ? Object.fromEntries(['TNK', 'RESET', 'USDC', 'SOL'].map(a => [a, { total: amount(wallet.balances[a].balance, a), free: amount(wallet.balances[a].free, a) }])) : null,
+    balances: wallet?.balances ? Object.fromEntries(['TNK', 'RESET', 'USDC', 'SOL'].map(a => [a, { total: amount(wallet.balances[a].balance, a), free: amount(wallet.balances[a].free, a) }])) : null,
     attention: attention.sort((a, b) => (b.at ?? Infinity) - (a.at ?? Infinity)),
     offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {
       const base = o.pair.split('/')[0];
@@ -288,7 +303,7 @@ function summary(view, kind) {
 // memory; chain balances go through a 30-second cache, peer readings through short caches.
 export function createModel({ config, role, wallets = null, bridge, clock = () => Date.now() }) {
   const kind = config.role, now = () => Math.floor(clock() / 1000);
-  const balances = wallets ? cached(() => wallets.info(), BALANCE_CACHE_MS, clock) : null;
+  const balances = wallets ? refreshing(() => wallets.info(), BALANCE_CACHE_MS, clock) : null;
   const stats = cached(() => bridge.stats(), 10000, clock);
   const readers = cached(async () => {
     const [trac, reset] = await Promise.allSettled([bridge.call('dex_msb_info', {}, 5000), bridge.call('dex_reset_context', {}, 5000)]);
@@ -349,7 +364,8 @@ export function createModel({ config, role, wallets = null, bridge, clock = () =
       const sec = now(), wallet = balances ? await balances() : null;
       const peerConnected = bridge.ws?.readyState === 1;
       const out = { role: kind, network: config.network, generatedAt: sec,
-        wallets: wallet ? { ...walletView(wallet.value, { network: config.network, role: kind }), error: wallet.ok ? null : wallet.error, readAt: Math.floor(wallet.at / 1000) } : null };
+        wallets: wallet ? { ...(walletView(wallet.value, { network: config.network, role: kind }) ?? { assets: [], notes: [], withdrawals: [], storage: null, backup: null }),
+          error: wallet.ok ? wallet.value?.balanceError ?? null : wallet.error, readAt: wallet.at ? Math.floor(wallet.at / 1000) : null } : null };
       if (kind === 'trader') out.trader = summary(await view(sec, wallet?.value), kind);
       if (kind === 'signer') {
         const r = await readers();

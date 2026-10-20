@@ -165,7 +165,7 @@ export class TradeHost {
   }
 
   #save(trade) {
-    const { seen, queue, busy, lastResend, perSender, presentSent, budgetAt, makerConnectedAt, ...record } = trade;
+    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, ...record } = trade;
     this.store.put(`trade-${trade.key}`, record);
   }
 
@@ -493,6 +493,15 @@ export class TradeHost {
       }
       // Messages on sidechannels are not stored anywhere: while a trade waits, repeat what this side already said.
       // A signer's ack only matters until sendBy; after it, the ack goes only to members that announce themselves.
+      // A signer still missing the dealing asks again every 10 s (joining announced it once): every trader answers
+      // 'present' by repeating what it said on that channel.
+      if (trade.role === 'signer' && s.phase === 'awaitDeal') {
+        trade.presentAt ??= now;
+        if (now - trade.presentAt >= 10) {
+          trade.presentAt = now;
+          for (const ch of this.#channels(trade)) this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false }).catch(() => {});
+        }
+      }
       if (trade.phaseSeen !== s.phase) { trade.phaseSeen = s.phase; trade.phaseSince = now; }
       else if (now - trade.phaseSince >= 10 && now - (trade.autoResendAt ?? 0) >= 10 && !(trade.role === 'signer' && now >= s.terms.sendBy)) {
         trade.autoResendAt = now;

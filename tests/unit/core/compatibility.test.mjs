@@ -118,18 +118,18 @@ test('progress just before each step deadline succeeds; at the deadline it canno
   }
 });
 
-test('seller and signer working notes add 30 seconds per note, cap at 150 and cannot revive an expired wait', () => {
+test('seller and signer working notes add 60 seconds per note, cap at 150 and cannot revive an expired wait', () => {
   for (const name of ['seller', 'signer1']) {
     const s = snap(name, 'awaitDeal'); assert.ok(s, name);
     const body = { tradeId: s.tradeId, step: 'certificate' };
-    assert.equal(step(s, { stepElapsedMs: 30000 }).state.phase, 'aborted');
+    assert.equal(step(s, { stepElapsedMs: 60000 }).state.phase, 'aborted');
     let current = message(s, 'working', body, { stepElapsedMs: 10000 }).state;
-    assert.equal(current.dealBudgetMs, 60000);
+    assert.equal(current.dealBudgetMs, 120000);
     for (let i = 0; i < 5; i++) current = message(current, 'working', body, { stepElapsedMs: 10001 + i }).state;
     assert.equal(current.dealBudgetMs, 150000);
     assert.equal(step(current, { stepElapsedMs: 149999 }).state.phase, 'awaitDeal');
     assert.equal(step(current, { stepElapsedMs: 150000 }).state.phase, 'aborted');
-    assert.equal(message(s, 'working', body, { stepElapsedMs: 30000 }).state.phase, 'aborted');
+    assert.equal(message(s, 'working', body, { stepElapsedMs: 60000 }).state.phase, 'aborted');
   }
 });
 
