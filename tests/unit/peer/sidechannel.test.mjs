@@ -9,7 +9,7 @@ function receiver(config = {}) {
   let message;
   const channel = { addMessage(value) { message = value; return value; }, open() {}, fullyOpened: () => new Promise(() => {}) };
   const connection = { userData: { createChannel: () => channel } };
-  sidechannel._openChannelForConnection(connection, { name: 'test', protocol: 'sidechannel/test' });
+  sidechannel._openChannelForConnection(connection, sidechannel._registerChannel('test'));
   return { sidechannel, connection, message };
 }
 
@@ -64,7 +64,7 @@ test('rate admission is shared by channels on one connection and isolated from o
   assert.deepEqual(decode(message, wire('{}')), {});
   let second;
   connection.userData.createChannel = () => ({ addMessage(value) { second = value; return value; }, open() {}, fullyOpened: () => new Promise(() => {}) });
-  sidechannel._openChannelForConnection(connection, { name: 'other', protocol: 'sidechannel/other' });
+  sidechannel._openChannelForConnection(connection, sidechannel._registerChannel('other'));
   assert.equal(decode(second, wire('{}')), null);
   const other = receiver({ rateBurstBytes: 5 });
   assert.deepEqual(decode(other.message, wire('{}')), {});

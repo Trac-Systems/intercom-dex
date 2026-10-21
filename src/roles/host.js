@@ -69,11 +69,14 @@ export class TradeHost {
     this.trades = new Map();
     this.byChannel = new Map();
     this.joined = new Set();
+    this.makerPins = new Map();
+    this.stopped = false;
     this.slot = null;
     this.hooks = { afterStep: [], unrouted: [] };
   }
 
   async start() {
+    this.stopped = false;
     this.bridge.on('message', (channel, message) => { this.#route(channel, message).catch(e => this.log('route error', e.message)); });
     if (this.solana) await this.#refreshSlot();
     this.timer = setInterval(() => this.#tickAll(), this.tickMs);
@@ -84,7 +87,11 @@ export class TradeHost {
     }
   }
 
-  stop() { clearInterval(this.timer); clearInterval(this.slotTimer); }
+  stop() {
+    this.stopped = true;
+    clearInterval(this.timer); clearInterval(this.slotTimer);
+    this.#releaseMakerPins();
+  }
 
   // The chain view negotiation needs: the latest finalized slot and the tip. Messages that need it wait in the
   // buffer while it is stale and are applied once it is fresh again (they are never consumed against a stale view).
@@ -153,14 +160,31 @@ export class TradeHost {
     for (const ch of this.#channels(trade)) {
       if (!this.byChannel.has(ch)) this.byChannel.set(ch, new Set());
       this.byChannel.get(ch).add(trade.key);
-      if (!this.joined.has(ch)) {
-        await this.bridge.join(ch);
-        this.joined.add(ch);
+      const makerPeer = !this.stopped && !isFinished(trade) && trade.state.mode === 'taker' && ch === tradeChannel(trade.state.offerId) ? trade.makerPeer : undefined;
+      if (!this.joined.has(ch) || (makerPeer && !this.makerPins.has(ch))) {
+        const pin = makerPeer && !this.makerPins.has(ch) ? { peerKey: makerPeer } : null;
+        if (pin) this.makerPins.set(ch, pin);
+        try {
+          await this.bridge.join(ch, makerPeer);
+          this.joined.add(ch);
+        } catch (error) {
+          if (pin && this.makerPins.get(ch) === pin) this.makerPins.delete(ch);
+          throw error;
+        }
       }
       if (announce && !trade.presentSent.includes(ch)) {
         trade.presentSent.push(ch);
         await this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false });
       }
+    }
+  }
+
+  #releaseMakerPins() {
+    for (const [channel, pin] of this.makerPins) {
+      if (!this.stopped && [...this.trades.values()].some(trade => !isFinished(trade) && trade.state.mode === 'taker' &&
+          trade.makerPeer === pin.peerKey && tradeChannel(trade.state.offerId) === channel)) continue;
+      this.makerPins.delete(channel);
+      this.bridge.join(channel, null).catch(error => this.log('maker release', error.message));
     }
   }
 
@@ -333,6 +357,7 @@ export class TradeHost {
       if (event.type !== 'tick' || actions.length || state.phase !== before.phase || state.stepElapsedMs !== before.stepElapsedMs) this.#save(trade);
     }
     catch (error) { trade.state = before; throw error; }
+    if (isFinished(trade)) this.#releaseMakerPins();
     if (state.stepStage !== before.stepStage || event.type === 'resume') trade.budgetAt = observedAt;
     if (state.tradeId && !before.tradeId) this.#joinChannels(trade).catch(e => this.log('join', e.message));
     for (const action of actions) await this.#act(trade, action);

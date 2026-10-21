@@ -53,7 +53,9 @@ test('trader lists page all rows beyond former caps and state contains only coun
 });
 
 test('signer and service lists preserve row shapes, sorting and summaries without embedding their lists', async t => {
-  const sf = signerFixture(), s = await startFor(t, sf), state = (await get(s, '/api/state')).json().signer;
+  const sf = signerFixture();
+  t.mock.method(Date, 'now', () => sf.now * 1000);
+  const s = await startFor(t, sf), state = (await get(s, '/api/state')).json().signer;
   assert.deepEqual(state.counts, { pieces: 3, recent: 3 });
   assert.equal(state.pieces.list, undefined); assert.equal(state.recent, undefined);
   assert.deepEqual(state.pieces, { held: 3, nextAt: sf.now });

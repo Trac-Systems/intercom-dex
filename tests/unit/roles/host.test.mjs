@@ -159,3 +159,56 @@ test('host restart discards elapsed step time and maker presence, retaining the 
   ms += 59000; await host.deliver('restart', { type: 'tick' }); assert.equal(trade.state.phase, 'awaitAccept');
   ms += 1000; await host.deliver('restart', { type: 'tick' }); assert.equal(trade.state.phase, 'aborted');
 });
+
+test('taker offer joins pin the maker until the last active trade ends, and stop releases remaining hints', async t => {
+  const clock = { ms: 0 }, { host } = hostFixture(t, null, clock), calls = [];
+  host.bridge.join = async (channel, makerPeer) => { calls.push({ channel, makerPeer }); };
+  host.bridge.peerPresent = async () => false;
+  await host.start();
+  const state = structuredClone(transcript.snapshots.get('buyer:awaitAccept')), makerPeer = hex();
+  const channel = 'intercom-dex:t:' + state.offerId;
+  for (const key of ['one', 'two']) await host.addTrade({ key, role: 'buyer', state: structuredClone(state), makerPeer, lifetimeSec: 86400 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.some(call => call.channel === channel && call.makerPeer === makerPeer));
+  assert.equal(host.makerPins.size, 1);
+  clock.ms = 60000;
+  await host.deliver('one', { type: 'tick' });
+  assert.equal(host.trades.get('one').state.phase, 'aborted');
+  assert.equal(calls.filter(call => call.makerPeer === null).length, 0);
+  await host.deliver('two', { type: 'tick' });
+  assert.deepEqual(calls.filter(call => call.makerPeer === null), [{ channel, makerPeer: null }]);
+  assert.equal(host.makerPins.size, 0);
+  await host.addTrade({ key: 'three', role: 'buyer', state: structuredClone(state), makerPeer, lifetimeSec: 86400 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.at(-1).makerPeer, makerPeer, 'an existing channel acquires its hint again');
+  host.stop();
+  assert.deepEqual(calls.at(-1), { channel, makerPeer: null });
+  assert.equal(host.makerPins.size, 0);
+});
+
+test('a stalled hinted join is released when its trade ends; a late join reply does not pin again', async t => {
+  const clock = { ms: 0 }, { host } = hostFixture(t, null, clock), joined = deferred(), calls = [];
+  host.bridge.join = (channel, makerPeer) => { calls.push({ channel, makerPeer }); return makerPeer ? joined.promise : Promise.resolve(); };
+  host.bridge.peerPresent = async () => false;
+  await host.start();
+  const state = structuredClone(transcript.snapshots.get('buyer:awaitAccept')), makerPeer = hex();
+  await host.addTrade({ key: 'pending', role: 'buyer', state, makerPeer, lifetimeSec: 86400 });
+  clock.ms = 60000; await host.deliver('pending', { type: 'tick' });
+  assert.equal(calls.at(-1).makerPeer, null); assert.equal(host.makerPins.size, 0);
+  joined.resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(host.makerPins.size, 0); assert.equal(calls.length, 2);
+});
+
+test('maker trades, signer channels and finished taker restores do not request maker pins', async t => {
+  const clock = { ms: 0 }, { host } = hostFixture(t, null, clock), calls = [];
+  host.bridge.join = async (channel, makerPeer) => { calls.push({ channel, makerPeer }); };
+  await host.start();
+  for (const [role, phase] of [['seller', 'awaitTake'], ['signer', 'awaitDeal'], ['buyer', 'complete']]) {
+    const state = structuredClone(transcript.snapshots.get(`${role === 'signer' ? 'signer1' : role}:${phase}`));
+    assert.ok(state, `${role}:${phase} fixture`);
+    await host.addTrade({ key: role, role, state, makerPeer: hex(), lifetimeSec: 86400 });
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.length > 0); assert.ok(calls.every(call => call.makerPeer === undefined));
+  assert.equal(host.makerPins.size, 0);
+});

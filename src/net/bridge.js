@@ -49,7 +49,10 @@ export class Bridge extends EventEmitter {
   relayStats() { return this.request({ type: 'relays.stats' }); }
   send(channel, message) { return this.request({ type: 'send', channel, message }); }
   subscribe(channels) { return this.request({ type: 'subscribe', channels }); }
-  join(channel) { return this.request({ type: channel.startsWith('intercom-dex:t:') ? 'dex_join' : 'join', channel }, 120000); }
+  join(channel, makerPeer) {
+    const trade = channel.startsWith('intercom-dex:t:');
+    return this.request({ type: trade ? 'dex_join' : 'join', channel, ...(trade && makerPeer !== undefined ? { makerPeer } : {}) }, 120000);
+  }
   leave(channel) { return this.request({ type: 'leave', channel }); }
   info() { return this.request({ type: 'info' }); }
   stats() { return this.request({ type: 'stats' }); }

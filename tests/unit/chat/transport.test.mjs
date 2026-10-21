@@ -36,8 +36,8 @@ test('peer validates PoW and signed chat before delivery or relay, including lim
     onMessage: (_, payload) => delivered.push(payload) });
   let handle;
   const channel = { addMessage(h) { handle = h; return h; }, open() {}, fullyOpened: () => new Promise(() => {}) };
-  sc._openChannelForConnection({ userData: { createChannel: () => channel } }, { name: CHAT_CHANNEL, protocol: 'sidechannel/' + CHAT_CHANNEL });
-  sc.connections.set({}, new Map([[CHAT_CHANNEL, { message: { send: payload => relayed.push(payload) } }]]));
+  sc._openChannelForConnection({ userData: { createChannel: () => channel } }, sc._registerChannel(CHAT_CHANNEL));
+  sc.connections.set({}, new Map([[CHAT_CHANNEL, { channel: { opened: true }, message: { send: payload => relayed.push(payload) } }]]));
   const key = generateIdentity();
   const raw = (text, identity = key, ts = now / 1000) => seal({ kind: 'chat', ch: CHAT_CHANNEL, body: { text, ts } }, identity.secretKey, { ts, nonce: random32() });
   const deliver = async message => { const payload = await sc._buildPayload(CHAT_CHANNEL, message); handle.onmessage(payload); return payload; };

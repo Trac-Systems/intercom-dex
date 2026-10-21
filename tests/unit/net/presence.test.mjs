@@ -11,6 +11,10 @@ test('bridge presence requires the named peer with an open protocol on exactly t
   const query = (patch = {}) => { const p = { channel, peerKey, ...patch }; return peerPresent(sidechannel, p.channel, p.peerKey); };
   assert.equal(query(), false);
   protocol.opened = true; assert.equal(query(), true);
+  protocol.closed = true; assert.equal(query(), false); protocol.closed = false;
+  protocol.destroyed = true; assert.equal(query(), false); protocol.destroyed = false;
+  const connection = [...sidechannel.connections.keys()][0];
+  connection.destroyed = true; assert.equal(query(), false); connection.destroyed = false;
   assert.equal(query({ peerKey: 'c'.repeat(64) }), false);
   assert.equal(query({ channel: 'intercom-dex:t:' + 'd'.repeat(64) }), false);
   assert.throws(() => query({ channel: 'intercom-dex' }), /Invalid/);
@@ -24,4 +28,15 @@ test('client presence passes the channel and maker peer key and requires an affi
   assert.equal(await bridge.peerPresent(channel, peerKey), true);
   assert.deepEqual(calls[0], { type: 'dex_presence', channel, peerKey });
   result = { connected: 1 }; assert.equal(await bridge.peerPresent(channel, peerKey), false);
+});
+
+test('client join carries an optional maker hint or its release only on trade channels', async () => {
+  const bridge = new Bridge({ url: 'ws://127.0.0.1:1', token: 'unit' }), calls = [];
+  bridge.request = async (body, timeout) => { calls.push({ body, timeout }); };
+  await bridge.join(channel, peerKey); await bridge.join(channel, null); await bridge.join(channel); await bridge.join('intercom-dex', peerKey);
+  assert.deepEqual(calls.map(x => x.body), [
+    { type: 'dex_join', channel, makerPeer: peerKey }, { type: 'dex_join', channel, makerPeer: null },
+    { type: 'dex_join', channel }, { type: 'join', channel: 'intercom-dex' },
+  ]);
+  assert.ok(calls.every(x => x.timeout === 120000));
 });

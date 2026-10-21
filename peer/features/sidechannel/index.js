@@ -91,6 +91,7 @@ class Sidechannel extends Feature {
     this.key = 'sidechannel';
     this.channels = new Map();
     this.connections = new Map();
+    this._openGeneration = 0;
     this.rateLimits = new Map();
     this.started = false;
     this._dhtBootPromise = null;
@@ -361,7 +362,7 @@ class Sidechannel extends Feature {
       if (connection === originConnection) continue;
       if (!this._remoteAuthorized(channel, connection)) continue;
       const record = perConn.get(channel);
-      if (record?.message) {
+      if (this._usableRecord(connection, channel, record)) {
         record.message.send(relayed);
       }
     }
@@ -638,13 +639,13 @@ class Sidechannel extends Feature {
   }
 
   // Cache by content, including channel and invite. Concurrent sends share one stamp. A finished stamp is reused for
-  // sixty seconds from its timestamp; a pending one is never dropped, so re-sends never queue a second job.
+  // ten seconds on trade channels, sixty elsewhere; a pending one never queues a second job.
   _stampedPayload(channel, message, invite) {
     const serialized = stableStringify({ channel, message, invite: invite ?? null });
     if (b4a.byteLength(serialized) + 1024 > this.maxMessageBytes) return Promise.reject(new Error('Message too large'));
     const id = sha256Hex(serialized), now = this._now();
     for (const [key, entry] of this.stamped) {
-      if (entry.done && now - entry.at >= 60000) { this.stamped.delete(key); this.stampedBytes -= entry.bytes; }
+      if (entry.done && now - entry.at >= entry.reuseMs) { this.stamped.delete(key); this.stampedBytes -= entry.bytes; }
     }
     const old = this.stamped.get(id);
     if (old) return old.promise;
@@ -656,7 +657,7 @@ class Sidechannel extends Feature {
       if (this.stamped.size < 5000 && this.stampedBytes + bytes <= 16_000_000) break;
       if (entry.done) { this.stamped.delete(key); this.stampedBytes -= entry.bytes; }
     }
-    const entry = { at: now, bytes, done: false };
+    const entry = { at: now, bytes, done: false, reuseMs: channel.startsWith('intercom-dex:t:') ? 10000 : 60000 };
     const queue = required ? this.powQueues[level] : Promise.resolve();
     if (required) this.powPending[level]++;
     entry.promise = queue.then(() => this._buildPayload(channel, copy.message, copy.invite)).then(payload => {
@@ -817,13 +818,22 @@ class Sidechannel extends Feature {
     return this._isInvited(channel, remoteKey);
   }
 
+  _usableRecord(connection, name, record) {
+    return !connection.destroyed && this.connections.get(connection)?.get(name) === record && !!record?.message &&
+      record.channel?.opened === true && !record.channel.closed && !record.channel.destroyed;
+  }
+
   _openChannelForConnection(connection, entry) {
+    if (connection.destroyed || this.channels.get(entry.name) !== entry) return;
     const mux = connection.userData;
     if (!mux || typeof mux.createChannel !== 'function') {
       const tries = (connection.__sidechannelMuxTries || 0) + 1;
       connection.__sidechannelMuxTries = tries;
       if (tries <= 5) {
-        setTimeout(() => this._openChannelForConnection(connection, entry), 50);
+        const generation = this._openGeneration;
+        setTimeout(() => {
+          if (this._openGeneration === generation) this._openChannelForConnection(connection, entry);
+        }, 50);
       } else if (this.debug) {
         console.log(`[sidechannel:${entry.name}] mux not ready for connection.`);
       }
@@ -835,7 +845,10 @@ class Sidechannel extends Feature {
       perConn = new Map();
       this.connections.set(connection, perConn);
     }
+    const previous = perConn.get(entry.name);
+    if (previous?.channel?.closed || previous?.channel?.destroyed) perConn.delete(entry.name);
     if (perConn.has(entry.name)) return;
+    const current = () => !connection.destroyed && this.connections.get(connection) === perConn && this.channels.get(entry.name) === entry;
     if (!perConn._paired) perConn._paired = new Set();
     // Track open retries per connection+channel to avoid infinite retry loops
     // when the remote peer hasn't joined/paired the protocol yet.
@@ -844,7 +857,7 @@ class Sidechannel extends Feature {
       perConn._paired.add(entry.protocol);
       if (typeof mux.pair === 'function') {
         mux.pair({ protocol: entry.protocol }, () => {
-          this._openChannelForConnection(connection, entry);
+          if (current()) this._openChannelForConnection(connection, entry);
         });
       }
     }
@@ -856,10 +869,13 @@ class Sidechannel extends Feature {
       console.log(`[sidechannel:${entry.name}] opening channel for ${remoteKey}`);
     }
 
+    let record;
     const channel = mux.createChannel({
       protocol: entry.protocol,
       onopen() {},
-      onclose() {}
+      onclose() {
+        if (perConn.get(entry.name) === record) perConn.delete(entry.name);
+      }
     });
     if (!channel) {
       if (this.debug) {
@@ -871,6 +887,7 @@ class Sidechannel extends Feature {
     const message = channel.addMessage({
       encoding: boundedJson(this.maxMessageBytes, bytes => this._checkRate(connection, bytes)),
       onmessage: (payload) => {
+        if (!current() || perConn.get(entry.name) !== record || channel.closed || channel.destroyed) return;
         if (payload === null || this._isBlocked(connection)) return;
         let payloadJson = null;
         try {
@@ -1023,49 +1040,45 @@ class Sidechannel extends Feature {
       }
     });
 
-    const record = { channel, message, retries: 0, authSent: false };
+    record = { channel, message, authSent: false };
     perConn.set(entry.name, record);
+    const attempt = { count: perConn._openRetries.get(entry.name)?.count ?? 0, lastAt: perConn._openRetries.get(entry.name)?.lastAt ?? 0 };
+    perConn._openRetries.set(entry.name, attempt);
 
     channel.open();
-    channel
-      .fullyOpened()
-      .then((opened) => {
-        if (this.debug) {
-          console.log(
-            `[sidechannel:${entry.name}] channel open=${opened} for ${this._getRemoteKey(connection)}`
-          );
-        }
-        if (opened) {
-          if (perConn._openRetries) perConn._openRetries.delete(entry.name);
-          this._sendWelcome(record, entry, connection).catch(() => {});
-          this._sendAuth(record, entry).catch(() => {});
-          return;
-        }
-        const now = this._now();
-        const state = perConn._openRetries?.get(entry.name) || { count: 0, lastAt: 0 };
-        // If the last attempt was a while ago, start a fresh retry burst.
-        const baseCount = now - (state.lastAt || 0) > 2000 ? 0 : Number(state.count) || 0;
-        const retryCount = baseCount + 1;
-        if (perConn._openRetries) {
-          perConn._openRetries.set(entry.name, { count: retryCount, lastAt: now });
-        }
-        if (retryCount <= 5) {
-          try {
-            record?.channel?.close?.();
-          } catch (_e) {}
-          perConn.delete(entry.name);
-          setTimeout(() => this._openChannelForConnection(connection, entry), 100 * retryCount);
-          return;
-        }
-        if (this.debug) {
-          console.log(`[sidechannel:${entry.name}] giving up (open retries exceeded) for ${this._getRemoteKey(connection)}`);
-        }
-        try {
-          record?.channel?.close?.();
-        } catch (_e) {}
-        perConn.delete(entry.name);
-      })
-      .catch(() => {});
+    const finish = (opened) => {
+      if (!current() || perConn._openRetries.get(entry.name) !== attempt) return;
+      if (this.debug) {
+        console.log(
+          `[sidechannel:${entry.name}] channel open=${opened} for ${this._getRemoteKey(connection)}`
+        );
+      }
+      if (opened && !channel.closed && !channel.destroyed && perConn.get(entry.name) === record) {
+        perConn._openRetries.delete(entry.name);
+        this._sendWelcome(record, entry, connection).catch(() => {});
+        this._sendAuth(record, entry).catch(() => {});
+        return;
+      }
+      const now = this._now();
+      // If the last attempt was a while ago, start a fresh retry burst.
+      const baseCount = now - attempt.lastAt > 2000 ? 0 : attempt.count;
+      const retryCount = baseCount + 1;
+      attempt.count = retryCount; attempt.lastAt = now;
+      if (retryCount <= 5) {
+        try { channel.close(); } catch (_e) {}
+        if (perConn.get(entry.name) === record) perConn.delete(entry.name);
+        setTimeout(() => {
+          if (current() && perConn._openRetries.get(entry.name) === attempt && !perConn.has(entry.name)) this._openChannelForConnection(connection, entry);
+        }, 100 * retryCount);
+        return;
+      }
+      if (this.debug) {
+        console.log(`[sidechannel:${entry.name}] giving up (open retries exceeded) for ${this._getRemoteKey(connection)}`);
+      }
+      try { channel.close(); } catch (_e) {}
+      if (perConn.get(entry.name) === record) perConn.delete(entry.name);
+    };
+    channel.fullyOpened().then(finish, () => finish(false)).catch(() => {});
   }
 
   // Flush can hang in degraded networks. Bound the wait so the app can keep
@@ -1121,6 +1134,7 @@ class Sidechannel extends Feature {
       try {
         this.peer.swarm.join(entry.topic, { server: true, client: true });
         await this._flushSwarm();
+        if (this.channels.get(entry.name) !== entry) return false;
         this._markAnnounced(entry, true);
         return true;
       } catch (err) {
@@ -1128,12 +1142,10 @@ class Sidechannel extends Feature {
           console.log(`[sidechannel:${entry.name}] announce failed: ${err?.message ?? err}`);
         }
         return false;
-      } finally {
-        entry._announcing = null;
       }
     })();
-    entry._announcing = announcing;
-    return announcing;
+    entry._announcing = announcing.finally(() => { entry._announcing = null; });
+    return entry._announcing;
   }
 
   /**
@@ -1148,17 +1160,15 @@ class Sidechannel extends Feature {
   async addChannel(name) {
     const entry = this._registerChannel(name);
     if (!entry) return false;
+    for (const connection of new Set([...this.connections.keys(), ...(this.peer?.swarm?.connections ?? [])])) {
+      this._openChannelForConnection(connection, entry);
+    }
     if (entry.announced) return true;
     if (!this.peer?.swarm) return false;
     const announced = this.started
       ? await this._announceChannel(entry)
       : await this._whenAnnounced(entry);
-    if (!announced) return false;
-
-    for (const connection of this.connections.keys()) {
-      this._openChannelForConnection(connection, entry);
-    }
-    return true;
+    return announced && this.channels.get(entry.name) === entry;
   }
 
   async removeChannel(name) {
@@ -1167,21 +1177,23 @@ class Sidechannel extends Feature {
     if (this._isEntry(channel)) return false; // Entry rendezvous is global; do not leave it dynamically.
     const entry = this.channels.get(channel);
     if (!entry) return false;
+    this.channels.delete(entry.name);
 
     // Close mux protocol channels for this topic across all active connections.
-    for (const [, perConn] of this.connections.entries()) {
+    for (const [connection, perConn] of this.connections.entries()) {
       const record = perConn.get(entry.name);
       if (record) {
         try {
           record?.channel?.close?.();
         } catch (_e) {}
-        perConn.delete(entry.name);
+        if (perConn.get(entry.name) === record) perConn.delete(entry.name);
       }
       try {
         perConn?._openRetries?.delete?.(entry.name);
       } catch (_e) {}
       try {
         perConn?._paired?.delete?.(entry.protocol);
+        connection.userData?.unpair?.({ protocol: entry.protocol });
       } catch (_e) {}
     }
 
@@ -1189,20 +1201,18 @@ class Sidechannel extends Feature {
 
     // Release anyone waiting for this channel to be announced: it is going away,
     // so the answer is a definitive "not joined" rather than a hang.
-    const wasAnnounced = entry.announced === true;
+    const wasJoined = entry.announced === true || !!entry._announcing;
     this._markAnnounced(entry, false);
 
     // Drop in-memory per-channel state to avoid unbounded growth from ephemeral channels.
-    this.channels.delete(entry.name);
     this.invitedPeers.delete(entry.name);
     this.localInvites.delete(normalized);
     this.localInviteObjects.delete(normalized);
     this.welcomeByChannel.delete(normalized);
     this.welcomedChannels.delete(normalized);
 
-    // Best-effort: stop swarm discovery for the topic if supported. Leave only
-    // what was actually announced — an unannounced topic was never on the swarm.
-    if (wasAnnounced && this.peer?.swarm) {
+    // Stop discovery even when the join's flush was still pending.
+    if (wasJoined && this.peer?.swarm) {
       try {
         if (typeof this.peer.swarm.leave === 'function') {
           this.peer.swarm.leave(entry.topic);
@@ -1282,15 +1292,16 @@ class Sidechannel extends Feature {
         continue;
       }
       const record = perConn.get(channel);
-      if (record?.message) {
+      if (record?.message && !connection.destroyed && !record.channel?.closed && !record.channel?.destroyed) {
         if (!record.channel?.opened) {
           record.channel
             ?.fullyOpened()
             .then((opened) => {
-              if (opened) record.message.send(payload);
+              if (opened && this._usableRecord(connection, channel, record) &&
+                  (allowUnauthedSend || this._remoteAuthorized(channel, connection)) && this._checkPow(payload, channel)) record.message.send(payload);
             })
             .catch(() => {});
-        } else {
+        } else if (this._usableRecord(connection, channel, record)) {
           record.message.send(payload);
         }
       } else if (this.debug) {
@@ -1380,6 +1391,7 @@ class Sidechannel extends Feature {
 
   async stop() {
     this.started = false;
+    this._openGeneration++;
     this._dhtBootPromise = null;
     this.connections.clear();
     this.stamped.clear(); this.stampedBytes = 0;

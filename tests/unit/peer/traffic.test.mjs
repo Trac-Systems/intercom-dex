@@ -18,8 +18,8 @@ function receiver(config = {}, peer = {}) {
   const delivered = [], relayed = [], sc = new Sidechannel(peer, { welcomeRequired: false, onMessage: (...args) => delivered.push(args), ...config });
   let handle;
   const ch = { opened: true, addMessage(h) { handle = h; return h; }, open() {}, fullyOpened: () => new Promise(() => {}) };
-  sc._openChannelForConnection({ userData: { createChannel: () => ch } }, { name: 'test', protocol: 'sidechannel/test' });
-  sc.connections.set({}, new Map([['test', { message: { send: p => relayed.push(p) } }]]));
+  sc._openChannelForConnection({ userData: { createChannel: () => ch } }, sc._registerChannel('test'));
+  sc.connections.set({}, new Map([['test', { channel: { opened: true }, message: { send: p => relayed.push(p) } }]]));
   return { sc, delivered, relayed, receive: p => handle.onmessage(p) };
 }
 
@@ -173,19 +173,20 @@ test('a stranger take flood above the stamping rate does not delay transferSent 
 
 test('the stamp cache never drops a pending stamp; re-sends share it and expire only after it finished', async t => {
   const sc = new Sidechannel({ wallet: wallet() }, { powEnabled: true, powDifficulty: 4 });
+  const channel = 'intercom-dex:t:' + 'b'.repeat(64);
   const slice = powWorker.slice.bind(powWorker);
   let held = true, now = 100000;
   sc._now = () => now;
   t.mock.method(powWorker, 'slice', job => held ? Promise.resolve({ nonce: -1 }) : slice(job));
   const work = t.mock.method(sc, '_attachPow', sc._attachPow.bind(sc));
-  const first = sc._stampedPayload('test', { kind: 'transferSent' });
+  const first = sc._stampedPayload(channel, { kind: 'transferSent' });
   await new Promise(resolve => setTimeout(resolve, 0));
   now += 120000;
-  assert.equal(sc._stampedPayload('test', { kind: 'transferSent' }), first);
+  assert.equal(sc._stampedPayload(channel, { kind: 'transferSent' }), first);
   held = false;
   const payload = await first;
-  now = payload.ts + 59999; assert.equal(await sc._stampedPayload('test', { kind: 'transferSent' }), payload);
-  now++; assert.notEqual(await sc._stampedPayload('test', { kind: 'transferSent' }), payload);
+  now = payload.ts + 9999; assert.equal(await sc._stampedPayload(channel, { kind: 'transferSent' }), payload);
+  now++; assert.notEqual(await sc._stampedPayload(channel, { kind: 'transferSent' }), payload);
   assert.equal(work.mock.callCount(), 2);
 });
 
