@@ -352,7 +352,9 @@ export class TradeHost {
     const { state, actions } = STEPS[trade.role](trade.state, event);
     this.#checkState(state);
     trade.state = state;
-    if (state.phase !== before.phase) this.log(trade.role, trade.key.slice(0, 12), before.phase, '->', state.phase, state.reason ?? '');
+    if (state.phase !== before.phase) this.log(trade.role, trade.key.slice(0, 12), before.phase, '->', state.phase, state.reason ?? '',
+      ...(state.phase === 'aborted' && event.message?.kind === 'accept'
+        ? [`(their accept slot ${event.message.body?.slot}, our finalized ${event.observedSlot} tip ${event.tipSlot})`] : []));
     try {
       if (event.type !== 'tick' || actions.length || state.phase !== before.phase || state.stepElapsedMs !== before.stepElapsedMs) this.#save(trade);
     }

@@ -198,3 +198,20 @@ test('state stays available when the chains cannot be read: balances null, the r
   assert.deepEqual(s.wallets.assets, []);
   assert.equal(s.wallets.error, 'Balances unavailable right now: rpc down');
 });
+
+test('alerts: a take of ours that ended without a trade is an alert unless the next offer took over; strangers dropping a take are not', async () => {
+  const fx = traderFixture(), now = nowSec();
+  fx.config.proof.zkey = fileURLToPath(import.meta.url);
+  fx.role.host.trades.delete('t-off'); fx.role.store.map.clear();
+  const base = fx.role.host.trades.get('t-acks').state;
+  const add = (key, extra) => fx.role.host.trades.set(key, { key, role: 'buyer', state: { ...base, tradeId: undefined, phase: 'aborted', now: now - 30, ...extra } });
+  add('take-last', { mode: 'taker', reason: 'Accept slot outside the freshness window' });
+  add('take-moved', { mode: 'taker', reason: 'Timed out: take/accept' });
+  add('stranger', { mode: 'maker', reason: 'Timed out: deciding block' });
+  const notes = { 'take-moved': { moved: true, text: 'The next offer at this price was taken instead.' },
+    'take-last': { moved: false, text: 'No other offer at this price could take over.' } };
+  const m = createModel({ config: fx.config, role: fx.role, wallets: fx.wallets, bridge: fx.bridge, nextOffer: { note: k => notes[k] ?? null } });
+  const items = (await m.state()).trader.attention;
+  assert.equal(items.length, 1);
+  assert.match(items[0].text, /Called off: the other side's view of the Solana chain did not match ours\. Nothing was locked or sent\. No other offer at this price could take over\./);
+});

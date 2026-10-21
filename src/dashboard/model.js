@@ -44,6 +44,7 @@ export function refreshing(fn, ms, clock = () => Date.now(), firstWaitMs = 2000)
 const REASONS = [
   [/^Invalid (dealing|lock certificate)/, "the buyer's lock details did not check out"],
   [/^Timed out/, 'the other side took too long to answer'],
+  [/^Accept (slot outside the freshness window|arrived too late)/, "the other side's view of the Solana chain did not match ours"],
   [/^Signers did not confirm/, 'not enough signers confirmed in time'],
   [/^Negotiation deadline expired/, 'the trade could not be prepared in time'],
   [/^Not enough signers online/, 'not enough signers were online'],
@@ -184,7 +185,9 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
     if (left > 0n) attention.push({ kind: 'expired', at: o.expiresAt, text: `Your offer to ${offerLine(o)} expired; ${amount(left, o.pair.split('/')[0]).text} ${o.pair.split('/')[0]} were not traded.` });
   }
   const noteOf = t => nextOffer?.note(t.key) ?? null;
-  for (const t of finished) if (['aborted', 'lost'].includes(t.state.phase) && t.state.now >= now - DAY && t.state.tradeId && !noteOf(t)?.moved) {
+  // Every take of ours that ended without a trade is an alert (unless the next offer took over); a take on our offer
+  // only once its terms were agreed, so strangers who start and drop a take do not raise one.
+  for (const t of finished) if (['aborted', 'lost'].includes(t.state.phase) && t.state.now >= now - DAY && (t.state.tradeId || t.state.mode === 'taker') && !noteOf(t)?.moved) {
     attention.push({ kind: 'failed', at: t.state.now, text: `Your ${t.state.draft.pair} trade (${tradeFacts(t).side} ${tradeFacts(t).base.text} ${tradeFacts(t).base.unit}): ${outcome(t, noteOf(t)).text}` });
   }
   const pairs = (reg?.pairs ?? []).filter(p => supportedBase(p.base));
