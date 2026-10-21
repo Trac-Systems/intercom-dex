@@ -44,6 +44,7 @@ export function refreshing(fn, ms, clock = () => Date.now(), firstWaitMs = 2000)
 const REASONS = [
   [/^Invalid (dealing|lock certificate)/, "the buyer's lock details did not check out"],
   [/^Timed out/, 'the other side took too long to answer'],
+  [/^invalid$/, 'the amount is below the smallest trade for this offer'],
   [/^Accept (slot outside the freshness window|arrived too late)/, "the other side's view of the Solana chain did not match ours"],
   [/^Signers did not confirm/, 'not enough signers confirmed in time'],
   [/^Negotiation deadline expired/, 'the trade could not be prepared in time'],

@@ -14,6 +14,7 @@ import { offerIdOf, nowSec, random32 } from '../../../src/roles/common.js';
 import { tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { fixture, tracAddress, SOL, SOL2, MINT } from '../core/helpers.mjs';
 import { SIGNER_ONLINE_SEC, DECLINES_PER_MINUTE } from '../../../src/roles/trader.js';
+import { registryPair } from '../../../src/market/assets.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
 import { controlHandler } from '../../../src/roles/control.js';
@@ -255,7 +256,8 @@ test('maker emits strict decline reasons once per nonce, and never answers inval
   const ch = 'intercom-dex:t:' + offer.offerId;
   const base = peer => ({ offerId: offer.offerId, pair: offer.pair, registryVersion: 1, software: '0.1.0', baseAmount: offer.baseAmount,
     taker: peer.me, commitment: random32(), sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 });
-  for (const [patch, reason] of [[{ software: '0.0.9' }, 'version'], [{ baseAmount: '1000000000000000001' }, 'insufficient']]) {
+  registryPair(f.registry, 'TNK/USDC').minBaseAmount = '1000';
+  for (const [patch, reason] of [[{ software: '0.0.9' }, 'version'], [{ baseAmount: '1000000000000000001' }, 'insufficient'], [{ baseAmount: '999' }, 'invalid']]) {
     const peer = party(), nonce = await channelPost(t, bridge, peer, 'take', { ...base(peer), ...patch }, ch);
     const last = bridge.sent.at(-1).envelope;
     assert.equal(last.kind, 'decline'); assert.deepEqual(last.body, { offerId: offer.offerId, takeNonce: nonce, reason });

@@ -210,7 +210,7 @@ Errors: `Withdrawal already in progress for this asset`, `Destination differs fr
 `dex_offer` and `dex_take` take integer base units of the base asset. `dex_withdraw` takes decimal token amounts.
 A price is USDC per whole base token. The trade's USDC amount (`quoteAmount`, in USDC base units) is
 `floor(baseAmount * price * 10^6 / 10^decimals)` and must be at least 1. Each pair has a `minBaseAmount` in
-`dex_status.pairs`.
+`dex_status.pairs`; an offer keeps the one of the registry version it was made under.
 
 The seller receives `quoteAmount`. The buyer locks `quoteAmount` plus the platform fee plus the venue fee, each
 rounded down on its own. The registry and the signed terms carry the fees in basis points; the venue's
@@ -299,7 +299,7 @@ A maker answers a take it can't serve with a decline. Your trade then ends `abor
 | `insufficient` | Less is left on the offer than you asked for. | Take a smaller amount from `dex_book` levels. |
 | `signers` | The maker sees fewer eligible signers online than a trade needs. | Wait a few minutes and try again. |
 | `expired` | The offer expired or was cancelled. | Pick another offer. |
-| `invalid` | Reserved; makers don't send it. A take that doesn't match the offer, the registry or the clock gets no answer at all, and your trade times out. | Refresh `dex_book`; check that this computer's clock is right. |
+| `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under. Any other take that doesn't match the offer, the registry or the clock gets no answer at all, and your trade times out. | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |
 
 A maker sends each taker at most one decline a minute. If you take the same maker again within a minute of a decline, you may get no answer and the trade times out, so wait a minute before retrying.
 | `version` | One side's software is below the registry's minimum. | Check `updateRequired`; if it is yours, update. |

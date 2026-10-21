@@ -175,7 +175,9 @@ export class Trader {
     if (trades.filter(t => t.state.mode === 'maker' && t.state.peer === m.from && beforeLock(t)).length >= MAX_NEGOTIATIONS_PER_TAKER) return decline('busy');
     const amount = BigInt(m.body.baseAmount);
     const p = reg.params;
-    if (amount < BigInt(pair.minBaseAmount) || m.body.sendBy <= now || Math.abs(m.body.sendBy - (m.ts + p.sendWindowSec)) > 120 ||
+    // A take below the pair's smallest trade gets a clear answer instead of silence.
+    if (amount < BigInt(pair.minBaseAmount)) return decline('invalid');
+    if (m.body.sendBy <= now || Math.abs(m.body.sendBy - (m.ts + p.sendWindowSec)) > 120 ||
         m.body.refundAfter - m.body.sendBy !== p.refundSec - p.sendWindowSec) return;
     if (amount > this.#inventory(offer).available) return decline('insufficient');
     if (this.wallets) {

@@ -76,6 +76,11 @@ export function createActions({ config, role, wallets = null, balances = null, n
       const pair = registryPair(reg, o.pair), base = pair.base.id;
       const baseAmount = input.amount ? amountUnits(base, text(input.amount, 100)).toString() : o.baseAmount;
       if (BigInt(baseAmount) > BigInt(o.baseAmount)) throw new Error(`This offer has only ${amount(o.baseAmount, base).text} ${base}`);
+      // The smallest trade is the one of the signer list the offer was made under; signers check terms against it.
+      if (BigInt(baseAmount) < BigInt(pair.minBaseAmount)) {
+        throw new Error(`The smallest trade for this offer is ${amount(pair.minBaseAmount, base).text} ${base}` + (BigInt(o.baseAmount) < BigInt(pair.minBaseAmount)
+          ? `; only ${amount(o.baseAmount, base).text} ${base} is left, so this rest cannot be traded. Offers placed now can go down to the current smallest trade.` : '.'));
+      }
       const quote = quoteAmount(pair, baseAmount, o.price), buying = o.side === 'sell';
       const cost = calculateFees(BigInt(quote), reg.fee.platformFeeBps, reg.fee.tradeFeeBps).totalAmount;
       return { input: { offerId, baseAmount, price: o.price }, title: `${buying ? 'Buy' : 'Sell'} ${amount(baseAmount, base).text} ${base} at ${o.price} USDC`,

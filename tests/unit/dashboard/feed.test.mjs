@@ -38,7 +38,7 @@ test('history proxy forwards normalized queries and converts decimal volumes and
   assert.equal(s.requests[0], '/v1/market/candles?pair=RESET%2FUSDC&interval=1m&limit=500');
   const before = cursor(1002, id('f'));
   const r = await s.call(tradePath + '&limit=2&before=' + before); assert.equal(r.status, 200, r.body);
-  assert.deepEqual(r.json().rows[0].amount, { units: '200000001', text: '2', unit: 'RESET' });
+  assert.deepEqual(r.json().rows[0].amount, { units: '200000001', text: '2.00000001', unit: 'RESET' });
   assert.deepEqual(r.json().rows[0].usdc, { units: '3000001', text: '3.000001', unit: 'USDC' });
   assert.equal(r.json().next, cursor()); assert.equal(r.json().rows[1].side, null);
   assert.equal(s.requests[1], '/v1/market/trades?pair=RESET%2FUSDC&limit=2&before=' + before);

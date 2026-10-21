@@ -10,7 +10,8 @@ export function formatUnits(units, decimals, places = 6) {
   return (neg ? '-' : '') + (frac ? `${whole}.${frac}` : whole);
 }
 
-export const amount = (units, asset) => ({ units: String(units), text: formatUnits(units, DECIMALS[asset]), unit: asset });
+// Up to 8 decimals: every RESET unit shows, and TNK amounts stay readable.
+export const amount = (units, asset) => ({ units: String(units), text: formatUnits(units, DECIMALS[asset], Math.min(DECIMALS[asset], 8)), unit: asset });
 
 export function decimalAmount(value, asset) {
   const decimals = DECIMALS[asset];

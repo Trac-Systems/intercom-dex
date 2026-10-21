@@ -177,8 +177,8 @@ Role config (`service.json`):
   "registry": {
     "minSoftware": "0.1.0",
     "pairs": [
-      { "pair": "TNK/USDC", "base": { "kind": "trac-native", "id": "TNK", "decimals": 18 }, "minBaseAmount": "1000000000000000000", "status": "open" },
-      { "pair": "RESET/USDC", "base": { "kind": "trac-contract-token", "id": "RESET", "decimals": 8 }, "minBaseAmount": "100000000", "status": "open" }
+      { "pair": "TNK/USDC", "base": { "kind": "trac-native", "id": "TNK", "decimals": 18 }, "minBaseAmount": "10000000000000000", "status": "open" },
+      { "pair": "RESET/USDC", "base": { "kind": "trac-contract-token", "id": "RESET", "decimals": 8 }, "minBaseAmount": "10000", "status": "open" }
     ],
     "params": { "n": 5, "k": 3, "sendWindowSec": 900, "refundSec": 172800, "graceSec": 300 },
     "fee": { "platformFeeBps": 10, "tradeFeeBps": 50, "collector": "<venue main Solana address>", "signerShareBps": 5000 },

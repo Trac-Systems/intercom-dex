@@ -88,6 +88,15 @@ test('take: shows the USDC locked (with fees) or the tokens sent, then calls tak
   assert.match(buy.warning, /1\.88 TNK free/);
   const tooMuch = await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId, amount: '9' } } });
   assert.match(tooMuch.json().error, /only 8 TNK/);
+  // Below the smallest trade of the offer's signer list: a clear answer, and a rest below it is named as such.
+  const tnk = fx2.f.registry.pairs.find(p => p.pair === 'TNK/USDC'), before = tnk.minBaseAmount;
+  tnk.minBaseAmount = '1000000000000000000';
+  const small = await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId, amount: '0.5' } } });
+  assert.equal(small.json().error, 'The smallest trade for this offer is 1 TNK.');
+  tnk.minBaseAmount = '9000000000000000000';
+  const rest = await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId } } });
+  assert.match(rest.json().error, /^The smallest trade for this offer is 9 TNK; only 8 TNK is left, so this rest cannot be traded\./);
+  tnk.minBaseAmount = before;
 });
 
 test('cancel: only own open offers, then calls cancelOffer', async t => {
