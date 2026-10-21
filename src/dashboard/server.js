@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { openSync, writeSync, fsyncSync, closeSync, renameSync, readFileSync, readdirSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { createModel } from './model.js';
+import { createNextOffer } from './next-offer.js';
 import { createActions, createConfirmations } from './actions.js';
 import { TrafficLog } from './traffic.js';
 import { decimalAmount } from './format.js';
@@ -258,8 +259,9 @@ export function dashboardHandler({ token, port, model, actions, confirmations, t
 export async function startDashboard({ config, role, wallets = null, bridge, traffic = new TrafficLog(), log = () => {} }) {
   const port = config.dashboard?.port;
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('dashboard.port must be a port number');
-  const model = createModel({ config, role, wallets, bridge });
-  const actions = createActions({ config, role, wallets, balances: model.balances });
+  const nextOffer = config.role === 'trader' ? createNextOffer({ role, log }) : null;
+  const model = createModel({ config, role, wallets, bridge, nextOffer });
+  const actions = createActions({ config, role, wallets, balances: model.balances, nextOffer });
   const marketFeed = createMarketFeed({ url: MARKET_FEED_URLS[config.network] });
   const staticFiles = readStatic();
   bridge.on('traffic', (channel, message, bytes) => { traffic.record(channel, message, bytes); model.note(channel, message); });

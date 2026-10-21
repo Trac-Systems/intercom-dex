@@ -5,6 +5,9 @@ import { amount } from './format.js';
 // Called-off reasons that are about the signers, not the maker: the same offer may work on the next try.
 const NOT_THE_MAKER = /signers/i;
 
+// A take called off before anything was locked, for a reason that lies with the maker.
+export const calledOffByMaker = s => s.phase === 'aborted' && !s.lockAttempted && !s.locked && !NOT_THE_MAKER.test(String(s.reason ?? ''));
+
 // What this trader's own takes say about other traders' offers. An offer whose take was called off before anything
 // was locked (the maker did not answer, declined, or gave up) is skipped from then on, so the next click on its price
 // goes to the next offer there; own takes still running count against the offer they took from.
@@ -14,7 +17,7 @@ export function ownTakes(trades) {
     const s = t.state;
     if (s.mode !== 'taker' || !s.offerId) continue;
     if (s.phase === 'aborted') {
-      if (!s.lockAttempted && !s.locked && !NOT_THE_MAKER.test(String(s.reason ?? ''))) skip.add(s.offerId);
+      if (calledOffByMaker(s)) skip.add(s.offerId);
       continue;
     }
     if (['complete', 'refunded', 'lost'].includes(s.phase)) continue;

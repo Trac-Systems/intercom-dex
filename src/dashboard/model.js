@@ -114,12 +114,12 @@ export function describeTrade(trade) {
 }
 
 // What a finished trade came to, in plain words.
-export function outcome(trade) {
+export function outcome(trade, note = null) {
   const s = trade.state, t = s.terms ?? s.draft, base = t.base.id;
   if (s.phase === 'complete') return { tone: 'good', text: trade.role === 'buyer' ? `Done: you received the ${base}` : 'Done: you received the USDC' };
   if (s.phase === 'refunded') return { tone: 'neutral', text: 'Your USDC came back; the seller did not finish in time' };
   if (s.phase === 'lost') return { tone: 'bad', text: `The key was not released in time and the buyer took the USDC back; your ${base} had been sent` };
-  return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Nothing was locked or sent.` };
+  return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Nothing was locked or sent.${note ? ' ' + note.text : ''}` };
 }
 
 function offerSizes(offer, trades) {
@@ -168,7 +168,7 @@ export function walletView(info, { network, role }) {
 
 const registryOf = role => ('usable' in role.registry ? role.registry.usable : role.registry);
 
-function traderView({ role, config, wallet, expired, now }) {
+function traderView({ role, config, wallet, expired, now, nextOffer }) {
   const status = role.status(), reg = registryOf(role), trades = [...role.host.trades.values()].filter(t => t.role !== 'signer');
   const running = trades.filter(t => !isFinished(t)).sort((a, b) => a.state.now - b.state.now);
   const finished = trades.filter(t => isFinished(t)).sort((a, b) => b.state.now - a.state.now);
@@ -183,8 +183,9 @@ function traderView({ role, config, wallet, expired, now }) {
     const left = offerSizes(o, trades).left;
     if (left > 0n) attention.push({ kind: 'expired', at: o.expiresAt, text: `Your offer to ${offerLine(o)} expired; ${amount(left, o.pair.split('/')[0]).text} ${o.pair.split('/')[0]} were not traded.` });
   }
-  for (const t of finished) if (['aborted', 'lost'].includes(t.state.phase) && t.state.now >= now - DAY && t.state.tradeId) {
-    attention.push({ kind: 'failed', at: t.state.now, text: `Your ${t.state.draft.pair} trade (${tradeFacts(t).side} ${tradeFacts(t).base.text} ${tradeFacts(t).base.unit}): ${outcome(t).text}` });
+  const noteOf = t => nextOffer?.note(t.key) ?? null;
+  for (const t of finished) if (['aborted', 'lost'].includes(t.state.phase) && t.state.now >= now - DAY && t.state.tradeId && !noteOf(t)?.moved) {
+    attention.push({ kind: 'failed', at: t.state.now, text: `Your ${t.state.draft.pair} trade (${tradeFacts(t).side} ${tradeFacts(t).base.text} ${tradeFacts(t).base.unit}): ${outcome(t, noteOf(t)).text}` });
   }
   const pairs = (reg?.pairs ?? []).filter(p => supportedBase(p.base));
   const market = pairs.map(p => {
@@ -204,7 +205,7 @@ function traderView({ role, config, wallet, expired, now }) {
         reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt };
     }),
     running: running.map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
-    history: finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t) })),
+    history: finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t, noteOf(t)) })),
     pairs: market,
   };
 }
@@ -301,7 +302,7 @@ function summary(view, kind) {
 
 // The dashboard's read model for whichever role runs in this process. Everything comes from the role objects in
 // memory; chain balances go through a 30-second cache, peer readings through short caches.
-export function createModel({ config, role, wallets = null, bridge, clock = () => Date.now() }) {
+export function createModel({ config, role, wallets = null, bridge, nextOffer = null, clock = () => Date.now() }) {
   const kind = config.role, now = () => Math.floor(clock() / 1000);
   const balances = wallets ? refreshing(() => wallets.info(), BALANCE_CACHE_MS, clock) : null;
   const stats = cached(() => bridge.stats(), 10000, clock);
@@ -324,7 +325,7 @@ export function createModel({ config, role, wallets = null, bridge, clock = () =
   }, 30000, clock);
 
   const view = async (sec, wallet = null, health = {}) => {
-    if (kind === 'trader') return traderView({ role, config, wallet, expired: (await expired()).value ?? [], now: sec });
+    if (kind === 'trader') return traderView({ role, config, wallet, expired: (await expired()).value ?? [], now: sec, nextOffer });
     if (kind === 'signer') return signerView({ role, now: sec, venueAsks, health });
     const midnight = new Date(clock()); midnight.setHours(0, 0, 0, 0);
     return serviceView({ role, now: sec, midnight: Math.floor(midnight.getTime() / 1000), health });

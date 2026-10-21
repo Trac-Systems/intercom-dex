@@ -30,7 +30,7 @@ export function createConfirmations({ secret = randomBytes(32), clock = () => Da
 }
 
 // The dashboard's actions call the same role and wallet functions as the control API, the CLI and the MCP tools.
-export function createActions({ config, role, wallets = null, balances = null }) {
+export function createActions({ config, role, wallets = null, balances = null, nextOffer = null }) {
   const kind = config.role, registry = () => ('usable' in role.registry ? role.registry.usable : role.registry);
   const freeOf = async asset => { const r = balances ? await balances() : null; return r?.value?.balances ? BigInt(r.value.balances[asset].free) : null; };
   const shortfall = async (asset, units) => {
@@ -70,6 +70,7 @@ export function createActions({ config, role, wallets = null, balances = null })
     async take(input) {
       const offerId = text(input.offerId, 64), o = HEX64.test(offerId) ? role.availableOffer(offerId) : null;
       if (!o) throw new Error(STALE_OFFER_MESSAGE);
+      nextOffer?.check(o);
       const reg = role.registry.snapshot(o.registryVersion);
       if (!reg) throw new Error('No signer list for this offer');
       const pair = registryPair(reg, o.pair), base = pair.base.id;
@@ -80,8 +81,8 @@ export function createActions({ config, role, wallets = null, balances = null })
       return { input: { offerId, baseAmount, price: o.price }, title: `${buying ? 'Buy' : 'Sell'} ${amount(baseAmount, base).text} ${base} at ${o.price} USDC`,
         lines: buying ? [['You lock', `${amount(cost, 'USDC').text} USDC (includes fees)`], ['You receive', `${amount(baseAmount, base).text} ${base}`]]
           : [['You send', `${amount(baseAmount, base).text} ${base}`], ['You receive', `${amount(quote, 'USDC').text} USDC`]],
-        note: buying ? 'Your USDC is locked on Solana. If the seller does not deliver in time, it comes back to you automatically.'
-          : "You send only after the buyer's USDC is locked and signers confirmed.",
+        note: (buying ? 'Your USDC is locked on Solana. If the seller does not deliver in time, it comes back to you automatically.'
+          : "You send only after the buyer's USDC is locked and signers confirmed.") + (nextOffer ? ' If this offer\'s maker does not answer, the next offer at this price is taken instead.' : ''),
         warning: await shortfall(buying ? 'USDC' : base, buying ? cost : BigInt(baseAmount)) };
     },
 
@@ -94,7 +95,7 @@ export function createActions({ config, role, wallets = null, balances = null })
         note: 'Trades already running on this offer continue.' };
     },
   };
-  trader.run.take = input => role.takeOffer(input.offerId, input.baseAmount, input.price);
+  trader.run.take = input => nextOffer ? nextOffer.take(input.offerId, input.baseAmount, input.price) : role.takeOffer(input.offerId, input.baseAmount, input.price);
   trader.run.cancel = input => role.cancelOffer(input.offerId);
 
   const withdraw = async input => {
