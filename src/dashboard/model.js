@@ -4,7 +4,7 @@ import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
 import { open, createReplayCache } from '../core/envelope.js';
 import { supportedBase, tradePrice, registryPair } from '../market/assets.js';
 import { amount, shortKey } from './format.js';
-import { buildBook } from './market.js';
+import { buildBook, ownTakes } from './market.js';
 
 const DAY = 86400, ONLINE_SEC = 90, PAYOUT_DELAY = 7 * DAY;
 export const BALANCE_CACHE_MS = 30000;
@@ -284,7 +284,7 @@ function serviceView({ role, now, health, midnight }) {
 
 function traderBook(role, pair, now, mine = role.status().mine) {
   return buildBook({ pair, offers: role.offers.values(), mine, dexKey: role.me.dexKey, book: role.book.get(pair.pair),
-    inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now });
+    inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now, taken: ownTakes(role.host.trades.values()) });
 }
 
 const LISTS = Object.freeze({ trader: ['offers', 'running', 'history', 'attention'], signer: ['pieces', 'recent'], service: ['signers'] });

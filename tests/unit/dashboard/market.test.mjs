@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBook } from '../../../src/dashboard/market.js';
+import { buildBook, ownTakes } from '../../../src/dashboard/market.js';
 import { availableOffer, OFFER_FRESH_SEC } from '../../../src/market/book.js';
 import { amount, decimalAmount } from '../../../src/dashboard/format.js';
 import { PAIRS } from '../core/helpers.mjs';
@@ -83,4 +83,26 @@ test('decimal feed amounts convert exactly to base units and reject malformed an
   assert.deepEqual(decimalAmount('0', 'RESET'), amount('0', 'RESET'));
   for (const v of [1, null, '', '01', '-1', '1e3', '1.', '.1', '1\n', '1\r', '0.0000001', '1 '.repeat(200)]) assert.throws(() => decimalAmount(v, 'USDC'), /Invalid decimal/);
   assert.throws(() => decimalAmount('1', 'UNKNOWN'), /Invalid decimal/);
+});
+
+test('own takes: a called-off take skips that offer at once, running takes count against it', () => {
+  const a = offer(1, '1', 'sell', '100000000', 880), b = offer(2, '1', 'sell', '300000000', 890), c = offer(3, '1', 'sell', '200000000', 900);
+  const take = (o, phase, extra = {}) => ({ state: { mode: 'taker', offerId: o.offer.offerId, phase, draft: { baseAmount: '50000000' }, ...extra } });
+  assert.equal(build([a, b, c]).asks[0].take.offerId, a.offer.offerId);
+  // The maker did not answer: the next offer at the same price is the take, the level shrinks by the skipped offer.
+  let taken = ownTakes([take(a, 'aborted', { reason: 'Timed out: take/accept' })]);
+  let level = build([a, b, c], { taken }).asks[0];
+  assert.deepEqual([level.take.offerId, level.amount.text, level.count], [b.offer.offerId, '5', 2]);
+  // Declines are skipped too; signer trouble is not the maker's and keeps the offer.
+  taken = ownTakes([take(a, 'aborted', { reason: 'busy' }), take(b, 'aborted', { reason: 'Signers did not confirm' })]);
+  assert.equal(build([a, b, c], { taken }).asks[0].take.offerId, b.offer.offerId);
+  // Called off after the lock started: not a maker no-show, nothing skipped.
+  taken = ownTakes([take(a, 'aborted', { reason: 'Escrow lock failed', lockAttempted: true })]);
+  assert.equal(build([a, b, c], { taken }).asks[0].take.offerId, a.offer.offerId);
+  // A running own take holds part of its offer; a fully held offer passes the take to the next one.
+  taken = ownTakes([take(b, 'awaitAccept'), take(a, 'locked', { terms: { baseAmount: '100000000' } }), take(c, 'complete')]);
+  level = build([a, b, c], { taken }).asks[0];
+  assert.deepEqual([level.take.offerId, level.take.amount.text, level.amount.text, level.count], [b.offer.offerId, '2.5', '4.5', 2]);
+  // Maker-side trades and other modes are ignored.
+  assert.deepEqual(ownTakes([{ state: { mode: 'maker', offerId: a.offer.offerId, phase: 'aborted', reason: 'busy' } }]).skip.size, 0);
 });

@@ -2,8 +2,29 @@ import { priceUnits, formatPrice } from '../market/assets.js';
 import { availableOffer } from '../market/book.js';
 import { amount } from './format.js';
 
+// Called-off reasons that are about the signers, not the maker: the same offer may work on the next try.
+const NOT_THE_MAKER = /signers/i;
+
+// What this trader's own takes say about other traders' offers. An offer whose take was called off before anything
+// was locked (the maker did not answer, declined, or gave up) is skipped from then on, so the next click on its price
+// goes to the next offer there; own takes still running count against the offer they took from.
+export function ownTakes(trades) {
+  const skip = new Set(), running = new Map();
+  for (const t of trades) {
+    const s = t.state;
+    if (s.mode !== 'taker' || !s.offerId) continue;
+    if (s.phase === 'aborted') {
+      if (!s.lockAttempted && !s.locked && !NOT_THE_MAKER.test(String(s.reason ?? ''))) skip.add(s.offerId);
+      continue;
+    }
+    if (['complete', 'refunded', 'lost'].includes(s.phase)) continue;
+    running.set(s.offerId, (running.get(s.offerId) ?? 0n) + BigInt((s.terms ?? s.draft).baseAmount));
+  }
+  return { skip, running };
+}
+
 // Build full depth from signed announcements; the wire book itself has only the best 50 levels per side.
-export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now }) {
+export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, taken = { skip: new Set(), running: new Map() } }) {
   const base = pair.base.id, groups = new Map();
   const add = (o, firstSeen, own) => {
     if (o.pair !== pair.pair || o.expiresAt <= now || BigInt(o.baseAmount) <= 0n) return;
@@ -18,8 +39,9 @@ export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = b
   };
   for (const seen of offers) {
     if (seen.offer.pair !== pair.pair || seen.offer.maker.dexKey === dexKey) continue;
-    const o = availableOffer(seen, book, inventory, now);
-    if (o) add(o, seen.firstSeen ?? seen.lastSeen, false);
+    if (taken.skip.has(seen.offer.offerId)) continue;
+    const o = availableOffer(seen, book, inventory, now), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
+    if (left > 0n) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false);
   }
   for (const o of mine) add({ ...o, baseAmount: o.available }, now, true);
   const levels = side => {

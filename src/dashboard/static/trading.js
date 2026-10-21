@@ -119,12 +119,13 @@ function entryPanel() {
     offerFields, takeFields, h('div', { class: 'summary' }, available, estimate, minimum), paused, submit);
   for (const i of [price, amount, takeAmount]) i.addEventListener('input', () => render());
 
-  // The offer to take: the level the reader clicked while it is still in the book, else the best one on the other side.
+  // The offer to take: the level the reader clicked while it is still in the book, else the next offer at that
+  // price (the clicked one was taken or called off), else the best one on the other side.
   function offer() {
     if (!book) return null;
     const levels = sideNow === 'buy' ? book.asks : book.bids;
     if (taking) {
-      const l = levels.find(x => x.take?.offerId === taking);
+      const l = levels.find(x => x.take?.offerId === taking.offerId) ?? levels.find(x => x.take && x.price === taking.price);
       if (l) return { ...l.take, price: l.price };
     }
     const best = levels.find(x => x.take);
@@ -142,7 +143,7 @@ function entryPanel() {
     kv(available, 'Available', free ? amt(free) : '—');
     const o = mode === 'take' ? offer() : null;
     if (mode === 'take') {
-      takeInfo.replaceChildren(...(o ? [h('span', { class: 'muted' }, taking && o.offerId === taking ? 'Chosen offer' : `Best ${sideNow === 'buy' ? 'sell' : 'buy'} offer`),
+      takeInfo.replaceChildren(...(o ? [h('span', { class: 'muted' }, taking && o.offerId === taking.offerId ? 'Chosen offer' : taking && o.price === taking.price ? 'Next offer at this price' : `Best ${sideNow === 'buy' ? 'sell' : 'buy'} offer`),
         h('span', { class: `num ${sideNow === 'buy' ? 'down' : 'up'}` }, o.price, h('span', { class: 'unit' }, 'USDC')), h('span', { class: 'num' }, 'up to ', amt(o.amount))]
         : [h('span', { class: 'muted' }, `No ${sideNow === 'buy' ? 'sell' : 'buy'} offer from another trader to take right now.`)]));
       takeAmount.placeholder = o ? `all (${o.amount.text})` : 'all';
@@ -167,7 +168,7 @@ function entryPanel() {
     data(b, bal) { book = b; balances = bal; render(); },
     // A click on a book level: take that level's offer, and use its price for an offer too.
     take(level) {
-      sideNow = level.side === 'sell' ? 'buy' : 'sell'; mode = 'take'; taking = level.take.offerId;
+      sideNow = level.side === 'sell' ? 'buy' : 'sell'; mode = 'take'; taking = { offerId: level.take.offerId, price: level.price };
       takeAmount.value = plain(level.take.amount.text); price.value = level.price;
       render(); takeAmount.focus();
     },
