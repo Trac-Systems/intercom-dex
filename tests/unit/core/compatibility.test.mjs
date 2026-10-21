@@ -72,19 +72,19 @@ test('committee selection filters signed asset capabilities and software determi
   assert.throws(() => selectCommittee(f.registry, R, options), /Too few/);
 });
 
-test('accept budget is 20 seconds after maker channel presence with a 60 second total cap', () => {
-  assert.equal(STEP_BUDGET_MS.accept, 20000); assert.equal(STEP_BUDGET_MS.connect, 60000);
+test('accept budget is 40 seconds after maker channel presence with an 80 second total cap', () => {
+  assert.equal(STEP_BUDGET_MS.accept, 40000); assert.equal(STEP_BUDGET_MS.connect, 80000);
   const s = snap('buyer', 'awaitAccept');
-  assert.equal(step(s, { stepElapsedMs: 59999 }).state.phase, 'awaitAccept');
-  assert.equal(step(s, { stepElapsedMs: 60000 }).state.phase, 'aborted');
-  const connected = step(s, { stepElapsedMs: 35000, makerConnected: true }).state;
-  assert.equal(step(connected, { stepElapsedMs: 54999 }).state.phase, 'awaitAccept');
-  assert.equal(step(connected, { stepElapsedMs: 55000 }).state.phase, 'aborted');
-  const lateConnect = step(s, { stepElapsedMs: 55000, makerConnected: true }).state;
-  assert.equal(step(lateConnect, { stepElapsedMs: 60000 }).state.phase, 'aborted');
+  assert.equal(step(s, { stepElapsedMs: 79999 }).state.phase, 'awaitAccept');
+  assert.equal(step(s, { stepElapsedMs: 80000 }).state.phase, 'aborted');
+  const connected = step(s, { stepElapsedMs: 25000, makerConnected: true }).state;
+  assert.equal(step(connected, { stepElapsedMs: 64999 }).state.phase, 'awaitAccept');
+  assert.equal(step(connected, { stepElapsedMs: 65000 }).state.phase, 'aborted');
+  const lateConnect = step(s, { stepElapsedMs: 75000, makerConnected: true }).state;
+  assert.equal(step(lateConnect, { stepElapsedMs: 80000 }).state.phase, 'aborted');
   const accept = sim.log.find(x => x.name === 'seller' && x.action.kind === 'accept').action.body;
-  assert.equal(message(connected, 'accept', accept, { ...fresh, stepElapsedMs: 54999 }).state.phase, 'awaitReveal');
-  assert.equal(message(connected, 'accept', accept, { ...fresh, stepElapsedMs: 55000 }).state.phase, 'aborted');
+  assert.equal(message(connected, 'accept', accept, { ...fresh, stepElapsedMs: 64999 }).state.phase, 'awaitReveal');
+  assert.equal(message(connected, 'accept', accept, { ...fresh, stepElapsedMs: 65000 }).state.phase, 'aborted');
 });
 
 test('declines are strict, maker-authenticated and bound to the exact take envelope nonce', () => {

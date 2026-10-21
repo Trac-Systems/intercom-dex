@@ -755,11 +755,11 @@ and `DECLINES_PER_MINUTE = 30` in total. Malformed and unrelated takes are ignor
 Aborted trades release reservations. Accept/reveal routing checks the commitment;
 decline routing checks the saved take envelope nonce before buffering.
 
-`STEP_BUDGET_MS` in `terms.js` exports `accept:20000`, `connect:60000`,
+`STEP_BUDGET_MS` in `terms.js` exports `accept:40000`, `connect:80000`,
 `randomness:120000`, `terms:30000`, `deal:60000`, `certificate:150000`,
 `working:10000`, `acks:60000`. The host supplies `stepElapsedMs` from its monotonic
-step entry observation on ticks/messages. A taker gets 60 seconds total including
-connecting, and 20 seconds after the maker peer is present on the offer channel.
+step entry observation on ticks/messages. A taker gets 80 seconds total including
+connecting, and 40 seconds after the maker peer is present on the offer channel.
 Offers sign `peerKey` (the maker's swarm public key). The bridge's authenticated
 `dex_presence` query reports whether that peer's channel protocol is open. The host
 polls on ticks; an authenticated maker message also proves a usable channel path.

@@ -99,7 +99,7 @@ test('deciding-block timeout ticks while the chain request is pending, independe
   assert.ok(sent.some(m => m.kind === 'abort'));
 });
 
-test('host starts the 20 second accept clock only for the maker peer on the offer channel', async t => {
+test('host starts the 40 second accept clock only for the maker peer on the offer channel', async t => {
   const clock = { ms: 1000 }, timers = [];
   t.mock.method(performance, 'now', () => clock.ms);
   t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
@@ -118,12 +118,12 @@ test('host starts the 20 second accept clock only for the maker peer on the offe
   assert.equal(host.trades.get('connecting').state.phase, 'awaitAccept');
   assert.ok(queries.every(q => q.key === makerPeer && q.ch === 'intercom-dex:t:' + state.offerId));
   connected = true; await tick();
-  clock.ms += 19999; await tick(); assert.equal(host.trades.get('connecting').state.phase, 'awaitAccept');
+  clock.ms += 39999; await tick(); assert.equal(host.trades.get('connecting').state.phase, 'awaitAccept');
   clock.ms++; await tick(); assert.equal(host.trades.get('connecting').state.phase, 'aborted');
   assert.equal(sent.filter(m => m.kind === 'abort').length, 1);
 });
 
-test('a stalled channel join cannot suppress the total 60 second accept budget', async t => {
+test('a stalled channel join cannot suppress the total 80 second accept budget', async t => {
   const clock = { ms: 0 }, timers = [], joined = deferred();
   t.mock.method(performance, 'now', () => clock.ms);
   t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
@@ -135,7 +135,7 @@ test('a stalled channel join cannot suppress the total 60 second accept budget',
   await host.start(); t.after(() => host.stop());
   const state = structuredClone(transcript.snapshots.get('buyer:awaitAccept'));
   await host.addTrade({ key: 'stalled', role: 'buyer', state, makerPeer: hex(), lifetimeSec: 86400 });
-  clock.ms = 60000; timers.find(x => x.ms === 1000).fn();
+  clock.ms = 80000; timers.find(x => x.ms === 1000).fn();
   await host.trades.get('stalled').queue;
   assert.equal(host.trades.get('stalled').state.phase, 'aborted');
   joined.resolve();
@@ -156,7 +156,7 @@ test('host restart discards elapsed step time and maker presence, retaining the 
   await host.start(); t.after(() => host.stop());
   const trade = host.trades.get('restart'); await trade.queue;
   assert.equal(trade.state.stepElapsedMs, 0); assert.equal(trade.makerConnectedAt, null); assert.equal(trade.state.takeNonce, state.takeNonce);
-  ms += 59000; await host.deliver('restart', { type: 'tick' }); assert.equal(trade.state.phase, 'awaitAccept');
+  ms += 79000; await host.deliver('restart', { type: 'tick' }); assert.equal(trade.state.phase, 'awaitAccept');
   ms += 1000; await host.deliver('restart', { type: 'tick' }); assert.equal(trade.state.phase, 'aborted');
 });
 
@@ -171,7 +171,7 @@ test('taker offer joins pin the maker until the last active trade ends, and stop
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(calls.some(call => call.channel === channel && call.makerPeer === makerPeer));
   assert.equal(host.makerPins.size, 1);
-  clock.ms = 60000;
+  clock.ms = 80000;
   await host.deliver('one', { type: 'tick' });
   assert.equal(host.trades.get('one').state.phase, 'aborted');
   assert.equal(calls.filter(call => call.makerPeer === null).length, 0);
@@ -193,7 +193,7 @@ test('a stalled hinted join is released when its trade ends; a late join reply d
   await host.start();
   const state = structuredClone(transcript.snapshots.get('buyer:awaitAccept')), makerPeer = hex();
   await host.addTrade({ key: 'pending', role: 'buyer', state, makerPeer, lifetimeSec: 86400 });
-  clock.ms = 60000; await host.deliver('pending', { type: 'tick' });
+  clock.ms = 80000; await host.deliver('pending', { type: 'tick' });
   assert.equal(calls.at(-1).makerPeer, null); assert.equal(host.makerPins.size, 0);
   joined.resolve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(host.makerPins.size, 0); assert.equal(calls.length, 2);
