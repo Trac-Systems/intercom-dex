@@ -18,6 +18,8 @@ import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
+// Own open offers are announced again this often; takers on 0.1.14+ count a maker silent for 70 s as probably offline.
+export const REANNOUNCE_MS = 45_000;
 export const MAX_TRADES_PER_OFFER = 3;
 export const MAX_NEGOTIATIONS_PER_TAKER = 3;
 // Declines answer strangers, so they are bounded: one per sender per minute, DECLINES_PER_MINUTE in total. A decline
@@ -64,7 +66,7 @@ export class Trader {
     this.reannounce = setInterval(() => {
       try { this.#pruneDeclines(); this.pruneOffers(); } catch (e) { this.log('prune', e.message); }
       this.#reannounce().catch(e => this.log('offer announce', e.message));
-    }, 120000);
+    }, REANNOUNCE_MS);
     this.certificates.start();
   }
 

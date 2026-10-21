@@ -190,6 +190,8 @@ await adapter.refund({terms, hashHex})
 await adapter.pendingIntents()
 // [{id, signature, ageMs, createdAt, attempt}]; throws if journal loading fails
 await adapter.finalizedSlot() // finalized slot number; throws on unavailable quorum
+const watch = adapter.chainWatch({ onUpdate }) // pushed slots (slotSubscribe) from up to 3 of the RPC nodes; watch.start(),
+                                                // watch.view(maxAgeMs) -> {finalized, tip, at} or null, watch.stop()
 await adapter.firstFinalizedBlockAtLeast(minSlot)
 // {slot, blockhash: 32-byte lowercase hex, finalized:true}; throws if unprovable
 await adapter.ensureTradeConfig({feeBps}) // {ok:true, signature: string|null} | {ok:false, reason}

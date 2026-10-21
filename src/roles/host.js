@@ -78,9 +78,12 @@ export class TradeHost {
   async start() {
     this.stopped = false;
     this.bridge.on('message', (channel, message) => { this.#route(channel, message).catch(e => this.log('route error', e.message)); });
+    // Pushed slots keep the chain view fresh without requests; polling remains for when no pushed view is fresh.
+    this.watch = this.solana?.chainWatch?.({ onUpdate: () => this.#fromWatch() }) ?? null;
+    this.watch?.start();
     if (this.solana) await this.#refreshSlot();
     this.timer = setInterval(() => this.#tickAll(), this.tickMs);
-    this.slotTimer = this.solana ? setInterval(() => this.#needsChain() ? this.#refreshSlot().catch(() => {}) : null, 2000) : null;
+    this.slotTimer = this.solana ? setInterval(() => this.#needsChain() && !this.#watchFresh() ? this.#refreshSlot().catch(() => {}) : null, 2000) : null;
     for (const name of this.store.list('trade-')) {
       const record = this.store.get(name);
       if (record) await this.#install(record, { resume: true });
@@ -90,6 +93,7 @@ export class TradeHost {
   stop() {
     this.stopped = true;
     clearInterval(this.timer); clearInterval(this.slotTimer);
+    this.watch?.stop();
     this.#releaseMakerPins();
   }
 
@@ -98,12 +102,30 @@ export class TradeHost {
   // Each reading is dated when its request started (its age includes all waiting), and a slower older request never
   // replaces a newer reading.
   async #refreshSlot() {
+    if (this.#fromWatch()) return;
     const started = performance.now();
     await Promise.allSettled([
       this.solana.finalizedSlot().then(v => { if (started >= (this.slotAt ?? -1)) { this.slot = v; this.slotAt = started; } }),
       this.solana.tipSlot().then(v => { if (started >= (this.tipAt ?? -1)) { this.tip = v; this.tipAt = started; } }),
     ]);
     if (this.#chainFresh()) for (const trade of this.trades.values()) if (trade.buffer.length) this.#enqueue(trade, () => this.#drain(trade));
+  }
+
+  #watchFresh() {
+    return this.watch?.view(Math.min(RANDOMNESS.TIP_MAX_AGE_MS, RANDOMNESS.FINALIZED_MAX_AGE_MS) / 2) != null;
+  }
+
+  // Takes a fresh pushed view (newer readings only) and applies waiting messages at once; true when it was fresh.
+  #fromWatch() {
+    const v = this.watch?.view(Math.min(RANDOMNESS.TIP_MAX_AGE_MS, RANDOMNESS.FINALIZED_MAX_AGE_MS) / 2);
+    if (!v) return false;
+    if (!this.watchSeen) { this.watchSeen = true; this.log('chain view from pushed slots'); }
+    const wasFresh = this.#chainFresh();
+    if (v.at >= (this.slotAt ?? -1)) { this.slot = v.finalized; this.slotAt = v.at; }
+    if (v.at >= (this.tipAt ?? -1)) { this.tip = v.tip; this.tipAt = v.at; }
+    // Messages arriving while the view is fresh are applied on arrival; only a view that just became fresh drains here.
+    if (!wasFresh && this.#chainFresh()) for (const trade of this.trades.values()) if (trade.buffer.length) this.#enqueue(trade, () => this.#drain(trade));
+    return true;
   }
 
   // Only a negotiation, or a message waiting for a fresh view, needs the chain view. An idle trader doesn't poll

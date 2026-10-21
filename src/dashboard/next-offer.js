@@ -1,5 +1,6 @@
 import { priceUnits, registryPair } from '../market/assets.js';
-import { ownTakes } from './market.js';
+import { ownTakes, takeOrder } from './market.js';
+import { nowSec } from '../roles/common.js';
 
 // Takes started from the dashboard keep going at their price: when the maker does not answer, declines or gives up
 // while the two traders are still agreeing the trade, the next offer at the same price is taken at once, for the
@@ -29,9 +30,10 @@ export function createNextOffer({ role, log = () => {}, defer = fn => setTimeout
       const o = same ? role.availableOffer(id) : null;
       if (!o) continue;
       let min; try { min = BigInt(registryPair(role.registry.snapshot(o.registryVersion), o.pair).minBaseAmount); } catch { continue; }
-      if (BigInt(o.baseAmount) >= min) rows.push({ o, left: BigInt(o.baseAmount), at: seen.firstSeen ?? seen.lastSeen });
+      if (BigInt(o.baseAmount) >= min) rows.push({ o, left: BigInt(o.baseAmount), at: seen.firstSeen ?? seen.lastSeen,
+        lastSeen: seen.lastSeen ?? seen.firstSeen, offerId: id, software: o.software });
     }
-    rows.sort((a, b) => a.at - b.at || (a.o.offerId < b.o.offerId ? -1 : 1));
+    rows.sort(takeOrder(nowSec()));
     return rows[0] ?? null;
   }
 

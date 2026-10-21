@@ -2,7 +2,7 @@
 // deployed escrow binary, one service, five signers and two traders, each a Pear peer plus its Node role process.
 // Usage: node tests/e2e/stack.mjs [scenario ...]
 import fs from 'node:fs/promises';
-import { writeFileSync, createWriteStream } from 'node:fs';
+import { writeFileSync, createWriteStream, readFileSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
@@ -35,6 +35,14 @@ const { startDevnet } = await import(resetSourceURL('scripts/lib/devnet-network.
 const { beaconOptions } = await import(resetSourceURL('tests/helpers/chain.mjs'));
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
+// Mixed versions: DEX_E2E_OLD_REPO names a checkout of an earlier release (with its node_modules), DEX_E2E_OLD lists the
+// nodes (service, s1..s5, alice, bob, ...) whose peer and role run that release. The registry then admits both.
+const oldRepo = process.env.DEX_E2E_OLD_REPO || null;
+const oldNames = new Set((process.env.DEX_E2E_OLD ?? '').split(',').filter(Boolean));
+if (oldNames.size && (!oldRepo || !path.isAbsolute(oldRepo))) throw new Error('Set DEX_E2E_OLD_REPO to an absolute checkout path');
+const OLD_SOFTWARE = oldNames.size ? JSON.parse(readFileSync(path.join(oldRepo, 'package.json'), 'utf8')).version : null;
+const codeOf = n => oldNames.has(n) ? oldRepo : repo;
+const softwareOf = n => oldNames.has(n) ? OLD_SOFTWARE : SOFTWARE;
 const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ['wallets', 'reset-sell', 'tnk-buy', 'cheating-dealer', 'cheating-certificate', 'signers-offline', 'not-enough-signers', 'signers-vanish-before-ack', 'crowd', 'silent-taker', 'refund'];
 const relayMode = scenarios.some(n => ['relay', 'relay-none'].includes(n));
 if (relayMode && scenarios.length !== 1) throw new Error('Run relay and relay-none separately with fresh peers');
@@ -180,17 +188,18 @@ try {
     const faultFile = path.join(dirs[n], 'relay-faults.json');
     if (relayMode) await fs.writeFile(faultFile, JSON.stringify({ isolatedKey: peerKeys.bob, capture: n === 's1' }));
     const peerArgs = relayMode ? [path.join(repo, 'tests/e2e/relay-runner.mjs'), '--config', file, '--faults', faultFile] : ['scripts/pear-runner.mjs', '--config', file];
-    const p = launch(`peer-${n}`, process.execPath, peerArgs, { cwd: peerDir, logDir, marker: 'DEX_PEER_READY',
+    const p = launch(`peer-${n}`, process.execPath, peerArgs, { cwd: path.join(codeOf(n), 'peer'), logDir, marker: 'DEX_PEER_READY',
       env: { PEAR_RUNNER_STDIN: '0', DEX_LEGACY_PEAR_RUN: '0', XDG_CONFIG_HOME: path.join(dirs[n], 'pear-config'), XDG_DATA_HOME: path.join(dirs[n], 'pear-data') } });
     stops.push(p.stop);
     bridges[n] = { url: `ws://127.0.0.1:${bridgePort}`, tokenFile, ready: p.ready };
   }
   await Promise.all(Object.values(bridges).map(b => b.ready));
   log(names.length, 'peers ready');
+  if (oldNames.size) log('old version', OLD_SOFTWARE, 'on', [...oldNames].join(','), '| new', SOFTWARE, 'on the rest');
 
   // Role processes.
-  const registry = { minSoftware: SOFTWARE, pairs: PAIRS, params: PARAMS, fee: { platformFeeBps: 10, tradeFeeBps: 50, collector: solKeys.service.publicKey.toBase58(), signerShareBps: 5000 },
-    signers: ['s1', 's2', 's3', 's4', 's5'].map(n => ({ dexKey: ids[n].publicKey, boxKey: boxes[n].publicKey, label: n, limitUsdc: '1000000000000', status: 'active', assets: ['TNK', 'RESET'], software: SOFTWARE,
+  const registry = { minSoftware: OLD_SOFTWARE ?? SOFTWARE, pairs: PAIRS, params: PARAMS, fee: { platformFeeBps: 10, tradeFeeBps: 50, collector: solKeys.service.publicKey.toBase58(), signerShareBps: 5000 },
+    signers: ['s1', 's2', 's3', 's4', 's5'].map(n => ({ dexKey: ids[n].publicKey, boxKey: boxes[n].publicKey, label: n, limitUsdc: '1000000000000', status: 'active', assets: ['TNK', 'RESET'], software: softwareOf(n),
       ...(relayMode && !scenarios.includes('relay-none') && n === 's1' ? { relayKey: peerKeys.s1 } : {}) })),
     removed: [] };
   const roleProc = {}, control = {}, roleOptions = {};
@@ -215,7 +224,7 @@ try {
     const args = [...(role === 'trader' ? ['--import', './tests/e2e/cheating-hook.mjs'] : []), 'bin/dex.mjs', '--config', file,
       ...(role === 'service' && !started.has(n) ? ['--first-launch'] : [])];
     started.add(n);
-    const p = launch(`role-${n}`, process.execPath, args, { cwd: repo, logDir, marker: 'DEX_ROLE_READY',
+    const p = launch(`role-${n}`, process.execPath, args, { cwd: codeOf(n), logDir, marker: 'DEX_ROLE_READY',
       env: { DEX_WALLET_PASSWORD: PASSWORD, DEX_KEY_PASSWORD: PASSWORD, DEX_E2E_ATTACK_FILE: attackFile, ...(relayMode && n === 'bob' ? { DEX_E2E_REGISTRY_SEED: registrySeed } : {}) } });
     stops.push(p.stop); roleProc[n] = p;
     p.ready = p.ready.then(async ready => { await waitForControl(() => api(n, 'GET', '/status')); return ready; });

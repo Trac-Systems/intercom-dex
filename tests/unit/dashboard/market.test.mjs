@@ -106,3 +106,22 @@ test('own takes: a called-off take skips that offer at once, running takes count
   // Maker-side trades and other modes are ignored.
   assert.deepEqual(ownTakes([{ state: { mode: 'maker', offerId: a.offer.offerId, phase: 'aborted', reason: 'busy' } }]).skip.size, 0);
 });
+
+test('a take at a price level goes to a maker heard recently before an older offer from a silent maker', () => {
+  const silent = { ...offer(11, '1', 'sell', '100000000', 600), lastSeen: now - 200 };   // oldest, not heard for 200 s
+  const live = { ...offer(12, '1', 'sell', '100000000', 700), lastSeen: now - 100 };     // newer, heard within LIVE_SEC
+  const later = { ...offer(13, '1', 'sell', '100000000', 800), lastSeen: now - 5 };
+  assert.equal(build([silent, live, later]).asks[0].take.offerId, live.offer.offerId);
+  // All silent (or all live): the oldest offer first, as before.
+  assert.equal(build([silent, { ...live, lastSeen: now - 300 }]).asks[0].take.offerId, silent.offer.offerId);
+  assert.equal(build([{ ...silent, lastSeen: now }, live]).asks[0].take.offerId, silent.offer.offerId);
+});
+
+test('makers on 0.1.14+ announce every 45 s, so they count as silent after 70 s; older makers after 150 s', () => {
+  const old = { ...offer(21, '1', 'sell', '100000000', 600), lastSeen: now - 100 };
+  old.offer.software = '0.1.13';
+  const fast = { ...offer(22, '1', 'sell', '100000000', 500), lastSeen: now - 100 };
+  fast.offer.software = '0.1.14';
+  assert.equal(build([fast, old]).asks[0].take.offerId, old.offer.offerId);   // the newer maker went quiet 100 s ago
+  assert.equal(build([{ ...fast, lastSeen: now - 30 }, old]).asks[0].take.offerId, fast.offer.offerId);
+});

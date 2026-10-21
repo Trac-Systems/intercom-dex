@@ -15,6 +15,7 @@ import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
 import { rpcCall, readAccount } from './rpc.js';
 import { readAccountQuorum, QuorumError } from './quorum.js';
 import { readRpcQuorum } from './read-quorum.js';
+import { ChainWatch } from './chain-watch.js';
 
 const QUORUM_ATTEMPTS = 4, QUORUM_RETRY_MS = 400;
 // A history search proves a withdrawal absent only while it still covers the signing time.
@@ -805,6 +806,8 @@ export function createSolanaAdapter({
     refund: input => guarded(`refund:${input?.hashHex}`, () => settle('refund', input)),
     lockOutcome: input => guarded(`lockOutcome:${input?.hashHex}`, () => lockOutcome(input)),
     finalizedSlot, tipSlot, chainTime, firstFinalizedBlockAtLeast, pendingIntents, accountOwner,
+    // A pushed view of the finalized slot and the tip from the same RPC nodes (see chain-watch.js); the caller starts it.
+    chainWatch: options => new ChainWatch({ endpoints: urls, need, ...options }),
     ensureTradeConfig: input => guarded(`config:${input?.feeBps}`, () => ensureTradeConfig(input)), tradeFeeBalance,
     assertFeeConfig, platformFeeConfig, tradeFeeBalances,
     createCollectorConfig: input => guarded(`collector:${input?.collectorKeypair?.publicKey}`, () => createCollectorConfig(input)),

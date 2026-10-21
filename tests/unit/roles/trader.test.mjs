@@ -414,14 +414,14 @@ test('service version announcements are displayed as data and trigger no sends o
   assert.equal(bridge.sent.length, sent); assert.equal(t.host.trades.size, 0);
 });
 
-test('maker reannounces at 120 seconds; traders rebuild service books but still require a maker-signed offer to trade', async t => {
+test('maker reannounces every 45 seconds; traders rebuild service books but still require a maker-signed offer to trade', async t => {
   const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
   t.mock.method(globalThis, 'clearInterval', () => {});
   const f = fixture(), service = party(), { t: traderRole, bridge } = await trader(party(), { registry: f.registry, serviceKey: service.me.dexKey });
   const o = await traderRole.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
   const before = bridge.sent.filter(x => x.envelope.kind === 'offer').length;
-  assert.ok(timers.some(x => x.ms === 120000)); assert.ok(!timers.some(x => x.ms === 30000));
-  timers.find(x => x.ms === 120000).fn(); await new Promise(r => setImmediate(r));
+  assert.ok(timers.some(x => x.ms === 45000)); assert.ok(!timers.some(x => x.ms === 30000));
+  timers.find(x => x.ms === 45000).fn(); await new Promise(r => setImmediate(r));
   assert.equal(bridge.sent.filter(x => x.envelope.kind === 'offer').length, before + 1);
   const ts = nowSec(), full = { pair: o.pair, registryVersion: 1, seq: 7, ts: ts - 10, levels: [{ side: 'sell', price: '1', baseAmount: '100', offers: 1 }] };
   await channelPost(traderRole, bridge, party(), 'book', full, 'intercom-dex'); assert.equal(traderRole.book.size, 0);
@@ -430,7 +430,7 @@ test('maker reannounces at 120 seconds; traders rebuild service books but still 
   assert.equal(traderRole.status().book[o.pair].levels[0].baseAmount, '200');
   await assert.rejects(traderRole.takeOffer(random32(), '100', '1'), /no longer announced by its maker/);
   await traderRole.cancelOffer(o.offerId); const count = bridge.sent.length;
-  timers.find(x => x.ms === 120000).fn(); await new Promise(r => setImmediate(r)); assert.equal(bridge.sent.length, count);
+  timers.find(x => x.ms === 45000).fn(); await new Promise(r => setImmediate(r)); assert.equal(bridge.sent.length, count);
 });
 
 test('only the buyer summons with both signatures, repeats while waiting, and stops at k acks', async () => {
@@ -533,7 +533,7 @@ test('the regular announcement timer prunes other makers without removing own pe
   const own = await taker.makeOffer({ pair: 'TNK/USDC', side: 'buy', baseAmount: '1000000000000000000', price: '1' });
   await post(bridge, alice, 'offer', offer);
   taker.offers.get(offer.offerId).lastSeen -= 300;
-  timers.filter(t => t.ms === 120000).at(-1).fn(); await new Promise(r => setImmediate(r));
+  timers.filter(t => t.ms === 45000).at(-1).fn(); await new Promise(r => setImmediate(r));
   assert.equal(taker.offers.has(offer.offerId), false);
   assert.ok(taker.mine.has(own.offerId)); assert.ok(taker.store.get('offer-' + own.offerId));
 });

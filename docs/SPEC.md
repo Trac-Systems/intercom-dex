@@ -346,8 +346,9 @@ full snapshot at least every 60 seconds and as cumulative `bookDelta` messages a
 5 seconds); a `ticker` every 30 seconds (last price, 24-hour volume, high, low and count); a `tradeLog` entry for
 each logged trade, with the terms hash, escrow address, claim signature and Trac transaction hash, so anyone can
 check volumes on both chains; and its `status`. Book levels are display data; a take always needs the maker's
-signed offer, and the maker reserves its own inventory. Makers re-announce open offers every 120 seconds, and
-book observations expire after 300 seconds. Full books also publish compact `remaining` rows (at most 200 unique
+signed offer, and the maker reserves its own inventory. Makers re-announce open offers every 45 seconds (120 seconds
+before 0.1.14), and book observations expire after 300 seconds. A take at a price level goes first to a maker heard
+recently (within 70 seconds for offers made by 0.1.14 or later, 150 seconds for older ones), oldest offer first. Full books also publish compact `remaining` rows (at most 200 unique
 offer IDs and base-unit integer amount strings); deltas carry only level changes. Offer bodies come from the
 makers' announcements. The market feed's individual `left` is null until known from a full book; offers missing
 from a newer full book's `remaining` for their pair are removed.

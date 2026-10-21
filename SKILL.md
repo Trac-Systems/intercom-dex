@@ -113,7 +113,8 @@ Arguments: `pair`, `side`, `baseAmount`, `price`, `ttlSec` (optional).
 Posts an offer. `side` `sell` sells the base asset for USDC, `buy` buys it. `baseAmount` is integer base units
 (see [Amounts](#amounts-prices-and-fees)). `price` is USDC per whole base token as a decimal string with at most 12
 decimals. `ttlSec` is 60 to 86400 seconds and defaults to 3600. The result is the signed offer with its `offerId`.
-The program announces the offer every 120 seconds while it is open and answers every take by itself.
+The program announces the offer every 45 seconds while it is open (every 120 seconds before 0.1.14) and answers every
+take by itself.
 
 Errors: `update required`, `No usable registry`, `Unknown registry pair`, `Pair paused`, `Pair needs a newer version`,
 `Amount below pair minimum`, `Trade too small`, `Insufficient free balance for this offer or trade`,

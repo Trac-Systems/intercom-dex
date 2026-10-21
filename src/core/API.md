@@ -873,8 +873,8 @@ balances after either no lock or a refund.
   full snapshot remains in `BookView.bases`. Display levels never admit or
   reject a trade; takers require the maker's signed offer and the maker reserves
   its own inventory.
-- Offer announcements are every 120 seconds; book observations expire after 300
-  seconds. Display includes the oldest 20 live offers per maker across pairs.
+- Offer announcements are every 45 seconds (120 before 0.1.14); book observations expire after 300
+  seconds. Dashboard takes at a price level prefer makers heard within 70 s (0.1.14+ offers) or 150 s (older). Display includes the oldest 20 live offers per maker across pairs.
   `MAX_TRADES_PER_OFFER=3`, `MAX_NEGOTIATIONS_PER_TAKER=3`; busy admissions get a `decline`
   with reason `busy`, like other capacity declines.
 - Registry signer entries optionally include `relayKey`; the registry optionally

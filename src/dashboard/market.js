@@ -1,6 +1,7 @@
 import { priceUnits, formatPrice } from '../market/assets.js';
 import { availableOffer } from '../market/book.js';
 import { amount } from './format.js';
+import { meetsVersion } from '../core/software.js';
 
 // Called-off reasons that are about the signers, not the maker: the same offer may work on the next try.
 const NOT_THE_MAKER = /signers/i;
@@ -26,25 +27,37 @@ export function ownTakes(trades) {
   return { skip, running };
 }
 
+// Makers re-announce their offers every 45 s since 0.1.14 (every 120 s before); one not heard for longer than that has
+// most likely gone offline. A take at a price level goes to a maker heard recently first, oldest offer first among them.
+export const LIVE_SEC = 150, LIVE_SEC_FAST = 70, FAST_ANNOUNCE = '0.1.14';
+export function liveSec(software) {
+  try { return meetsVersion(software, FAST_ANNOUNCE) ? LIVE_SEC_FAST : LIVE_SEC; } catch { return LIVE_SEC; }
+}
+const quiet = (row, now) => now - row.lastSeen <= liveSec(row.software) ? 0 : 1;
+export const takeOrder = now => (a, b) => quiet(a, now) - quiet(b, now) ||
+  a.at - b.at || (a.offerId < b.offerId ? -1 : a.offerId > b.offerId ? 1 : 0);
+
 // Build full depth from signed announcements; the wire book itself has only the best 50 levels per side.
 export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, taken = { skip: new Set(), running: new Map() } }) {
   const base = pair.base.id, groups = new Map();
-  const add = (o, firstSeen, own) => {
+  const better = takeOrder(now);
+  const add = (o, firstSeen, own, lastSeen = firstSeen) => {
     if (o.pair !== pair.pair || o.expiresAt <= now || BigInt(o.baseAmount) <= 0n) return;
     const price = formatPrice(priceUnits(o.price)), key = `${o.side}:${price}`;
     if (!groups.has(key)) groups.set(key, { price, side: o.side, units: 0n, mine: 0n, count: 0, take: null, seen: firstSeen });
     const g = groups.get(key), units = BigInt(o.baseAmount);
     g.units += units; g.count++; g.seen = Math.max(g.seen, firstSeen);
     if (own) g.mine += units;
-    else if (!g.take || firstSeen < g.take.at || (firstSeen === g.take.at && o.offerId < g.take.offerId)) {
-      g.take = { offerId: o.offerId, units, at: firstSeen };
+    else {
+      const candidate = { offerId: o.offerId, units, at: firstSeen, lastSeen, software: o.software };
+      if (!g.take || better(candidate, g.take) < 0) g.take = candidate;
     }
   };
   for (const seen of offers) {
     if (seen.offer.pair !== pair.pair || seen.offer.maker.dexKey === dexKey) continue;
     if (taken.skip.has(seen.offer.offerId)) continue;
     const o = availableOffer(seen, book, inventory, now), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
-    if (left > 0n) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false);
+    if (left > 0n) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false, seen.lastSeen ?? seen.firstSeen);
   }
   for (const o of mine) add({ ...o, baseAmount: o.available }, now, true);
   const levels = side => {
