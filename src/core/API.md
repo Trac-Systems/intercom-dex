@@ -763,6 +763,9 @@ connecting, and 40 seconds after the maker peer is present on the offer channel.
 Offers sign `peerKey` (the maker's swarm public key). The bridge's authenticated
 `dex_presence` query reports whether that peer's channel protocol is open. The host
 polls on ticks; an authenticated maker message also proves a usable channel path.
+`dex_warm {peerKeys}` (peer 0.1.15+, at most four keys) replaces the makers a client keeps connected before any
+take; it shares pins with trade routes and returns the keys kept. Traders warm the best offer's maker on each side of
+markets the dashboard shows (makers on 0.1.14+, heard within 70 s); older peers refuse it and nothing is warmed.
 Channel joins and randomness requests cannot suppress timeout ticks. A silent
 taker is abandoned when a fresh chain tip reaches the existing reveal cutoff.
 

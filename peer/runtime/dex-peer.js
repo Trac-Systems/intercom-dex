@@ -94,6 +94,8 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
   const shutdown = () => void close().then(() => process.exit(0), error => { console.error(error.message); process.exit(1); });
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, shutdown);
   globalThis.Pear?.teardown?.(shutdown);
+  // One line per startup step with the time since start, so a slow start shows where it waits.
+  const started = Date.now(), step = name => console.log(`startup ${name} ${Date.now() - started} ms`);
   try {
     await ensureTextCodecs();
     const devnet = config.validatorKey !== undefined;
@@ -103,7 +105,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
       enableWallet: true, enableRoleRequester: false, enableValidatorObserver: !devnet, enableTxApplyLogs: false });
     if (mc.networkId !== config.msbNetworkId) throw new Error('MSB networkId differs from the network profile');
     const options = { networkPrefix: mc.addressPrefix, derivationPath: mc.derivationPath };
-    bus = new MainSettlementBus(mc, await walletAt(mc.keyPairPath, PeerWallet, options)); await bus.ready();
+    bus = new MainSettlementBus(mc, await walletAt(mc.keyPairPath, PeerWallet, options)); await bus.ready(); step('msb ready');
     fanOutValidatorSends(bus.network);
     if (devnet) {
       await bus.network.tryConnect(config.validatorKey, 'validator');
@@ -115,11 +117,11 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
       replicate: true, enableUpdater: true, enableBackgroundTasks: true, enableTxlogs: false,
       apiMsgExposed: false, apiTxExposed: false });
     peer = new Peer({ config: pc, msb: bus, wallet: await walletAt(pc.keyPairPath, Wallet, options),
-      protocol: DexProtocol, contract: DexContract }); await peer.ready();
+      protocol: DexProtocol, contract: DexContract }); await peer.ready(); step('peer ready');
     if (configurePeer) await configurePeer(peer);
     relay = new BlindRelay(peer, transport.relay);
-    await relay.start(); peer.blindRelay = relay;
-    resetPeer = await openResetReader({ bus, config, walletAt });
+    await relay.start(); peer.blindRelay = relay; step('relay ready');
+    resetPeer = await openResetReader({ bus, config, walletAt }); step('reset reader ready');
     const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer }) : {};
     bridge = new DexBridge(peer, { host: '127.0.0.1', port: config.bridge.port, token, requireAuth: true, handlers,
       info: { peerPubkey: peer.wallet.publicKey, swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex'),
@@ -129,7 +131,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     peer.sidechannel = sidechannel;
     bridge.attachSidechannel(sidechannel);
     bridge.start();
-    await sidechannel.start();
+    await sidechannel.start(); step('sidechannel ready');
     console.log('DEX_PEER_READY ' + JSON.stringify({ pid: process.pid, peerPubkey: peer.wallet.publicKey,
       msbAddress: bus.wallet?.address ?? null, bridge: `ws://127.0.0.1:${config.bridge.port}`,
       swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex') }));

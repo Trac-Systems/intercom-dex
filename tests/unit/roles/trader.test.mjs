@@ -33,6 +33,7 @@ class FakeBridge extends EventEmitter {
   async setRelays(keys) { this.relays = keys; }
   async join(ch) { this.joined.add(ch); }
   async send(ch, envelope) { this.sent.push({ ch, envelope }); }
+  async request(body) { (this.requests ??= []).push(body); if (this.refuse) throw new Error('Unknown message type'); return {}; }
 }
 
 async function trader(p, { dir = mkdtempSync(join(tmpdir(), 'dex-trader-')), registry, serviceKey = random32() } = {}) {
@@ -562,4 +563,30 @@ test('the HTTP status and take paths used by MCP share the trader freshness and 
   const stale = await call('POST', '/take', { offerId: offer.offerId, price: '1' });
   assert.deepEqual(stale, { status: 400, value: { error: 'This offer is no longer announced by its maker.' } });
   assert.equal(taker.host.trades.size, 0);
+});
+
+test('the best live makers of a shown market are kept warm: 0.1.14+ only, at most four, sent only on change', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { registry } = fixture(), { t: taker, bridge } = await trader(party(), { registry });
+  taker.viewing = new Map();
+  const warm = async () => { timers.find(x => x.ms === 15000).fn(); await new Promise(r => setImmediate(r)); };
+  const put = (n, software, lastSeen = nowSec()) => {
+    const offer = { offerId: random32(), peerKey: random32(), maker: party().me, software };
+    taker.offers.set(offer.offerId, { offer, firstSeen: lastSeen, lastSeen });
+    return offer;
+  };
+  const fresh = put(1, '0.1.14'), old = put(2, '0.1.13'), quiet = put(3, '0.1.15', nowSec() - 100), other = put(4, '0.2.0');
+  taker.noteViewing('TNK/USDC', [fresh.offerId, old.offerId]);
+  taker.noteViewing('RESET/USDC', [quiet.offerId, other.offerId, undefined]);
+  await warm();
+  assert.deepEqual(bridge.requests, [{ type: 'dex_warm', peerKeys: [fresh.peerKey, other.peerKey] }]);
+  await warm();
+  assert.equal(bridge.requests.length, 1, 'unchanged sets are not sent again');
+  taker.viewing.get('TNK/USDC').at = nowSec() - 61;
+  await warm();
+  assert.deepEqual(bridge.requests.at(-1), { type: 'dex_warm', peerKeys: [other.peerKey] });
+  bridge.refuse = true; taker.noteViewing('TNK/USDC', [fresh.offerId]);
+  await warm(); await warm();
+  assert.equal(bridge.requests.length, 3, 'an older peer refuses once and warming stops');
 });

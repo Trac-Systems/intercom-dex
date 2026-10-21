@@ -340,7 +340,9 @@ export function createModel({ config, role, wallets = null, bridge, nextOffer = 
     pair(name) { return registryPair(registryOf(role), name, { open: false }); },
     book(name) {
       if (kind !== 'trader') throw new Error('The order book is only available to traders');
-      return traderBook(role, registryPair(registryOf(role), name, { open: false }), now());
+      const book = traderBook(role, registryPair(registryOf(role), name, { open: false }), now());
+      role.noteViewing?.(name, [book.asks?.[0]?.take?.offerId, book.bids?.[0]?.take?.offerId]);
+      return book;
     },
     async list(name, offset = 0, limit = 100) {
       const parts = typeof name === 'string' ? name.split('.') : [];

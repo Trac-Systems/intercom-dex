@@ -20,6 +20,10 @@ const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom
 export const SIGNER_ONLINE_SEC = 90;
 // Own open offers are announced again this often; takers on 0.1.14+ count a maker silent for 70 s as probably offline.
 export const REANNOUNCE_MS = 45_000;
+// While the dashboard shows a market, the makers of its best offer on each side (on 0.1.14+, heard within 70 s) are kept
+// connected, at most four in all, so a take there starts talking at once. Older makers are left alone: before 0.1.8
+// their peers stop at 64 connections.
+export const WARM_MS = 15_000, WARM_VIEW_SEC = 60, WARM_MAX = 4, WARM_SOFTWARE = '0.1.14', WARM_LIVE_SEC = 70;
 export const MAX_TRADES_PER_OFFER = 3;
 export const MAX_NEGOTIATIONS_PER_TAKER = 3;
 // Declines answer strangers, so they are bounded: one per sender per minute, DECLINES_PER_MINUTE in total. A decline
@@ -68,9 +72,36 @@ export class Trader {
       this.#reannounce().catch(e => this.log('offer announce', e.message));
     }, REANNOUNCE_MS);
     this.certificates.start();
+    this.viewing = new Map();
+    this.warmTimer = setInterval(() => this.#warm().catch(() => {}), WARM_MS);
+    this.warmTimer.unref?.();
   }
 
-  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); }
+  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer); }
+
+  // The dashboard reports the offers a click on its best ask and bid would take.
+  noteViewing(pair, offerIds) { this.viewing?.set(pair, { at: nowSec(), offerIds: offerIds.filter(Boolean) }); }
+
+  async warmNow() { this.warmSig = null; await this.#warm(); return this.warmKept ?? []; }
+
+  async #warm() {
+    if (this.warmOff) return;
+    const now = nowSec(), keys = [];
+    for (const [pair, v] of this.viewing) {
+      if (now - v.at > WARM_VIEW_SEC) { this.viewing.delete(pair); continue; }
+      for (const id of v.offerIds) {
+        const seen = this.offers.get(id), o = seen?.offer;
+        if (!o?.peerKey || o.maker.dexKey === this.identity.publicKey || now - (seen.lastSeen ?? 0) > WARM_LIVE_SEC) continue;
+        try { if (!meetsVersion(o.software, WARM_SOFTWARE)) continue; } catch { continue; }
+        if (!keys.includes(o.peerKey)) keys.push(o.peerKey);
+      }
+    }
+    const list = keys.slice(0, WARM_MAX), sig = list.join(',');
+    if (sig === (this.warmSig ?? '')) return;
+    // A peer before 0.1.14 doesn't know the request; then nothing is kept warm for this run.
+    try { this.warmKept = (await this.bridge.request({ type: 'dex_warm', peerKeys: list })).peerKeys ?? list; this.warmSig = sig; }
+    catch (e) { this.warmOff = true; this.log('warm makers unavailable', e.message); }
+  }
 
   onlineSigners(registry = this.registry.usable) {
     const reg = this.registry.usable, now = performance.now(), minimum = registry?.minSoftware;

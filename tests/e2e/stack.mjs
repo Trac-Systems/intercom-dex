@@ -21,7 +21,7 @@ import { prepareDeal, lockStatement } from '../../src/core/dealing.js';
 import { proveLock } from '../../src/proof/lockproof.js';
 import { generateBox, encodeKey } from '../../src/core/keys.js';
 import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
-import { SOFTWARE } from '../../src/core/software.js';
+import { SOFTWARE, meetsVersion } from '../../src/core/software.js';
 import { PAIRS } from '../unit/core/helpers.mjs';
 import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -317,6 +317,12 @@ try {
     log(`--- ${label}`);
     const offer = await api(maker, 'POST', '/offer', { pair, side, baseAmount, price, ttlSec: 900 });
     await until('offer visible to taker', async () => (await api(taker, 'GET', '/status')).offers.some(o => o.offerId === offer.offerId), 60000);
+    // A new taker keeps a new maker connected before the take (warm); an old maker is never warmed.
+    if (!oldNames.has(taker)) {
+      const warm = await api(taker, 'POST', '/warm', { pair, offerIds: [offer.offerId] });
+      assert.deepEqual(warm.peerKeys, meetsVersion(offer.software, '0.1.14') ? [offer.peerKey] : [], 'warm makers');
+      log('warm', taker, '->', maker, warm.peerKeys.length ? 'connected' : 'not warmed (old maker)');
+    }
     const taken = await api(taker, 'POST', '/take', { offerId: offer.offerId, price: offer.price });
     log('taken', taken.role, 'quote', taken.quoteAmount);
     if (afterTake) await afterTake(taken);

@@ -14,6 +14,12 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
     'POST /offer': b => role.makeOffer(b),
     'POST /cancel': b => role.cancelOffer(b.offerId),
     'POST /take': b => role.takeOffer(b.offerId, b.baseAmount, b.price),
+    // As if a dashboard showed this market with these offers on top: the makers kept connected are returned.
+    ...(role.warmNow ? { 'POST /warm': async b => {
+      if (typeof b.pair !== 'string' || !Array.isArray(b.offerIds) || b.offerIds.length > 2 || b.offerIds.some(id => typeof id !== 'string')) throw new Error('Invalid warm request');
+      role.noteViewing(b.pair, b.offerIds);
+      return { peerKeys: await role.warmNow() };
+    } } : {}),
   };
   return (req, res) => {
     let body = '';

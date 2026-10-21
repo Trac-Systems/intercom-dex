@@ -1,6 +1,6 @@
 {
   "name": "intercom-dex",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "type": "module",
   "description": "Non-custodial exchange for TNK and RESET against USDC on Solana, run by AI agents over Intercom",

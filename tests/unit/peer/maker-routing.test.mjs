@@ -158,3 +158,34 @@ test('a pinned maker keeps the existing direct-failure and blind-relay retry pat
   connections[1].destroy(new Error('relay failed'));
   assert.equal(swarm.explicitPeers.size, 0);
 });
+
+test('warm makers share pins with trade routes, are replaced as a set, capped at four and released with the client', async t => {
+  const f = fixture(t);
+  const warm = (peerKeys, who) => f.send({ type: 'dex_warm', peerKeys }, who);
+  assert.deepEqual((await warm([key(1), key(2)])).peerKeys, [key(1), key(2)]);
+  assert.deepEqual(f.joined, [key(1), key(2)]);
+  assert.equal((await f.join(channel(9), key(1))).type, 'joined');
+  assert.deepEqual(f.joined, [key(1), key(2)], 'a take on a warm maker reuses its pin');
+  assert.equal(f.bridge.makerPins.get(key(1)).refs, 2);
+  assert.deepEqual((await warm([key(2), key(3)])).peerKeys, [key(2), key(3)]);
+  assert.deepEqual(f.left, [], 'key 1 stays pinned by the trade route');
+  assert.equal(f.bridge.makerPins.get(key(1)).refs, 1);
+  await f.join(channel(9), null);
+  assert.deepEqual(f.left, [key(1)]);
+  for (const bad of [[key(1), key(2), key(3), key(4), key(5)], [key(1), key(1)], ['x'], 'nope']) {
+    assert.match((await warm(bad)).error, /Invalid/);
+  }
+  assert.match((await f.send({ type: 'dex_warm', peerKeys: [], extra: 1 })).error, /Invalid/);
+  assert.match((await warm([key(6)], { authed: false, socket: new EventEmitter() })).error, /Unauthorized/);
+  assert.deepEqual([...f.bridge.makerPins.keys()].sort(), [key(2), key(3)]);
+  f.owner.socket.emit('close');
+  assert.equal(f.bridge.makerPins.size, 0); assert.equal(f.bridge.warmRoutes.size, 0);
+  assert.deepEqual(f.left.sort(), [key(1), key(2), key(3)]);
+});
+
+test('warm makers skip keys beyond the pin limit instead of failing', async t => {
+  const f = fixture(t);
+  for (let i = 1; i <= 15; i++) await f.join(channel(i), key(i));
+  assert.deepEqual((await f.send({ type: 'dex_warm', peerKeys: [key(20), key(21)] })).peerKeys, [key(20)]);
+  assert.equal(f.bridge.makerPins.size, 16);
+});
