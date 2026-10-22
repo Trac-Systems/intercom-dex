@@ -34,6 +34,25 @@ test('RESET context uses only the pinned local reader', async () => {
   assert.throws(() => makeHandlers({ bus, resetPeer, config: { trac: { reset: { bootstrap: '04'.repeat(32) } } } }));
 });
 
+test('a RESET reader still opening answers not ready, TNK checks work at once, and a wrong reader is refused when it opens', async () => {
+  const bus = fixture(), config = { trac: { reset: { bootstrap: '03'.repeat(32) } } };
+  let open, fail;
+  const handlers = makeHandlers({ bus, config, resetPeer: new Promise((resolve, reject) => { open = resolve; fail = reject; }) });
+  await assert.rejects(handlers.dex_reset_context(), /not ready/);
+  await assert.rejects(handlers.dex_balances({ address: PeerWallet.encodeBech32m('trac', Buffer.alloc(32, 7)) }), /not ready/);
+  const hash = 'aa'.repeat(32), request = { asset: 'RESET', txHash: hash, from: 'bb'.repeat(32), to: 'cc'.repeat(32), minAmount: '1', nonce: hash };
+  bus.state.getSigned = async () => null;
+  assert.equal((await handlers.dex_verify(request)).final, false);
+  open({ base: { key: Buffer.alloc(32, 3), view: { checkout() {} } } }); await new Promise(r => setImmediate(r));
+  assert.equal((await handlers.dex_reset_context()).subnet, '03'.repeat(32));
+  const wrong = makeHandlers({ bus, config, resetPeer: Promise.resolve({ base: { key: Buffer.alloc(32, 4), view: { checkout() {} } } }) });
+  await new Promise(r => setImmediate(r));
+  await assert.rejects(wrong.dex_reset_context(), /RESET reader failed/);
+  const failed = makeHandlers({ bus, config, resetPeer: new Promise((resolve, reject) => { fail = reject; }) });
+  fail(new Error('disk')); await new Promise(r => setImmediate(r));
+  await assert.rejects(failed.dex_reset_context(), /RESET reader failed: disk/);
+});
+
 test('balances read signed MSB and RESET views and reject invalid address checksums', async () => {
   const bus = fixture(), address = PeerWallet.encodeBech32m('trac', Buffer.alloc(32, 7));
   let closed = 0, balanceKey;

@@ -121,8 +121,12 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     if (configurePeer) await configurePeer(peer);
     relay = new BlindRelay(peer, transport.relay);
     await relay.start(); peer.blindRelay = relay; step('relay ready');
-    resetPeer = await openResetReader({ bus, config, walletAt }); step('reset reader ready');
-    const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer }) : {};
+    // The RESET reader's subnet join can take minutes on a slow network; the bridge and the sidechannel open without
+    // waiting for it (RESET requests answer "not ready" until then). A reader that fails to open still stops the peer.
+    const resetReady = openResetReader({ bus, config, walletAt });
+    resetReady.then(r => { if (closing) return r?.close(); resetPeer = r; step('reset reader ready'); },
+      error => { console.error(`RESET reader failed: ${error.message}`); void close().finally(() => process.exit(1)); });
+    const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer: resetReady }) : {};
     bridge = new DexBridge(peer, { host: '127.0.0.1', port: config.bridge.port, token, requireAuth: true, handlers,
       info: { peerPubkey: peer.wallet.publicKey, swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex'),
         msbAddress: bus.wallet?.address ?? null, environment: config.environment, networkProfile: profile, servicePeerKey: config.servicePeerKey, role: config.role } });
