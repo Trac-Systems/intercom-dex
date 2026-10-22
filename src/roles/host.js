@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { seal, open, createReplayCache } from '../core/envelope.js';
-import { step as buyerStep } from '../core/trade-buyer.js';
+import { step as buyerStep, ackRejectionReason } from '../core/trade-buyer.js';
+import { verifiedMessage } from '../core/trade-common.js';
 import { step as sellerStep } from '../core/trade-seller.js';
 import { step as signerStep } from '../core/trade-signer.js';
-import { RANDOMNESS } from '../core/terms.js';
+import { RANDOMNESS, STEP_BUDGET_MS } from '../core/terms.js';
 import { sha256Hex, hexToBytes } from '../core/canonical.js';
 import { proveLock, verifyLock } from '../proof/lockproof.js';
 import { checkProfileRegistry, checkProfileTerms } from '../net/profile.js';
@@ -30,6 +31,9 @@ const MAX_PER_SENDER = 400;
 // A published signer repeats its share on its own at 10, 20, 40 ... 640 seconds and then only answers requests: every
 // repeat costs a fresh work stamp, and a seller that still misses shares asks for them (shareRequest) every 30 s.
 export const PUBLICATION_LAST_DELAY_SEC = 640;
+// Randomness lookups 2 s apart, enough to cover the whole randomness step.
+const RANDOMNESS_LOOKUPS = STEP_BUDGET_MS.randomness / 2000;
+export const REVEAL_RESEND_SEC = 2;
 // What one sender may have waiting in a trade's buffer: a flood from one member never pushes out another's messages.
 const BUFFER_PER_SENDER = 100, BUFFER_BYTES_PER_SENDER = 4_000_000;
 const sizes = new WeakMap();
@@ -228,11 +232,29 @@ export class TradeHost {
     return seal({ kind, ch, body }, this.identity.secretKey, { ts: this.now(), nonce: randomBytes(32).toString('hex') });
   }
 
+  // Signers repeat their ack every 10 s until sendBy: each reason is logged once per trade and signer, and only while
+  // the buyer still waits for acks (or with DEX_DEBUG).
+  #ackNote(trade, what, from, reason, phase = trade.state.phase) {
+    if (!process.env.DEX_DEBUG && phase !== 'awaitAcks') return;
+    const key = `${what}:${from}:${reason}`;
+    trade.ackNotes ??= new Set();
+    if (trade.ackNotes.has(key)) return;
+    trade.ackNotes.add(key);
+    this.log(what, trade.key.slice(0, 12), String(from ?? '').slice(0, 8), reason);
+  }
+
+  sendEnvelope(trade, ch, envelope) {
+    if (process.env.DEX_DEBUG && ch.startsWith('intercom-dex:t:')) {
+      this.log('send', (trade?.key ?? ch.slice('intercom-dex:t:'.length)).slice(0, 12), ch.slice(-8), envelope.kind, envelope.from.slice(0, 8));
+    }
+    return this.bridge.send(ch, envelope);
+  }
+
   async #send(trade, ch, kind, body, { keep = true } = {}) {
     if (kind === 'take' && trade) {
       const prior = trade.outbox[ch]?.find(e => e.kind === 'take' && e.body.commitment === body.commitment);
       if (prior) {
-        try { await this.bridge.send(ch, prior); } catch (error) { this.log('send failed', kind, error.message); }
+        try { await this.sendEnvelope(trade, ch, prior); } catch (error) { this.log('send failed', kind, error.message); }
         return prior;
       }
     }
@@ -243,7 +265,7 @@ export class TradeHost {
       this.#save(trade);
     }
     // A failed send is not lost: the outbox is repeated while the trade waits (and on every 'present').
-    try { await this.bridge.send(ch, envelope); }
+    try { await this.sendEnvelope(trade, ch, envelope); }
     catch (error) { if (!keep) throw error; this.log('send failed', kind, ch.slice(-8), error.message); }
     return envelope;
   }
@@ -273,6 +295,9 @@ export class TradeHost {
       return;
     }
     let delivered = false;
+    if (message?.kind === 'ack' && !this.byChannel.get(channel)?.size) {
+      if (process.env.DEX_DEBUG) this.log('ack rejected', channel.slice(-8), String(message.from ?? '').slice(0, 8), 'no trade on channel');
+    }
     for (const key of this.byChannel.get(channel) ?? []) {
       const trade = this.trades.get(key);
       if (trade && this.#accept(trade, channel, message)) delivered = true;
@@ -293,12 +318,16 @@ export class TradeHost {
   // Cheap checks on the unverified fields first (channel, trade, sender allowed for this kind, per-sender cap), so
   // nobody else can spend this trade's replay memory or buffer; then the signature and replay check.
   #accept(trade, channel, message) {
-    if (!message || typeof message !== 'object' || message.ch !== channel || typeof message.from !== 'string') return false;
-    if (isFinished(trade) && !this.#serving(trade)) return false;
+    const reject = reason => {
+      if (message?.kind === 'ack') this.#ackNote(trade, 'ack rejected', message.from, reason);
+      return false;
+    };
+    if (!message || typeof message !== 'object' || message.ch !== channel || typeof message.from !== 'string') return reject('channel mismatch or invalid sender');
+    if (isFinished(trade) && !this.#serving(trade)) return reject('trade finished');
     const s = trade.state, ref = message.body?.tradeId;
     if (message.kind === 'present' && channel !== tradeChannel(message.body?.ref)) return false;
-    if (ref !== undefined && ref !== s.tradeId && !(message.kind === 'abort' && ref === s.offerId)) return false;
-    if (!senders(trade, message.kind).includes(message.from)) return false;
+    if (ref !== undefined && ref !== s.tradeId && !(message.kind === 'abort' && ref === s.offerId)) return reject('wrong trade id');
+    if (!senders(trade, message.kind).includes(message.from)) return reject('sender not a committee member or permitted participant');
     const takeCommitment = s.role !== 'signer' && (s.mode === 'taker' ? sha256Hex(hexToBytes(s.nonce, 32)) : s.peerCommit);
     if (['accept', 'reveal'].includes(message.kind) && message.body?.takeCommitment !== takeCommitment) return false;
     if (message.kind === 'decline' && message.body?.takeNonce !== s.takeNonce) return false;
@@ -306,12 +335,12 @@ export class TradeHost {
     const recovery = ['shareRequest', 'present'].includes(message.kind);
     if (message.kind === 'shareRequest' && !this.#serving(trade)) return false;
     const count = trade.perSender.get(message.from) ?? 0;
-    if (!recovery && count >= MAX_PER_SENDER) return false;
+    if (!recovery && count >= MAX_PER_SENDER) return reject('sender limit reached');
     let m;
     try { m = open(message, { now: this.now(), seen: trade.seen, maxAgeSec: recovery ? 120 : trade.lifetimeSec }); }
     catch (error) {
       if (process.env.DEX_DEBUG && error.code !== 'replay') this.log('reject', channel.slice(-8), message.kind, error.code ?? error.message);
-      return false;
+      return reject(error.code ?? error.message);
     }
     if (!recovery) trade.perSender.set(m.from, count + 1);
     // An authenticated message/presence from the maker on this offer channel proves a usable peer path.
@@ -327,7 +356,10 @@ export class TradeHost {
     if (recovery) { this.#resend(trade, channel, m.from, m.kind === 'shareRequest' ? 30 : 3); return true; }
     if (m.kind === 'termsSig') trade.raw.push(m);   // kept for the signer summons; nothing else is retained
     const waiting = trade.buffer.filter(x => x.from === m.from);
-    if (waiting.length >= BUFFER_PER_SENDER || waiting.reduce((sum, x) => sum + byteSize(x), 0) + byteSize(m) > BUFFER_BYTES_PER_SENDER) return false;
+    if (waiting.length >= BUFFER_PER_SENDER || waiting.reduce((sum, x) => sum + byteSize(x), 0) + byteSize(m) > BUFFER_BYTES_PER_SENDER) return reject('buffer limit reached');
+    if (m.kind === 'ack' && ACCEPTS[trade.role].ack !== ANY && !ACCEPTS[trade.role].ack.includes(s.phase)) {
+      this.#ackNote(trade, 'ack deferred', m.from, `phase ${s.phase}`);
+    }
     trade.buffer.push(m);
     this.#enqueue(trade, () => this.#drain(trade));
     return true;
@@ -362,14 +394,14 @@ export class TradeHost {
     trade.lastResend.set(id, this.now());
     for (const envelope of trade.outbox[channel] ?? []) {
       if (this.#serving(trade) && envelope.kind !== 'sharePublish') continue;
-      this.bridge.send(channel, envelope).catch(() => {});
+      this.sendEnvelope(trade, channel, envelope).catch(() => {});
     }
   }
 
   #resendAll(trade) {
     for (const [ch, list] of Object.entries(trade.outbox)) for (const e of list) {
       if (this.#serving(trade) && e.kind !== 'sharePublish') continue;
-      this.bridge.send(ch, e).catch(() => {});
+      this.sendEnvelope(trade, ch, e).catch(() => {});
     }
   }
 
@@ -415,6 +447,13 @@ export class TradeHost {
       ...(this.eligibleOnline ? { eligibleOnline: this.eligibleOnline(before.draft?.quoteAmount, before.draft?.pair, before.registry).length } : {}) };
     const { state, actions } = STEPS[trade.role](trade.state, event);
     this.#checkState(state);
+    if (trade.role === 'buyer' && event.message?.kind === 'ack') {
+      let reason;
+      try { reason = ackRejectionReason(before, verifiedMessage(before, event)); }
+      catch (error) { reason = error.message; }
+      if (!reason && !state.acks.includes(event.message.from)) reason = state.reason ?? 'state validation failed';
+      if (reason) this.#ackNote(trade, 'ack rejected', event.message.from, reason, before.phase);
+    }
     trade.state = state;
     if (state.phase !== before.phase) this.log(trade.role, trade.key.slice(0, 12), before.phase, '->', state.phase, state.reason ?? '',
       ...(state.phase === 'aborted' && event.message?.kind === 'accept'
@@ -432,7 +471,7 @@ export class TradeHost {
   }
 
   // Adapter calls run outside the trade's queue; their results come back as events.
-  #background(trade, label, fn, toEvent, { retries = 3, retryMs = 3000 } = {}) {
+  #background(trade, label, fn, toEvent, { retries = 3, retryMs = 3000, steady = false } = {}) {
     if (trade.busy.has(label)) return;
     trade.busy.add(label);
     if (process.env.DEX_DEBUG) this.log('start', label, trade.key.slice(0, 12));
@@ -443,7 +482,7 @@ export class TradeHost {
         catch (error) {
           this.log('retry', label, trade.key.slice(0, 12), `${attempt}/${retries}`, error.message);
           if (attempt >= retries) return { type: 'error', reason: `${label}: ${error.message}` };
-          await new Promise(r => setTimeout(r, retryMs * attempt));
+          await new Promise(r => setTimeout(r, steady ? retryMs : retryMs * attempt));
         }
       }
     })().then(event => {
@@ -492,7 +531,7 @@ export class TradeHost {
       case 'publishShare':
         for (const ch of action.channels) {
           const prior = trade.outbox[ch]?.find(e => e.kind === 'sharePublish');
-          if (prior) await this.bridge.send(ch, prior).catch(() => {});
+          if (prior) await this.sendEnvelope(trade, ch, prior).catch(() => {});
           else await this.#send(trade, ch, 'sharePublish', action.body);
         }
         trade.publicationDelay ??= 10;
@@ -594,15 +633,21 @@ export class TradeHost {
           for (const ch of this.#channels(trade)) this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false }).catch(() => {});
         }
       }
+      // While both sides wait for a reveal, the reveal cutoff leaves seconds, so a lost accept or reveal is repeated
+      // every 2 s; every other wait repeats every 10 s.
+      const every = s.phase === 'awaitReveal' ? REVEAL_RESEND_SEC : 10;
       if (trade.phaseSeen !== s.phase) { trade.phaseSeen = s.phase; trade.phaseSince = now; }
-      else if (now - trade.phaseSince >= 10 && now - (trade.autoResendAt ?? 0) >= 10 && !(trade.role === 'signer' && now >= s.terms.sendBy)) {
+      else if (now - trade.phaseSince >= every && now - (trade.autoResendAt ?? 0) >= every && !(trade.role === 'signer' && now >= s.terms.sendBy)) {
         trade.autoResendAt = now;
         this.#resendAll(trade);
       }
-      if (s.phase === 'awaitRandomness' && this.solana) {
+      // The randomness block is looked up once the pushed chain view shows it finalized, so waiting for it costs no
+      // requests and both sides see it within a second of each other. Without a fresh pushed view, and when a node
+      // has not finalized it yet, the lookup repeats every 2 s for as long as the step's budget lasts.
+      if (s.phase === 'awaitRandomness' && this.solana && !(this.#watchFresh() && this.slot < s.acceptSlot + RANDOMNESS.TARGET)) {
         this.#background(trade, 'randomness', () => this.solana.firstFinalizedBlockAtLeast(s.acceptSlot + RANDOMNESS.TARGET),
           r => ({ type: 'tick', chain: { acceptSlot: s.acceptSlot, slot: r.slot, blockhash: r.blockhash, finalized: true, firstFinalized: true } }),
-          { retries: 20, retryMs: 2000 });
+          { retries: RANDOMNESS_LOOKUPS, retryMs: 2000, steady: true });
       }
       this.#enqueue(trade, () => this.#apply(trade, { type: 'tick', now }));
     }

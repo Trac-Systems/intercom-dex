@@ -65,8 +65,9 @@ Call it first, then about once a minute while trades run. Fields:
 - `certificatesReady`: lock certificates ready for buying. With 0, a buyer makes one on demand, which takes about a
   minute before the lock.
 - `offers`: every signed offer this program has seen, as published by its maker (`offerId`, `pair`, `side`,
-  `baseAmount`, `price`, `maker`, `peerKey`, `expiresAt`, `registryVersion`, `software`). `baseAmount` is the size
-  the maker posted, not what is left.
+  `baseAmount`, `price`, `maker`, `peerKey`, `expiresAt`, `registryVersion`, `software`), plus `lastSeen`: when
+  this program last heard the maker announce it, in Unix seconds. Makers announce every 45 seconds while their
+  program runs. `baseAmount` is what is left of the offer as far as this program knows.
 - `mine`: your own open offers with `available`, `reserved` and `filled` in base units.
 - `trades`: one entry per trade with `key`, `role` (`buyer` or `seller`), `phase`, `reason`, `tradeId`, `H`,
   `committee`, `pair`, `baseAmount` and `quoteAmount`.
@@ -328,6 +329,56 @@ still land, the program then waits for `refundAfter` before it decides. If no lo
 `aborted` with `The escrow lock never ran; nothing to refund`. Until then its USDC stays in the wallet but counts as
 committed. This happens, for example, when the platform fee changed after the terms were signed (the program logs
 `platform fee changed, take again`).
+
+## Trading on your own
+
+When the user lets you trade without asking each time, adapt to how the other traders behave. A trade that is called
+off before the lock costs nothing but time, so the aim is to waste less of it. Everything below works with the tools
+and the config; nothing needs a code change.
+
+Choose makers that answer:
+
+- Prefer offers whose `lastSeen` is less than 60 seconds old. An older one may belong to a program that is closed,
+  asleep or cut off.
+- Prefer makers on `software` 0.1.20 or later; they repeat lost messages sooner.
+- Remember each maker's `maker.dexKey`. After a trade with a maker ends with one of the reasons that point at the
+  other side (table below), skip that maker for about 10 minutes, and for an hour after two in a row. Take the
+  next offer at the same or the next price from another maker instead.
+
+What a reason before the lock tells you:
+
+| Reason | Usual cause | What to do |
+| --- | --- | --- |
+| `Accept slot outside the freshness window`, `Accept arrived too late`, `Reveal arrived too late`, `Timed out: terms signatures` | The other program, its connection or its Solana servers are slow. | Take another maker. If it happens with every maker, look at your own side (below). |
+| `Timed out: take/accept` | The maker's program did not answer. | Skip that maker; prefer offers with a recent `lastSeen`. |
+| `Timed out: deciding block` | Your or the other side's Solana servers are slow. | If it repeats, use your own Solana RPC. |
+| `Signers did not confirm`, `Not enough signers online`, `Not enough committee signers online` | Too few signers answered in time. | Check `signersOnline` in `dex_status` and wait a minute or two before the next take. |
+| `Timed out: deal` | As a seller: the buyer's program did not send its deal in time. | Nothing to change; your offer stays open. |
+| `Peer aborted: <reason>` | The other side left for its own reason. | Read the reason that follows as above, from their side. |
+
+Pace:
+
+- Take one offer of a maker at a time, and wait a minute before taking the same maker again after a decline.
+- After three trades in a row with different makers end before the lock, pause for five minutes and check your own
+  side: `signersOnline`, clock errors, `balanceError` in `dex_wallets`, the computer's connection.
+- Never take again because a trade is slow after its lock. The program finishes locked trades by itself.
+
+Your own side:
+
+- Solana servers: the built-in public servers are shared and limit requests. Your own RPC URL in the config
+  (`"solana": {"endpoints": ["<URL>"]}`) is the biggest single help against the timing reasons above. With one
+  endpoint of your own the program trusts its answers.
+- Keep the computer awake, online and on automatic time while offers are open or trades run.
+- As a maker: keep the program running while your offers are open, set `ttlSec` to about as long as it will run,
+  and cancel your offers with `dex_cancel` before you stop it. Each offer serves at most three trades at once
+  before their locks.
+- When the program runs on its own control API, `POST /warm` with `{"pair", "offerIds"}` (at most two offers)
+  connects to those makers before you take. It is optional; a take connects by itself.
+- `DEX_DEBUG=1` in the program's environment logs every message it sends and receives on a trade's channel. Without it, the log
+  still says why a signer's confirmation was not counted while the trade waits for confirmations.
+
+The step budgets and Solana timing windows are part of the protocol, the same for every trader. Changing them in
+your copy of the code makes your trades fail with everyone else's.
 
 ## Deadlines
 

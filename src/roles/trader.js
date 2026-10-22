@@ -24,6 +24,7 @@ export const REANNOUNCE_MS = 45_000;
 // connected, at most four in all, so a take there starts talking at once. Older makers are left alone: before 0.1.8
 // their peers stop at 64 connections.
 export const WARM_MS = 15_000, WARM_VIEW_SEC = 60, WARM_MAX = 4, WARM_SOFTWARE = '0.1.14', WARM_LIVE_SEC = 70;
+const WARM_RETRY_SEC = 180;
 // A cancel whose announce failed is announced again every 10 s, up to six times.
 export const CANCEL_RETRY_MS = 10_000, CANCEL_RETRIES = 6;
 export const MAX_TRADES_PER_OFFER = 3;
@@ -84,25 +85,44 @@ export class Trader {
   // The dashboard reports the offers a click on its best ask and bid would take.
   noteViewing(pair, offerIds) { this.viewing?.set(pair, { at: nowSec(), offerIds: offerIds.filter(Boolean) }); }
 
-  async warmNow() { this.warmSig = null; await this.#warm(); return this.warmKept ?? []; }
+  async warmNow() { this.warmSig = null; await this.#warm(true); return this.warmKept ?? []; }
 
-  async #warm() {
-    if (this.warmOff) return;
-    const now = nowSec(), keys = [];
+  async #warm(explain = false) {
+    const now = nowSec(), keys = [], skipped = new Set();
+    if (now < (this.warmRetryAt ?? 0)) {
+      if (explain) this.log('warm makers: no peer keys', `retry in ${this.warmRetryAt - now}s after a failed request`);
+      return;
+    }
     for (const [pair, v] of this.viewing) {
-      if (now - v.at > WARM_VIEW_SEC) { this.viewing.delete(pair); continue; }
+      if (now - v.at > WARM_VIEW_SEC) { this.viewing.delete(pair); skipped.add('view expired'); continue; }
       for (const id of v.offerIds) {
         const seen = this.offers.get(id), o = seen?.offer;
-        if (!o?.peerKey || o.maker.dexKey === this.identity.publicKey || now - (seen.lastSeen ?? 0) > WARM_LIVE_SEC) continue;
-        try { if (!meetsVersion(o.software, WARM_SOFTWARE)) continue; } catch { continue; }
+        let reason;
+        if (!o) reason = 'offer not found';
+        else if (!o.peerKey) reason = 'missing peerKey';
+        else if (o.maker.dexKey === this.identity.publicKey) reason = 'own offer';
+        else if (now - (seen.lastSeen ?? 0) > WARM_LIVE_SEC) reason = 'maker not heard within 70s';
+        else try { if (!meetsVersion(o.software, WARM_SOFTWARE)) reason = 'maker software too old'; }
+        catch { reason = 'invalid maker software'; }
+        if (reason) { skipped.add(reason); continue; }
         if (!keys.includes(o.peerKey)) keys.push(o.peerKey);
       }
     }
     const list = keys.slice(0, WARM_MAX), sig = list.join(',');
-    if (sig === (this.warmSig ?? '')) return;
-    // A peer before 0.1.14 doesn't know the request; then nothing is kept warm for this run.
-    try { this.warmKept = (await this.bridge.request({ type: 'dex_warm', peerKeys: list })).peerKeys ?? list; this.warmSig = sig; }
-    catch (e) { this.warmOff = true; this.log('warm makers unavailable', e.message); }
+    if (!list.length && (explain || this.warmSig)) this.log('warm makers: no peer keys', [...skipped].join(', ') || 'no viewed offers');
+    if (sig === this.warmSig) return;
+    try {
+      this.warmKept = (await this.bridge.request({ type: 'dex_warm', peerKeys: list })).peerKeys ?? list;
+      // A full peer or a peer still starting may keep fewer keys; retry that selection on the next interval.
+      this.warmSig = this.warmKept.join(',');
+      // Logged when it starts, not on every interval while it lasts.
+      const none = list.length > 0 && !this.warmKept.length;
+      if (none && !this.warmNone) this.log('warm makers: no peer keys', 'peer kept none; connection not ready or maker peer limit reached (see peer log)');
+      this.warmNone = none;
+    } catch (e) {
+      this.warmRetryAt = now + WARM_RETRY_SEC; this.warmSig = null; this.warmKept = [];
+      this.log('warm makers unavailable', e.message, `retry in ${WARM_RETRY_SEC}s`);
+    }
   }
 
   onlineSigners(registry = this.registry.usable) {
@@ -203,7 +223,7 @@ export class Trader {
       t.raw.some(x => x.kind === 'take' && x.body.commitment === m.body.commitment));
     if (duplicate) {
       if (isFinished(duplicate)) return decline('expired');
-      for (const envelope of duplicate.outbox[channel] ?? []) this.bridge.send(channel, envelope).catch(e => this.log('send failed', envelope.kind, e.message));
+      for (const envelope of duplicate.outbox[channel] ?? []) this.host.sendEnvelope(duplicate, channel, envelope).catch(e => this.log('send failed', envelope.kind, e.message));
       return;
     }
     if (trades.filter(t => t.state.mode === 'maker' && t.state.offerId === offer.offerId && beforeLock(t)).length >= MAX_TRADES_PER_OFFER) return decline('busy');
@@ -451,7 +471,8 @@ export class Trader {
       pairs: pairStatus(this.registry.usable), serviceStatus: this.serviceStatus ?? null,
       me: this.me, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       signersOnline: this.onlineSigners(), certificatesReady: this.certificates.available().length,
-      offers: [...this.offers.keys()].map(id => this.availableOffer(id)).filter(Boolean),
+      // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
+      offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
         return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString() }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,

@@ -113,11 +113,12 @@ function entryPanel() {
     h('label', null, 'Price', h('div', { class: 'affix' }, price, h('span', { class: 'unit' }, 'USDC'))),
     h('label', null, 'Amount', h('div', { class: 'affix' }, amount, baseUnit)),
     h('label', null, 'Open for', h('div', { class: 'affix' }, ttl, h('span', { class: 'unit' }, 'min'))));
+  const maxNote = h('p', { class: 'note', hidden: true });
   const takeFields = h('div', { class: 'fields' }, takeInfo,
-    h('label', null, 'Amount', h('div', { class: 'affix' }, takeAmount, h('button', { type: 'button', class: 'small link', onclick: () => { if (offer()) { takeAmount.value = plain(offer().amount.text); render(); } } }, 'Max'), takeUnit)));
+    h('label', null, 'Amount', h('div', { class: 'affix' }, takeAmount, h('button', { type: 'button', class: 'small link', onclick: () => fillMax() }, 'Max'), takeUnit)), maxNote);
   const el = h('section', { class: 'panel entry' }, h('div', { class: 'sides' }, sideButtons), h('div', { class: 'modes', role: 'tablist' }, modeButtons),
     offerFields, takeFields, h('div', { class: 'summary' }, available, estimate, minimum), paused, submit);
-  for (const i of [price, amount, takeAmount]) i.addEventListener('input', () => render());
+  for (const i of [price, amount, takeAmount]) i.addEventListener('input', () => { maxNote.hidden = true; render(); });
 
   // The offer to take: the level the reader clicked while it is still in the book, else the next offer at that
   // price (the clicked one was taken or called off), else the best one on the other side.
@@ -157,6 +158,18 @@ function entryPanel() {
     submit.className = `primary wide ${sideNow}`;
     submit.textContent = `${mode === 'take' ? '' : 'Review '}${sideNow === 'buy' ? 'Buy' : 'Sell'} ${base}${mode === 'take' ? ' now' : ''}`;
   }
+  // Max: the most of the offer that the free balance pays for, fees included (worked out by the trader).
+  async function fillMax() {
+    const o = offer();
+    if (!o) return;
+    maxNote.hidden = true;
+    try {
+      const m = await api(`/api/max-take?${q({ offerId: o.offerId })}`);
+      takeAmount.value = plain(m.amount.text);
+      if (m.note) { maxNote.textContent = m.note; maxNote.hidden = false; }
+    } catch (error) { maxNote.textContent = error.message; maxNote.hidden = false; }
+    render();
+  }
   function send() {
     if (mode === 'offer') return review('offer', { pair: pair.pair, side: sideNow, amount: plain(amount.value), price: price.value.trim(), ttlMin: Number(ttl.value) });
     const o = offer();
@@ -168,7 +181,7 @@ function entryPanel() {
     data(b, bal) { book = b; balances = bal; render(); },
     // A click on a book level: take that level's offer, and use its price for an offer too.
     take(level) {
-      sideNow = level.side === 'sell' ? 'buy' : 'sell'; mode = 'take'; taking = { offerId: level.take.offerId, price: level.price };
+      sideNow = level.side === 'sell' ? 'buy' : 'sell'; mode = 'take'; taking = { offerId: level.take.offerId, price: level.price }; maxNote.hidden = true;
       takeAmount.value = plain(level.take.amount.text); price.value = level.price;
       render(); takeAmount.focus();
     },

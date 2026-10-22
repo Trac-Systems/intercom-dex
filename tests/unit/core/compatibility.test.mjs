@@ -108,7 +108,7 @@ test('reveal cutoff expires a silent taker without waiting for the 120 second bl
 test('progress just before each step deadline succeeds; at the deadline it cannot start a lock', () => {
   const cases = [
     ['buyer', 'awaitRandomness', 120000, s => ({ type: 'tick', chain: { acceptSlot: s.acceptSlot, slot: s.acceptSlot + 96, blockhash: hex(), finalized: true, firstFinalized: true } })],
-    ['buyer', 'awaitTerms', 30000, s => ({ type: 'message', message: { v: 1, from: s.peer, kind: 'terms', ch: 'intercom-dex:t:' + s.tradeId, body: { tradeId: s.tradeId, terms: s.terms } } })],
+    ['buyer', 'awaitTerms', 60000, s => ({ type: 'message', message: { v: 1, from: s.peer, kind: 'terms', ch: 'intercom-dex:t:' + s.tradeId, body: { tradeId: s.tradeId, terms: s.terms } } })],
     ['buyer', 'proving', 150000, s => ({ type: 'proved', tradeId: s.tradeId, ok: true, proof: sim.state('buyer').deal.proof })],
   ];
   for (const [role, phase, budget, event] of cases) {

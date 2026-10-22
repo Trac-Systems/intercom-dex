@@ -5,6 +5,14 @@ import { abortTransition, createTrader, negotiationStep, resumeActions, runStep,
 export function createBuyer(config) { return createTrader('buyer', config); }
 export const LOCK_START_MARGIN_SEC = 120;
 
+export function ackRejectionReason(s, m) {
+  if (s.phase !== 'awaitAcks') return `phase ${s.phase} does not count acks`;
+  if (m.body.H !== s.H) return 'hash mismatch';
+  if (m.body.holdUntil < s.terms.refundAfter) return 'holdUntil before refundAfter';
+  if (s.acks.includes(m.from)) return 'already counted';
+  return null;
+}
+
 function maybeLock(s) {
   if (s.now >= s.terms.sendBy - LOCK_START_MARGIN_SEC) return abortTransition(s, 'Signers did not confirm');
   if (s.acks.length < s.terms.k) return { state: s, actions: [] };
@@ -118,7 +126,7 @@ export function step(state, event) {
         record: { hashHex: s.H, terms: s.terms, unknown: s.lockUnknown } }, ...pollSettlement(s).actions] };
     }
     if (m?.kind === 'ack' && s.phase === 'awaitAcks') {
-      if (m.body.H !== s.H || m.body.holdUntil < s.terms.refundAfter || s.acks.includes(m.from)) return null;
+      if (ackRejectionReason(s, m)) return null;
       s.acks.push(m.from);
       s.acks.sort((a, b) => s.terms.committee.findIndex(c => c.dexKey === a) - s.terms.committee.findIndex(c => c.dexKey === b));
       return maybeLock(s);

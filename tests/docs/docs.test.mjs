@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { STEP_BUDGET_MS, RANDOMNESS } from '../../src/core/terms.js';
+import { STEP_BUDGET_MS, RANDOMNESS, ACCEPT_SLOT_BEHIND } from '../../src/core/terms.js';
 import { LOCK_START_MARGIN_SEC } from '../../src/core/trade-buyer.js';
 import { SIGNER_ONLINE_SEC, MAX_TRADES_PER_OFFER, MAX_NEGOTIATIONS_PER_TAKER } from '../../src/roles/trader.js';
 import { MIN_SOL, MIN_TNK, DECIMALS, validatePayout } from '../../src/wallets/accounting.js';
@@ -257,12 +257,13 @@ test('SPEC.md states the step budgets, timing constants, transport limits and pi
   probe('docs/SPEC.md', /at or after\s+`A \+ (\d+)`/g, RANDOMNESS.TARGET);
   probe('docs/SPEC.md', /at most (\d+) seconds old, dated/g, RANDOMNESS.TIP_MAX_AGE_MS / 1000);
   probe('docs/SPEC.md', /which is at most (\d+) seconds old/g, RANDOMNESS.FINALIZED_MAX_AGE_MS / 1000);
-  const window = read('src/core/trade-common.js').match(/b\.slot < event\.observedSlot - (\d+) \|\| b\.slot > event\.observedSlot \+ (\d+)/);
-  probe('docs/SPEC.md', /within -(\d+) to \+(\d+) slots/g, [Number(window[1]), Number(window[2])]);
+  const window = read('src/core/trade-common.js').match(/b\.slot < event\.observedSlot - ACCEPT_SLOT_BEHIND \|\| b\.slot > event\.observedSlot \+ (\d+)/);
+  probe('docs/SPEC.md', /within -(\d+) to \+(\d+) slots/g, [ACCEPT_SLOT_BEHIND, Number(window[1])]);
   probe('docs/SPEC.md', /at least (\d+) leading zero bits/g, DEX_POW_BITS);
   const transport = dexTransport({ role: 'trader', servicePeerKey: 'a'.repeat(64) }).sidechannel;
-  probe('docs/SPEC.md', /at most (\d+) bytes\. Each connection may send (\d+) bytes per second with a burst of (\d+) bytes/g,
-    [transport.maxMessageBytes, transport.rateBytesPerSecond, transport.rateBurstBytes]);
+  const server = dexTransport({ role: 'signer', servicePeerKey: 'a'.repeat(64) }).sidechannel;
+  probe('docs/SPEC.md', /at most (\d+) bytes\. Each connection may send a trader (\d+) bytes per second with a burst of (\d+)\s+bytes, and a signer or the venue (\d+) bytes per second with a burst of (\d+) bytes/g,
+    [transport.maxMessageBytes, transport.rateBytesPerSecond, transport.rateBurstBytes, server.rateBytesPerSecond, server.rateBurstBytes]);
   probe('docs/SPEC.md', /serialized registry is at most (\d+) characters/g, Number(read('src/core/schemas.js').match(/JSON\.stringify\(r\)\.length > (\d+)/)[1]));
   probe('docs/SPEC.md', /\(`MAX_TRADES_PER_OFFER`\) or (\d+) negotiations/g, MAX_NEGOTIATIONS_PER_TAKER);
   probe('docs/SPEC.md', /when (\d+) trades on the offer/g, MAX_TRADES_PER_OFFER);

@@ -496,6 +496,7 @@ test('verified announcements refresh lastSeen; status and takes expire at 300 se
   forged.sig = '00'.repeat(64);
   ms += 299000; bridge.emit('message', ch, forged); await new Promise(r => setImmediate(r));
   assert.equal(taker.status().offers.length, 1);
+  assert.equal(taker.status().offers[0].lastSeen, first + 290, 'status says when the maker was last heard; a forged copy does not refresh it');
   ms += 1000;
   const sent = bridge.sent.length;
   await assert.rejects(taker.takeOffer(offer.offerId, undefined, '1'), /This offer is no longer announced by its maker\./);
@@ -606,5 +607,69 @@ test('the best live makers of a shown market are kept warm: 0.1.14+ only, at mos
   assert.deepEqual(bridge.requests.at(-1), { type: 'dex_warm', peerKeys: [other.peerKey] });
   bridge.refuse = true; taker.noteViewing('TNK/USDC', [fresh.offerId]);
   await warm(); await warm();
-  assert.equal(bridge.requests.length, 3, 'an older peer refuses once and warming stops');
+  assert.equal(bridge.requests.length, 3, 'an older peer refuses once and warming backs off');
+});
+
+test('warming retries after a temporary failure and explains an empty selection', async test => {
+  let time = Date.now(); test.mock.method(Date, 'now', () => time);
+  const { registry } = fixture(), { t: taker, bridge } = await trader(party(), { registry });
+  const logs = []; taker.log = (...args) => logs.push(args.join(' '));
+  const offer = { offerId: random32(), peerKey: random32(), maker: party().me, software: '0.1.19' };
+  taker.offers.set(offer.offerId, { offer, lastSeen: nowSec() });
+  taker.noteViewing('TNK/USDC', [offer.offerId]);
+  bridge.refuse = true;
+  assert.deepEqual(await taker.warmNow(), []);
+  bridge.refuse = false;
+  assert.deepEqual(await taker.warmNow(), []);
+  assert.equal(bridge.requests.length, 1, 'failure backs off');
+  time += 181000;
+  taker.offers.get(offer.offerId).lastSeen = nowSec();
+  taker.noteViewing('TNK/USDC', [offer.offerId]);
+  assert.deepEqual(await taker.warmNow(), [offer.peerKey]);
+  taker.offers.get(offer.offerId).offer = { ...offer, peerKey: undefined };
+  assert.deepEqual(await taker.warmNow(), []);
+  assert.match(logs.at(-1), /no peer keys.*missing peerKey/);
+});
+
+test('an empty peer warm response is explained and retried by the periodic warm loop', async test => {
+  const timers = []; test.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  test.mock.method(globalThis, 'clearInterval', () => {});
+  const { registry } = fixture(), { t: taker, bridge } = await trader(party(), { registry });
+  const logs = []; taker.log = (...args) => logs.push(args.join(' '));
+  const offer = { offerId: random32(), peerKey: random32(), maker: party().me, software: '0.1.19' };
+  taker.offers.set(offer.offerId, { offer, lastSeen: nowSec() });
+  taker.noteViewing('TNK/USDC', [offer.offerId]);
+  bridge.request = async () => ({ peerKeys: [] });
+  assert.deepEqual(await taker.warmNow(), []);
+  assert.match(logs.at(-1), /no peer keys.*peer kept none/);
+  bridge.request = async body => ({ peerKeys: body.peerKeys });
+  timers.find(x => x.ms === 15000).fn(); await new Promise(r => setImmediate(r));
+  assert.deepEqual(taker.warmKept, [offer.peerKey]);
+});
+
+test('repeated take timeouts release live and displayed USDC exactly as persisted restarts do', async test => {
+  let ms = 0; test.mock.method(performance, 'now', () => ms);
+  const { registry } = fixture(), maker = party(), buyer = party();
+  const { t: seller } = await trader(maker, { registry });
+  const { t: taker, bridge, dir } = await trader(buyer, { registry });
+  const solana = { chainTime: async () => nowSec(), walletBalances: async () => ({ USDC: '35647013', SOL: '100000000' }) };
+  const trac = { balances: async () => ({ TNK: '1000000000000000000', RESET: '0' }) };
+  const wallets = role => new WalletManager({ config: { role: 'trader' }, store: role.store, role, solana, trac, addresses: { solana: SOL, trac: buyer.me.tracAddr } });
+  taker.wallets = wallets(taker);
+  const offer = await seller.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '20' });
+  await post(bridge, maker, 'offer', offer);
+  for (let i = 0; i < 7; i++) {
+    for (const heartbeat of taker.heartbeats.values()) heartbeat.at = ms;
+    const { key } = await taker.takeOffer(offer.offerId, offer.baseAmount, offer.price);
+    assert.notEqual((await taker.wallets.displayBalances()).USDC.committed, '0');
+    ms += 80000;
+    await taker.host.deliver(key, { type: 'tick' });
+    assert.equal(taker.host.trades.get(key).state.reason, 'Timed out: take/accept');
+    assert.equal(taker.store.get('trade-' + key).state.phase, 'aborted');
+    assert.equal((await taker.wallets.displayBalances()).USDC.committed, '0');
+    assert.equal((await taker.wallets.balances()).USDC.free, '35647013');
+  }
+  const { t: restarted } = await trader(buyer, { registry, dir });
+  assert.equal(restarted.host.trades.size, 7);
+  assert.deepEqual(await wallets(restarted).balances(), await taker.wallets.balances());
 });

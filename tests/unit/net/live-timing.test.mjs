@@ -196,7 +196,7 @@ test('maker rejects skewed take deadlines; taker and accept retain pinned deadli
     commitment: hex(), sendBy: nowSec() + 900, refundAfter: nowSec() + 172799 };
   await post(maker, envelope(f.buyer, 'take', body, `intercom-dex:t:${offer.offerId}`));
   assert.equal(maker.host.trades.size, 0);
-  assert.equal(h.sent.filter(m => m.kind === 'decline').length, 0, 'an invalid take gets no answer');
+  assert.deepEqual(h.sent.filter(m => m.kind === 'decline').map(m => m.body.reason), ['invalid'], 'an invalid take is declined as invalid');
   await post(maker, envelope(f.buyer, 'take', { ...body, refundAfter: body.sendBy + 171900 }, `intercom-dex:t:${offer.offerId}`));
   assert.equal(maker.host.trades.size, 1);
 

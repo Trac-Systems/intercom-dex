@@ -73,7 +73,7 @@ test('online eligibility is checked again at take and accept transitions', () =>
 });
 
 test('step budgets use elapsed monotonic time, survive serialization and never cancel an attempted lock', () => {
-  for (const [phase, budget] of [['awaitAccept', 80000], ['awaitReveal', 120000], ['awaitRandomness', 120000], ['awaitTerms', 30000], ['proving', 150000]]) {
+  for (const [phase, budget] of [['awaitAccept', 80000], ['awaitReveal', 120000], ['awaitRandomness', 120000], ['awaitTerms', 60000], ['proving', 150000]]) {
     let s = snapshot('buyer', phase);
     s = step(s, 'tick', { elapsedMs: budget - 1 }).state;
     assert.equal(s.phase, phase);

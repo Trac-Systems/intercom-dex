@@ -212,3 +212,58 @@ test('maker trades, signer channels and finished taker restores do not request m
   assert.ok(calls.length > 0); assert.ok(calls.every(call => call.makerPeer === undefined));
   assert.equal(host.makerPins.size, 0);
 });
+
+test('the deciding block is looked up once the pushed view shows it finalized, then again every 2 s', async t => {
+  const clock = { ms: 100000 }, timers = [], delays = [];
+  t.mock.method(performance, 'now', () => clock.ms);
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (fn, ms) => { delays.push(ms); return realTimeout(fn, 0); });
+  const bridge = new EventEmitter(); bridge.join = async () => {}; bridge.send = async () => {};
+  const records = new Map(), store = { list: () => [], get: n => records.get(n), put: (n, v) => records.set(n, structuredClone(v)) };
+  const state = structuredClone(transcript.snapshots.get('buyer:awaitRandomness')), target = state.acceptSlot + 96;
+  let view = { finalized: target - 10, tip: target - 8, at: clock.ms }, lookups = 0, pushed;
+  const solana = { finalizedSlot: async () => view.finalized, tipSlot: async () => view.tip,
+    chainWatch: ({ onUpdate }) => { pushed = onUpdate; return { start() {}, stop() {}, view: () => view }; },
+    firstFinalizedBlockAtLeast: async slot => { if (++lookups < 4) throw new Error('Requested slot is not finalized yet'); return { slot, blockhash: hex() }; } };
+  const host = new TradeHost({ bridge, store, solana, now: () => 100,
+    identity: { publicKey: encodeKey(transcript.f.buyer.publicKey), secretKey: transcript.f.buyer.secretKey } });
+  t.after(() => host.stop()); await host.start();
+  await host.addTrade({ key: 'block', role: 'buyer', state, lifetimeSec: 176400 });
+  const tick = timers.find(x => x.ms === 1000).fn;
+  tick(); await host.trades.get('block').queue;
+  assert.equal(lookups, 0, 'no request while the pushed view shows the block is not finalized');
+  clock.ms += 400; view = { finalized: target, tip: target + 2, at: clock.ms }; pushed();
+  tick(); await host.trades.get('block').queue;
+  for (let i = 0; i < 20 && lookups < 4; i++) await new Promise(r => realTimeout(r, 0));
+  assert.equal(lookups, 4);
+  assert.deepEqual(delays.filter(ms => ms === 2000).length, 3, 'retries do not slow down');
+  await host.trades.get('block').queue;
+  assert.equal(host.trades.get('block').state.phase, 'awaitTerms');
+});
+
+test('while waiting for a reveal, what this side said is repeated every 2 s; other waits repeat after 10 s', async t => {
+  const clock = { ms: 100000 }, timers = [], time = { now: 100 };
+  t.mock.method(performance, 'now', () => clock.ms);
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const sent = [], bridge = new EventEmitter(); bridge.join = async () => {}; bridge.send = async (ch, m) => sent.push([time.now, m.kind]);
+  const records = new Map(), store = { list: () => [], get: n => records.get(n), put: (n, v) => records.set(n, structuredClone(v)) };
+  const solana = { finalizedSlot: async () => 100, tipSlot: async () => 132, firstFinalizedBlockAtLeast: () => new Promise(() => {}) };
+  const host = new TradeHost({ bridge, store, solana, now: () => time.now,
+    identity: { publicKey: encodeKey(transcript.f.buyer.publicKey), secretKey: transcript.f.buyer.secretKey } });
+  t.after(() => host.stop()); await host.start();
+  const tick = timers.find(x => x.ms === 1000).fn;
+  const repeats = async (key, phase) => {
+    await host.addTrade({ key, role: 'buyer', state: structuredClone(transcript.snapshots.get(`buyer:${phase}`)), lifetimeSec: 86400 });
+    const trade = host.trades.get(key);
+    trade.outbox = { [`intercom-dex:t:${key}`]: [{ kind: 'reveal' }] };
+    sent.length = 0;
+    for (time.now = 100; time.now <= 112; time.now++) { tick(); await trade.queue; }
+    host.trades.delete(key);
+    return sent.filter(([, kind]) => kind === 'reveal').map(([at]) => at);
+  };
+  assert.deepEqual(await repeats('reveal', 'awaitReveal'), [102, 104, 106, 108, 110, 112]);
+  assert.deepEqual(await repeats('terms', 'awaitTerms'), [110]);
+});

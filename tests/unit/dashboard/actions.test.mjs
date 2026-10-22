@@ -195,3 +195,22 @@ test('take previews reject stale, expired, own and removed offers and default to
   assert.equal((await preview(offer.offerId)).status, 400);
   assert.deepEqual(fx.role.calls, []);
 });
+
+test('max-take: the most of an offer the free balance pays for, fees included', async t => {
+  const fx = traderFixture(), [sell, , buy] = fx.theirs;
+  fx.info.balances.USDC.free = '1000000';
+  const s = await startFor(t, fx), get = offerId => httpCall(s.port, { path: `/api/max-take?offerId=${offerId}`, cookie: s.cookie });
+  const preview = amount => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action: 'take', input: { offerId: sell.offerId, amount } } });
+  const most = (await get(sell.offerId)).json();
+  assert.equal(most.all, false);
+  assert.equal((await preview(most.amount.text)).json().warning, null, 'the maximum fits the free USDC with fees');
+  const over = (BigInt(most.baseAmount) + 1n).toString().padStart(19, '0');
+  assert.match((await preview(`${over.slice(0, -18)}.${over.slice(-18)}`)).json().warning, /1 USDC free/, 'one unit more does not');
+  // Selling into a buy offer: the free base, at most the offer.
+  const sale = (await get(buy.offerId)).json();
+  assert.equal(sale.baseAmount, fx.info.balances.TNK.free);
+  assert.equal(sale.all, false);
+  fx.info.balances.USDC.free = '25000000';
+  assert.deepEqual((await get(sell.offerId)).json(), { baseAmount: sell.baseAmount, amount: { units: sell.baseAmount, text: '5', unit: 'TNK' }, all: true, note: null });
+  assert.match((await get(hex())).json().error, /no longer announced by its maker/);
+});

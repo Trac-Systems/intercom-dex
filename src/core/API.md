@@ -431,7 +431,8 @@ leave the original state and clock unchanged, with no actions; the runner must
 deliver a fresh retransmission. Other message kinds do not require these fields.
 The maker signs its tip observation (`tipSlot`, below) in `accept.slot` before sending its reveal; finalization
 trails the tip by about 32 slots on mainnet, and a finalized accept slot would leave the reveal only seconds.
-The taker accepts only `observedSlot - 12 <= accept.slot <= observedSlot + 150`.
+The taker accepts only `observedSlot - 36 <= accept.slot <= observedSlot + 150` (`ACCEPT_SLOT_BEHIND`, about 15 s;
+versions before 0.1.20 used 12), and refuses an accept whose reveal cutoff its tip already passed.
 Both traders store this fixed value as `state.acceptSlot`. The runner also supplies `tipSlot` and `tipAgeMs`, a highest-processed-slot
 view with `0 <= tipAgeMs < 6000`. Ages use a monotonic clock and include request
 time, preserving R7's freshness rules. Both maker and taker
@@ -757,7 +758,7 @@ Aborted trades release reservations. Accept/reveal routing checks the commitment
 decline routing checks the saved take envelope nonce before buffering.
 
 `STEP_BUDGET_MS` in `terms.js` exports `accept:40000`, `connect:80000`,
-`randomness:120000`, `terms:30000`, `deal:60000`, `certificate:150000`,
+`randomness:120000`, `terms:30000` (signers), `termsExchange:60000` (traders; 30000 before 0.1.20), `deal:60000`, `certificate:150000`,
 `working:10000`, `acks:60000`. The host supplies `stepElapsedMs` from its monotonic
 step entry observation on ticks/messages. A taker gets 80 seconds total including
 connecting, and 40 seconds after the maker peer is present on the offer channel.

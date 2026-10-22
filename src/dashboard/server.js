@@ -207,6 +207,10 @@ export function dashboardHandler({ token, port, model, actions, confirmations, t
       const page = traffic.query(q), labels = model.labels();
       return { ...page, rows: page.rows.map(r => ({ ...r, label: labels[r.from] ?? null })) };
     },
+    'GET /api/max-take': url => {
+      if (!actions.maxTake) throw new Error('Only traders take offers');
+      return actions.maxTake(query(url, ['offerId']));
+    },
     'POST /api/preview': async body => {
       if (!actions.names.includes(body.action)) throw new Error('Unknown action');
       const preview = await actions.preview(body.action, body.input);

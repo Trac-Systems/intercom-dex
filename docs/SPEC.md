@@ -140,8 +140,8 @@ maker or the taker can be either side; the sequence is the same.
    most one per sender per minute and 30 per minute in total (`DECLINES_PER_MINUTE`). They are stamped last
    (section 12).
 3. **Accept.** The maker sends `accept` with `commitment = sha256(n_m)` and `slot = A`, the latest finalized Solana
-   slot it saw, followed by its `reveal` of `n_m`. The taker accepts only when `A` is within -12 to +150 slots of
-   its own finalized view, which is at most 15 seconds old. Then the taker reveals `n_t`.
+   slot it saw, followed by its `reveal` of `n_m`. The taker accepts only when `A` is within -36 to +150 slots of
+   its own finalized view, which is at most 15 seconds old (the lower bound is `ACCEPT_SLOT_BEHIND`; -12 before 0.1.20). Then the taker reveals `n_t`.
 4. **Reveal cutoff.** Each side refuses the other's reveal, and the taker refuses the accept, once its view of the
    chain tip (the highest processed slot any of its RPC endpoints reports, at most 6 seconds old, dated when the
    request started) reaches `A + 56`.
@@ -257,7 +257,8 @@ monotonic clock (`STEP_BUDGET_MS`):
 | `accept` | 40 s: the maker's wait in `awaitTake`, and the taker's wait for `accept` once the maker's peer is present on the offer channel |
 | `connect` | 80 s for the taker in total, connecting included |
 | `randomness` | 120 s for the deciding block, reveals included |
-| `terms` | 30 s for terms and signatures |
+| `terms` | 30 s for a signer's wait for both traders' terms signatures |
+| `termsExchange` | 60 s for a trader's wait for the other trader's terms and signature (30 s before 0.1.20) |
 | `deal` | 60 s (as long as the buyer waits for acks) for the seller and signers to receive the deal, plus 60 s per `working` note |
 | `certificate` | 150 s for the buyer's deal step, and the cap for the extended deal wait |
 | `working` | 10 s between the buyer's `working` notes |

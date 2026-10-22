@@ -3,7 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { hexToBytes, sha256Hex, stableJSON, utf8 } from './canonical.js';
 import { hexKey, parseBody, registrySchema } from './schemas.js';
 import { selectCommittee } from './committee.js';
-import { RANDOMNESS, STEP_BUDGET_MS, tradeId, tradeRandomness, validateTerms } from './terms.js';
+import { RANDOMNESS, ACCEPT_SLOT_BEHIND, STEP_BUDGET_MS, tradeId, tradeRandomness, validateTerms } from './terms.js';
 import { SOFTWARE, meetsVersion } from './software.js';
 import { registryPair } from '../market/assets.js';
 
@@ -106,7 +106,7 @@ function budgetStage(s) {
 
 function budgetLimit(s, stage) {
   return ({ 'take/accept': s.phase === 'awaitAccept' ? STEP_BUDGET_MS.connect : STEP_BUDGET_MS.accept,
-    'deciding block': STEP_BUDGET_MS.randomness, 'terms signatures': STEP_BUDGET_MS.terms,
+    'deciding block': STEP_BUDGET_MS.randomness, 'terms signatures': s.role === 'signer' ? STEP_BUDGET_MS.terms : STEP_BUDGET_MS.termsExchange,
     deal: s.role === 'buyer' ? STEP_BUDGET_MS.certificate : s.dealBudgetMs ?? STEP_BUDGET_MS.deal, acks: STEP_BUDGET_MS.acks })[stage];
 }
 
@@ -190,7 +190,7 @@ export function negotiationStep(state, event, message) {
       if (s.phase !== 'awaitAccept' || s.mode !== 'taker') throw new Error('Unexpected accept');
       // The accept slot must be a recent finalized slot (see RANDOMNESS in terms.js), not one chosen to make the
       // randomness block already known, nor so far ahead that the trade stalls.
-      if (b.slot < event.observedSlot - 12 || b.slot > event.observedSlot + 150) return abortTransition(s, 'Accept slot outside the freshness window');
+      if (b.slot < event.observedSlot - ACCEPT_SLOT_BEHIND || b.slot > event.observedSlot + 150) return abortTransition(s, 'Accept slot outside the freshness window');
       if (event.tipSlot >= b.slot + RANDOMNESS.REVEAL_CUTOFF) return abortTransition(s, 'Accept arrived too late');
       s.peerCommit = b.commitment;
       s.acceptSlot = b.slot;

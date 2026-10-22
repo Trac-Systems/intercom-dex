@@ -205,3 +205,26 @@ test('registry relay peers (signers, venue) are pinned with a direct connection,
   await f.join(channel(3), null);
   assert.deepEqual(f.left, [key(2)], 'released once neither the registry nor a maker route needs it');
 });
+
+test('a restarted trader authenticates with all channels subscribed and rejoins existing trade routes', async t => {
+  const f = fixture(t), old = f.owner;
+  f.bridge.token = 'unit-test-token';
+  old.ready = true; old.channels = new Set(['intercom-dex:offers']);
+  f.bridge.clients.add(old);
+  await f.join(channel(1), key(7));
+  old.socket.emit('close'); f.bridge.clients.delete(old);
+  const fresh = { socket: new EventEmitter(), authed: false, ready: false, channels: null, filter: [] };
+  f.bridge.clients.add(fresh);
+  assert.equal((await f.send({ type: 'auth', token: 'unit-test-token' }, fresh)).type, 'auth_ok');
+  for (const ch of ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signers']) {
+    assert.equal((await f.send({ type: 'join', channel: ch }, fresh)).type, 'joined');
+  }
+  await f.join(channel(1), key(7), fresh);
+  for (const ch of ['intercom-dex:offers', 'intercom-dex:signers', channel(1)]) {
+    f.bridge.handleSidechannelMessage(ch, { message: { kind: 'fixture' } });
+    assert.equal(f.replies.at(-1).client, fresh);
+    assert.equal(f.replies.at(-1).message.type, 'sidechannel_message');
+    assert.equal(f.replies.at(-1).message.channel, ch);
+  }
+  assert.equal(f.bridge.makerPins.get(key(7)).refs, 1);
+});

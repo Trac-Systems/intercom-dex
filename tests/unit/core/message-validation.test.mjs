@@ -194,16 +194,19 @@ test('maker signs accept.slot before either reveal, and reveal cannot carry a re
   assert.equal(sim.state('seller').acceptSlot, 132);
 });
 
-test('taker only accepts a slot whose randomness block is still ahead (-12 .. +150) and ignores malformed accept messages', () => {
+test('taker only accepts a slot whose randomness block is still ahead (-36 .. +150) and ignores malformed accept messages', () => {
   const f = fixture(), config = { mode: 'taker', offerId: f.offerId, terms: f.terms, registry: f.registry, nonce: hex(), entropy: hex(), now: 100 };
   const initial = createBuyer(config), s = buyerStep(initial, { type: 'tick', now: 100 }).state;
-  for (const [slot, expected] of [[987, 'aborted'], [988, 'awaitReveal'], [1000, 'awaitReveal'], [1150, 'awaitReveal'], [1151, 'aborted']]) {
+  for (const [slot, expected] of [[963, 'aborted'], [964, 'awaitReveal'], [1000, 'awaitReveal'], [1150, 'awaitReveal'], [1151, 'aborted']]) {
     const m = signed(f.seller, 'accept', { offerId: f.offerId, takeCommitment: sha256Hex(hexToBytes(s.nonce, 32)), commitment: hex(), slot });
-    const r = buyerStep(s, { type: 'message', now: 101, finalizedAgeMs: 0, observedSlot: 1000, tipSlot: 1032, tipAgeMs: 0, message: m });
+    const r = buyerStep(s, { type: 'message', now: 101, finalizedAgeMs: 0, observedSlot: 1000, tipSlot: 1002, tipAgeMs: 0, message: m });
     assert.equal(r.state.phase, expected);
     if (expected === 'awaitReveal') assert.equal(r.state.acceptSlot, slot);
     else assert.match(r.state.reason, /freshness window/);
   }
+  // Inside the window but too old for the reveal cutoff at the taker's tip: still refused.
+  const old = signed(f.seller, 'accept', { offerId: f.offerId, takeCommitment: sha256Hex(hexToBytes(s.nonce, 32)), commitment: hex(), slot: 976 });
+  assert.equal(buyerStep(s, { type: 'message', now: 101, finalizedAgeMs: 0, observedSlot: 1000, tipSlot: 1032, tipAgeMs: 0, message: old }).state.reason, 'Accept arrived too late');
   const m = signed(f.seller, 'accept', { offerId: f.offerId, takeCommitment: sha256Hex(hexToBytes(s.nonce, 32)), commitment: hex(), slot: 1000 });
   unchanged(s, { type: 'message', now: 101, message: m });
   unchanged(s, { type: 'message', now: 101, finalizedAgeMs: 0, observedSlot: -1, tipSlot: 31, tipAgeMs: 0, message: m });

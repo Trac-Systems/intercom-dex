@@ -91,6 +91,29 @@ export function createActions({ config, role, wallets = null, balances = null, n
         warning: await shortfall(buying ? 'USDC' : base, buying ? cost : BigInt(baseAmount)) };
     },
 
+    // The most of an offer the free balance pays for: all of a buy offer up to the free base, and of a sell offer the
+    // largest amount whose USDC cost with fees still fits (the cost only grows with the amount, so a search finds it).
+    async maxTake(input) {
+      const offerId = text(input.offerId, 64), o = HEX64.test(offerId) ? role.availableOffer(offerId) : null;
+      if (!o) throw new Error(STALE_OFFER_MESSAGE);
+      const reg = role.registry.snapshot(o.registryVersion);
+      if (!reg) throw new Error('No signer list for this offer');
+      const pair = registryPair(reg, o.pair), base = pair.base.id, buying = o.side === 'sell', offered = BigInt(o.baseAmount);
+      const free = await freeOf(buying ? 'USDC' : base);
+      if (free === null) throw new Error('Balances unavailable right now');
+      const cost = units => calculateFees(BigInt(quoteAmount(pair, units.toString(), o.price)), reg.fee.platformFeeBps, reg.fee.tradeFeeBps).totalAmount;
+      let most = buying ? 0n : (free < offered ? free : offered);
+      if (buying) {
+        for (let lo = 0n, hi = offered; lo <= hi;) {
+          const mid = (lo + hi) / 2n;
+          if (cost(mid) <= free) { most = mid; lo = mid + 1n; } else hi = mid - 1n;
+        }
+      }
+      const short = most < BigInt(pair.minBaseAmount);
+      return { baseAmount: most.toString(), amount: amount(most, base), all: most === offered,
+        note: short ? `Your free ${buying ? 'USDC' : base} covers less than the smallest trade (${amount(pair.minBaseAmount, base).text} ${base}).` : null };
+    },
+
     async cancel(input) {
       const offerId = text(input.offerId, 64), o = role.mine.get(offerId);
       if (!HEX64.test(offerId) || !o) throw new Error('Not one of your open offers');
@@ -135,5 +158,6 @@ export function createActions({ config, role, wallets = null, balances = null, n
     : kind === 'service' ? { markPaid: service.markPaid, withdraw } : {};
   const runs = kind === 'trader' ? { ...trader.run, withdraw: runWithdraw }
     : kind === 'service' ? { markPaid: input => role.markPaid(input.dexKey, input.tradeIds), withdraw: runWithdraw } : {};
-  return { names: Object.keys(previews), preview: (name, input) => previews[name](input ?? {}), run: (name, input) => runs[name](input) };
+  return { names: Object.keys(previews), preview: (name, input) => previews[name](input ?? {}), run: (name, input) => runs[name](input),
+    maxTake: kind === 'trader' ? input => trader.maxTake(input ?? {}) : null };
 }

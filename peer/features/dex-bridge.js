@@ -100,7 +100,13 @@ export default class DexBridge extends ScBridge {
     for (const [peerKey, pin] of current) if (!peerKeys.includes(peerKey)) { current.delete(peerKey); this._dropPin(peerKey, pin); }
     for (const peerKey of peerKeys) {
       if (current.has(peerKey)) continue;
-      try { current.set(peerKey, this._acquirePin(peerKey)); } catch {}
+      try { current.set(peerKey, this._acquirePin(peerKey)); }
+      catch (error) {
+        // Once per maker and reason: the trader repeats its selection every 15 s.
+        const note = `${peerKey}:${error.message}`;
+        this._warmNotes ??= new Set();
+        if (!this._warmNotes.has(note) && this._warmNotes.size < 256) { this._warmNotes.add(note); console.log('warm maker unavailable', peerKey.slice(0, 8), error.message); }
+      }
     }
     if (current.size) { this.warmRoutes.set(client, current); this._watchClient(client); } else this.warmRoutes.delete(client);
     return [...current.keys()];
