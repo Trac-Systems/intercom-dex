@@ -224,7 +224,8 @@ for unit tests. HTTP binds only to `127.0.0.1`. There are exactly five routes:
   supply `left` through compact `remaining: [{offerId,amount}]` rows in base units. Until a full book supplies
   an amount, `left` is null. An offer absent from a newer full book's `remaining` for its pair is removed;
   level-only books and deltas do not change individual remaining amounts. Full-book inventory survives restart.
-  Cancellation tombstones prevent reannouncements from reviving cancelled offers until expiry.
+  Cancellation tombstones prevent reannouncements from reviving cancelled offers until expiry. A cancel applies
+  locally at once; if its announcement fails, the maker repeats it every 10 s up to six times (0.1.18).
   Bounded pending public settlement terms survive restart until matched to a log or aged out after 24 hours.
   A persisted history retains the last 100 trades and trades in `(now - 86400, now]`, at most 10,000.
   `change24h` is `(last - first price in the window) / first`, truncated to 12 fractional digits; a missing or
@@ -747,9 +748,9 @@ k+1 of the selected committee online. These checks never replace acks.
 
 Maker admissions run in arrival order, reserve size before admitting the next
 take, and allow `MAX_TRADES_PER_OFFER = 3` before the lock per offer and
-`MAX_NEGOTIATIONS_PER_TAKER = 3` per taker. Takes that fail authentication or basic
-validity (sender is not the named taker; pair, registry version, minimum amount or
-deadlines do not match) get no answer. Each declined envelope nonce receives at most
+`MAX_NEGOTIATIONS_PER_TAKER = 3` per taker. A take whose sender is not the named taker
+gets no answer; one whose pair, registry version, minimum amount or deadlines do not
+match is declined `invalid` (0.1.18; earlier makers did not answer those). Each declined envelope nonce receives at most
 one decline, recorded for 300 seconds; at most one decline goes to a sender per minute
 and `DECLINES_PER_MINUTE = 30` in total. Malformed and unrelated takes are ignored.
 Aborted trades release reservations. Accept/reveal routing checks the commitment;

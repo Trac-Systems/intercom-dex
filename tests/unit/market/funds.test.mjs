@@ -56,3 +56,14 @@ test('reads run a few at a time and a broken balance or price never throws', asy
   assert.equal(funds.funded(offer('sell', 9), TNK), true);
   assert.equal(funds.funded({ ...offer('buy', 0), price: 'bad' }, TNK), true);
 });
+
+test('a wallet failing three reads in a row is hidden while other wallets read fine, never during an outage', async () => {
+  const { clock, wallets, funds, settle } = setup();
+  const broken = offer('buy', 1), fine = offer('buy', 2);
+  wallets.set('sol2', { SOL: '10000000', USDC: '50000000' });
+  for (let i = 0; i < 2; i++) { funds.refresh([broken, fine]); await settle(); assert.equal(funds.funded(broken, TNK), true, `after ${i + 1} failures`); clock.t += 300; }
+  funds.refresh([broken, fine]); await settle();
+  assert.equal(funds.funded(broken, TNK), false, 'three failures while another wallet reads fine');
+  wallets.delete('sol2'); clock.t += 600; funds.refresh([broken, fine]); await settle();
+  assert.equal(funds.funded(broken, TNK), true, 'every read on the chain fails: an outage hides nothing');
+});

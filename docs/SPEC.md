@@ -128,9 +128,10 @@ maker or the taker can be either side; the sequence is the same.
    32-byte nonce `n_t`, and the absolute deadlines `sendBy = now + sendWindowSec` and
    `refundAfter = now + refundSec` from the registry.
 2. **Admission.** The maker admits takes in arrival order. A take gets no answer when the sender is not the named
-   taker, the pair or registry version differs from the offer, the amount is below the pair minimum, `sendBy` has
-   passed or is more than 120 seconds away from the take's `ts` plus `sendWindowSec`, or `refundAfter - sendBy`
-   differs from the registry's `refundSec - sendWindowSec`. Otherwise the maker declines it with `expired` when the
+   taker. It is declined `invalid` when the pair or registry version differs from the offer, the amount is below the
+   pair minimum, `sendBy` has passed or is more than 120 seconds away from the take's `ts` plus `sendWindowSec`, or
+   `refundAfter - sendBy` differs from the registry's `refundSec - sendWindowSec` (makers before 0.1.18 did not
+   answer those). Otherwise the maker declines it with `expired` when the
    offer expired; `version` when either side's software is below the registry minimum; `busy` when 3 trades on the offer
    (`MAX_TRADES_PER_OFFER`) or 3 negotiations with that taker (`MAX_NEGOTIATIONS_PER_TAKER`) have not locked yet;
    `insufficient` when the offer's size minus filled and reserved amounts is too small; and `signers` when fewer

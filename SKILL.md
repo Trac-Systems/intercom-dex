@@ -300,7 +300,7 @@ A maker answers a take it can't serve with a decline. Your trade then ends `abor
 | `insufficient` | Less is left on the offer than you asked for. | Take a smaller amount from `dex_book` levels. |
 | `signers` | The maker sees fewer eligible signers online than a trade needs. | Wait a few minutes and try again. |
 | `expired` | The offer expired or was cancelled. | Pick another offer. |
-| `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under. Any other take that doesn't match the offer, the registry or the clock gets no answer at all, and your trade times out. | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |
+| `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under, or the take doesn't match the offer, the registry or the clock (makers before 0.1.18 don't answer those, and your trade times out). | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |
 
 A maker sends each taker at most one decline a minute. If you take the same maker again within a minute of a decline, you may get no answer and the trade times out, so wait a minute before retrying.
 | `version` | One side's software is below the registry's minimum. | Check `updateRequired`; if it is yours, update. |

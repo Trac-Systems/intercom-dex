@@ -13,7 +13,7 @@ import { split, randomScalar } from '../../../src/core/vss.js';
 import { buildTerms, tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { selectCommittee } from '../../../src/core/committee.js';
 import { openStore } from '../../../src/roles/store.js';
-import { Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
+import { IN_FLIGHT_SLACK_SEC, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
 import { RegistryView, nowSec, random32, verifySummon, offerIdOf, SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, tracAddress, hex, SOL, SOL2, MINT, SIG } from '../core/helpers.mjs';
 
@@ -699,6 +699,25 @@ test('a restarted venue keeps its book: offers seen in the last five minutes ret
   s.clock.t -= 300;
   await again.service.start(); await again.emit(OFFERS, again.envelope(s.f.seller, 'cancel', { offerId: s.offer.offerId }, OFFERS)); again.service.stop();
   assert.equal(setup({ dir: s.dir, immediate: true, clock: s.clock }).service.book.snapshot(s.offer.pair, s.clock.t).length, 0, 'cancelled');
+});
+
+test('the published size leaves out summoned trades in progress, counts a logged trade once, and frees a dead one', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)); };
+  const size = () => s.bridge.sent.filter(x => x.envelope.kind === 'book' && x.envelope.body.pair === s.offer.pair).at(-1)
+    .envelope.body.remaining.find(r => r.offerId === s.offer.offerId)?.amount ?? null;
+  await tick(5); assert.equal(size(), '3000000000000000000');
+  const done = s.trade(), dead = s.trade();
+  await s.summon(done); await s.summon(dead);
+  await tick(60); assert.equal(size(), '1000000000000000000', 'two trades of 1 in progress');
+  await s.report(done); await s.service.reconcile();
+  await tick(60); assert.equal(size(), '1000000000000000000', 'the logged trade is a fill, not counted twice');
+  s.clock.t = dead.terms.sendBy + dead.terms.graceSec + IN_FLIGHT_SLACK_SEC;
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  await tick(60); assert.equal(size(), '2000000000000000000', 'a trade past its window frees the size');
 });
 
 test('service schedules full books at sixty seconds and sends only changed deltas between them', async t => {

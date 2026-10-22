@@ -13,7 +13,7 @@ import { Trader } from '../../../src/roles/trader.js';
 import { offerIdOf, nowSec, random32 } from '../../../src/roles/common.js';
 import { tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { fixture, tracAddress, SOL, SOL2, MINT } from '../core/helpers.mjs';
-import { SIGNER_ONLINE_SEC, DECLINES_PER_MINUTE } from '../../../src/roles/trader.js';
+import { SIGNER_ONLINE_SEC, DECLINES_PER_MINUTE, CANCEL_RETRY_MS } from '../../../src/roles/trader.js';
 import { registryPair } from '../../../src/market/assets.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
@@ -92,6 +92,23 @@ test('maker inventory is held by running trades, kept when filled, released when
   add('d', 'refunded', '100', 'buyer');
   const mine = t.status().mine[0];
   assert.deepEqual([mine.reserved, mine.filled, mine.available], ['300', '200', '500']);
+});
+
+test('a cancel stands and reports success when its announce fails; the announce is repeated until it goes out', async t => {
+  const { registry } = fixture(), alice = party();
+  const { t: role, bridge } = await trader(alice, { registry });
+  const offer = await role.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let failing = 2;
+  const send = bridge.send.bind(bridge);
+  bridge.send = async (ch, envelope) => { if (envelope.kind === 'cancel' && failing-- > 0) throw new Error('Bridge timeout: send'); return send(ch, envelope); };
+  assert.deepEqual(await role.cancelOffer(offer.offerId), { offerId: offer.offerId, cancelled: true });
+  assert.equal(role.mine.has(offer.offerId), false);
+  const cancels = () => bridge.sent.filter(x => x.envelope.kind === 'cancel' && x.envelope.body.offerId === offer.offerId).length;
+  assert.equal(cancels(), 0);
+  for (let i = 0; i < 2; i++) { t.mock.timers.tick(CANCEL_RETRY_MS); for (let j = 0; j < 5; j++) await new Promise(r => setImmediate(r)); }
+  assert.equal(cancels(), 1, 'the second retry went out');
+  t.mock.timers.tick(CANCEL_RETRY_MS * 3); await new Promise(r => setImmediate(r)); assert.equal(cancels(), 1, 'and nothing more');
 });
 
 test('own offers survive a restart; cancelled ones do not', async () => {
@@ -251,21 +268,22 @@ test('two taker identities choosing the same commitment cannot overwrite a reser
   assert.equal(t.host.trades.size, 2); assert.equal(t.status().mine[0].reserved, '2000000000000000000');
 });
 
-test('maker emits strict decline reasons once per nonce, and never answers invalid, unparseable or unrelated takes', async () => {
+test('maker emits strict decline reasons once per nonce, declines malformed takes as invalid, and never answers unauthenticated, unparseable or unrelated ones', async () => {
   const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
   const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
   const ch = 'intercom-dex:t:' + offer.offerId;
   const base = peer => ({ offerId: offer.offerId, pair: offer.pair, registryVersion: 1, software: '0.1.0', baseAmount: offer.baseAmount,
     taker: peer.me, commitment: random32(), sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 });
   registryPair(f.registry, 'TNK/USDC').minBaseAmount = '1000';
-  for (const [patch, reason] of [[{ software: '0.0.9' }, 'version'], [{ baseAmount: '1000000000000000001' }, 'insufficient'], [{ baseAmount: '999' }, 'invalid']]) {
+  for (const [patch, reason] of [[{ software: '0.0.9' }, 'version'], [{ baseAmount: '1000000000000000001' }, 'insufficient'], [{ baseAmount: '999' }, 'invalid'],
+    [{ sendBy: nowSec() - 1 }, 'invalid'], [{ pair: 'RESET/USDC' }, 'invalid'], [{ registryVersion: 2 }, 'invalid'], [{ refundAfter: nowSec() + 86401 }, 'invalid']]) {
     const peer = party(), nonce = await channelPost(t, bridge, peer, 'take', { ...base(peer), ...patch }, ch);
     const last = bridge.sent.at(-1).envelope;
     assert.equal(last.kind, 'decline'); assert.deepEqual(last.body, { offerId: offer.offerId, takeNonce: nonce, reason });
   }
-  // Takes that fail authentication or basic validity get no answer at all.
+  // A take whose taker is not its signer gets no answer at all.
   let count = bridge.sent.length;
-  for (const patch of [{ sendBy: nowSec() - 1 }, { pair: 'RESET/USDC' }, { registryVersion: 2 }, { refundAfter: nowSec() + 86401 }, { taker: party().me }]) {
+  for (const patch of [{ taker: party().me }]) {
     const peer = party(); await channelPost(t, bridge, peer, 'take', { ...base(peer), ...patch }, ch);
   }
   assert.equal(bridge.sent.length, count);

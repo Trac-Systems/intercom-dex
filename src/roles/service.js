@@ -23,6 +23,9 @@ const DAY = 86400, PAYOUT_DELAY = 7 * DAY, CREDIT_AFTER_SEC = 300;
 // Watches made from summons alone (no logged settlement yet) share this capacity. Share messages for unknown trades
 // are kept only from registry signers, at most UNMATCHED_PER_SENDER distinct ones per sender and trade.
 export const MAX_UNPROVEN_WATCHES = 20000, UNMATCHED_PER_SENDER = 16;
+// A summoned trade counts against its offer's published size until it is logged, or until this long after its send
+// window and grace ended (time for the claim and the seller's report); a trade that died by then frees the size again.
+export const IN_FLIGHT_SLACK_SEC = 600;
 
 // The venue: publishes the signer registry, the order book and tickers, checks every reported trade on both chains
 // before logging it, and accounts the signers' share of the venue fee (paid later, after a holding period).
@@ -68,6 +71,7 @@ export class Service {
     }
     this.fillsDue = new Map();     // offerId -> tradeIds of logged trades whose offer has not been seen yet
     for (const r of this.settlements.values()) if (r.status === 'logged' && r.fillPending) this.#fillDue(r);
+    this.inFlight = new Map();     // tradeId -> { offerId, amount, until } for summoned trades not logged yet
     this.watched = new Map();      // tradeId -> refundAfter, for trades whose committee the service knows
     this.unproven = new Map();     // tradeId -> sendBy + graceSec, for watched trades without a logged settlement
     for (const name of store.list('watch-')) {
@@ -76,6 +80,7 @@ export class Service {
       if (profile) checkProfileTerms(w.terms, profile);
       this.watched.set(w.tradeId, w.terms.refundAfter);
       if (this.settlements.get(w.tradeId)?.status !== 'logged') this.unproven.set(w.tradeId, w.terms.sendBy + w.terms.graceSec);
+      this.#track(w.terms);
     }
     this.waitingForWatch = new Map();
     for (const name of store.list('watchwait-')) {
@@ -199,7 +204,7 @@ export class Service {
   async #publishBooks() {
     const now = this.now();
     this.#saveBook();
-    const makers = new Set();
+    const makers = new Set(), pending = this.#pendingByOffer();
     for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
       const listed = this.book.snapshot(p.pair, now).filter(o => o.registryVersion === this.registry.version && meetsVersion(o.software, this.registry.minSoftware));
       this.funds.refresh(listed);
@@ -212,6 +217,10 @@ export class Service {
             o.side === 'sell' ? o.maker.tracAddr : o.maker.solAddr, JSON.stringify(this.funds.balances(o)));
         }
         return funded;
+      }).flatMap(o => {
+        // The published size is what is still free: summoned trades in progress hold part of it.
+        const free = BigInt(o.baseAmount) - (pending.get(o.offerId) ?? 0n);
+        return free > 0n ? [{ ...o, baseAmount: free.toString() }] : [];
       });
       this.unfunded[p.pair] = listed.length - offers.length;
       const message = this.bookFeed.next(p.pair, this.registry.version, offers, now, () => {
@@ -255,6 +264,21 @@ export class Service {
     else if (channel === SIGNERS && m.kind === 'heartbeat' && this.#listed(m.from)) this.heartbeats.set(m.from, { ...m.body, at: this.now() });
   }
 
+  #track(terms) {
+    const until = terms.sendBy + terms.graceSec + IN_FLIGHT_SLACK_SEC, tradeId = termsTradeId(terms);
+    if (this.now() < until && this.settlements.get(tradeId)?.status !== 'logged') this.inFlight.set(tradeId, { offerId: terms.offerId, amount: BigInt(terms.baseAmount), until });
+  }
+
+  // Base units of each offer held by summoned trades that are not logged yet (a logged trade is already a fill).
+  #pendingByOffer() {
+    const pending = new Map(), now = this.now();
+    for (const [id, t] of this.inFlight) {
+      if (now >= t.until || this.settlements.get(id)?.status === 'logged') { this.inFlight.delete(id); continue; }
+      pending.set(t.offerId, (pending.get(t.offerId) ?? 0n) + t.amount);
+    }
+    return pending;
+  }
+
   // Only signers of the current registry count as online; anyone can send a heartbeat on the public channel.
   #listed(dexKey) { return this.registry.signers.some(s => s.dexKey === dexKey); }
 
@@ -290,6 +314,7 @@ export class Service {
       if (archived && this.profile) checkProfileTerms(archived.terms, this.profile);
       this.store.put(`watch-${tradeId}`, archived ?? { tradeId, terms, summon, shares: {} });
       this.watched.set(tradeId, terms.refundAfter);
+      this.#track(terms);
       if (!proven) this.unproven.set(tradeId, terms.sendBy + terms.graceSec);
     }
     if (proven) this.unproven.delete(tradeId);

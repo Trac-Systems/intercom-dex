@@ -5,12 +5,13 @@ import { MIN_SOL } from '../wallets/accounting.js';
 // fill even the pair's smallest trade (a seller without the base asset or the TNK transfer fee, a buyer without the
 // USDC or the SOL for the escrow lock). The offer stays in the book and returns once the funds are there. A wallet
 // that could not be read never hides an offer.
-export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4;
+export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4, FAILED_READS = 3;
 
 export class MakerFunds {
   constructor({ solana, trac, now, log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
     Object.assign(this, { solana, trac, now, log, ttlSec, readsAtOnce });
-    this.wallets = new Map();   // `${chain}:${address}` -> { balances, at } (balances null after a failed read)
+    this.wallets = new Map();   // `${chain}:${address}` -> { balances, at, failures } (balances null after a failed read)
+    this.lastGood = new Map();  // chain -> time of the latest successful read on it
     this.reading = new Set();
   }
 
@@ -19,8 +20,16 @@ export class MakerFunds {
     try { return this.#funded(offer, pair); } catch { return true; }
   }
 
+  // A wallet that failed FAILED_READS reads in a row while other wallets on the same chain read fine is treated as
+  // unfunded; while the chain's reads fail for everyone (an RPC or peer outage), failed wallets hide nothing.
+  #failing(chain, address) {
+    const w = this.wallets.get(`${chain}:${address}`);
+    return !!w && w.balances === null && w.failures >= FAILED_READS && (this.lastGood.get(chain) ?? -Infinity) > this.now() - this.ttlSec;
+  }
+
   #funded(offer, pair) {
     const min = BigInt(pair.minBaseAmount);
+    if (this.#failing(...(offer.side === 'sell' ? ['trac', offer.maker.tracAddr] : ['solana', offer.maker.solAddr]))) return false;
     if (offer.side === 'sell') {
       const b = this.#cached('trac', offer.maker.tracAddr);
       if (!b) return true;
@@ -63,9 +72,10 @@ export class MakerFunds {
     this.reading.add(key);
     try {
       const balances = chain === 'trac' ? await this.trac.balances(address) : await this.solana.walletBalances(address);
-      this.wallets.set(key, { balances, at: this.now() });
+      this.wallets.set(key, { balances, at: this.now(), failures: 0 });
+      this.lastGood.set(chain, this.now());
     } catch (e) {
-      this.wallets.set(key, { balances: null, at: this.now() });
+      this.wallets.set(key, { balances: null, at: this.now(), failures: (this.wallets.get(key)?.failures ?? 0) + 1 });
       this.log('funds read', chain, address.slice(0, 12), e.message);
     } finally {
       this.reading.delete(key);

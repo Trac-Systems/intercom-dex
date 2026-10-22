@@ -24,6 +24,8 @@ export const REANNOUNCE_MS = 45_000;
 // connected, at most four in all, so a take there starts talking at once. Older makers are left alone: before 0.1.8
 // their peers stop at 64 connections.
 export const WARM_MS = 15_000, WARM_VIEW_SEC = 60, WARM_MAX = 4, WARM_SOFTWARE = '0.1.14', WARM_LIVE_SEC = 70;
+// A cancel whose announce failed is announced again every 10 s, up to six times.
+export const CANCEL_RETRY_MS = 10_000, CANCEL_RETRIES = 6;
 export const MAX_TRADES_PER_OFFER = 3;
 export const MAX_NEGOTIATIONS_PER_TAKER = 3;
 // Declines answer strangers, so they are bounded: one per sender per minute, DECLINES_PER_MINUTE in total. A decline
@@ -191,8 +193,8 @@ export class Trader {
     const decline = reason => this.#decline(channel, m, reason);
     if (m.from !== m.body.taker.dexKey || m.from === this.me.dexKey) return;
     if (!offer || offer.expiresAt <= now) return decline('expired');
-    if (!reg || !this.registry.usable) return;
-    if (m.body.pair !== offer.pair || m.body.registryVersion !== offer.registryVersion) return;
+    if (!this.registry.usable) return;
+    if (!reg || m.body.pair !== offer.pair || m.body.registryVersion !== offer.registryVersion) return decline('invalid');
     let pair;
     try { pair = this.#newPair(offer.pair, offer.registryVersion, m.body.software); }
     catch (e) { return e.message === 'update required' ? decline('version') : undefined; }
@@ -211,7 +213,7 @@ export class Trader {
     // A take below the pair's smallest trade gets a clear answer instead of silence.
     if (amount < BigInt(pair.minBaseAmount)) return decline('invalid');
     if (m.body.sendBy <= now || Math.abs(m.body.sendBy - (m.ts + p.sendWindowSec)) > 120 ||
-        m.body.refundAfter - m.body.sendBy !== p.refundSec - p.sendWindowSec) return;
+        m.body.refundAfter - m.body.sendBy !== p.refundSec - p.sendWindowSec) return decline('invalid');
     if (amount > this.#inventory(offer).available) return decline('insufficient');
     if (this.wallets) {
       // A maker whose clock is off starts no trade; the taker may try again later.
@@ -263,8 +265,17 @@ export class Trader {
     if (!offer) throw new Error('Not my offer');
     this.store.put(`offer-${offerId}`, { offer, cancelled: true });
     this.mine.delete(offerId); this.offers.delete(offerId);
-    await this.host.sendPublic(OFFERS, 'cancel', { offerId });
+    // The cancel stands once stored. A failed announce is repeated in the background (until then peers keep the offer
+    // up to 300 s and their takes of it are declined as expired), so the caller is never told it failed.
+    try { await this.host.sendPublic(OFFERS, 'cancel', { offerId }); }
+    catch { this.#announceCancel(offerId, CANCEL_RETRIES); }
     return { offerId, cancelled: true };
+  }
+
+  #announceCancel(offerId, left) {
+    const timer = setTimeout(() => this.host.sendPublic(OFFERS, 'cancel', { offerId })
+      .catch(() => { if (left > 1) this.#announceCancel(offerId, left - 1); }), CANCEL_RETRY_MS);
+    timer.unref?.();
   }
 
   // Own offers that are not cancelled, expired or filled come back after a restart.
