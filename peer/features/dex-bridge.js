@@ -35,7 +35,33 @@ export default class DexBridge extends ScBridge {
   _dropPin(peerKey, pin) {
     if (--pin.refs) return;
     if (this.makerPins.get(peerKey) === pin) this.makerPins.delete(peerKey);
-    if (pin.owned && !pin.swarm.destroyed) pin.swarm.leavePeer(pin.key);
+    if (pin.owned && !pin.swarm.destroyed && !this.registryPins?.has(peerKey)) pin.swarm.leavePeer(pin.key);
+  }
+
+  // The registry's relay keys are the signers' and the venue's peers. Every node keeps a direct connection to them: a
+  // trade channel is new for each trade and only opens over a direct connection, so a buyer that happened not to be
+  // connected to a committee signer could never deliver its dealing to it and the trade was called off.
+  _pinRegistryPeers(keys) {
+    const swarm = this.peer.swarm;
+    if (!swarm || swarm.destroyed) return;
+    this.registryPins ??= new Map();
+    const self = swarm.keyPair?.publicKey ? b4a.toString(swarm.keyPair.publicKey, 'hex') : null;
+    const wanted = new Set(keys.filter(k => k !== self));
+    for (const [peerKey, pin] of this.registryPins) {
+      if (wanted.has(peerKey)) continue;
+      this.registryPins.delete(peerKey);
+      if (pin.owned && !swarm.destroyed && !this.makerPins.has(peerKey)) swarm.leavePeer(pin.key);
+    }
+    let added = false;
+    for (const peerKey of wanted) {
+      if (this.registryPins.has(peerKey)) continue;
+      const key = b4a.from(peerKey, 'hex'), owned = !swarm.peers.get(peerKey)?.explicit;
+      swarm.joinPeer(key);
+      this.registryPins.set(peerKey, { key, owned });
+      added = true;
+    }
+    // Installed Hyperswarm does not wake its scheduler when joinPeer finds an already queued peer.
+    if (added) swarm._attemptClientConnections?.();
   }
 
   // One Hyperswarm pin per maker peer, shared by its routes and warm entries (counted in refs).
@@ -118,7 +144,9 @@ export default class DexBridge extends ScBridge {
         if (type === 'relays.stats') return reply({ type, stats: this.peer.blindRelay.stats() });
         if (!Array.isArray(message.keys) || message.keys.length > 4097 || message.keys.some(k => typeof k !== 'string' || !/^[0-9a-f]{64}$/.test(k)) ||
             Object.keys(message).some(k => !['id', 'type', 'keys'].includes(k))) throw new Error('Invalid relay keys');
-        return reply({ type, keys: this.peer.blindRelay.setRelays(message.keys) });
+        const keys = this.peer.blindRelay.setRelays(message.keys);
+        this._pinRegistryPeers(message.keys);
+        return reply({ type, keys });
       } catch (error) { return reply({ type: 'error', error: error.message }); }
     }
     if (type === 'dex_warm') {

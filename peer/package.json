@@ -1,6 +1,6 @@
 {
   "name": "intercom-dex-peer",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "type": "module",
   "pear": {
@@ -32,7 +32,8 @@
     "hyperdht": "$hyperdht"
   },
   "scripts": {
-    "start": "node scripts/pear-runner.mjs"
+    "start": "node scripts/pear-runner.mjs",
+    "postinstall": "node scripts/apply-patches.mjs"
   },
   "main": "index.js"
 }

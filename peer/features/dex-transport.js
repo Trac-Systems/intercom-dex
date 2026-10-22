@@ -7,11 +7,18 @@ const { CHAT_CHANNEL, MarketChat } = await import('../../src/market/chat.js');
 const DEX_CHANNELS = ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signers', CHAT_CHANNEL];
 
 export const DEX_POW_BITS = 20;
-// Stamping order: post-lock safety messages, then negotiation with a trade's counterparty, then everything else.
-// Declines answer strangers: stamped last, and dropped instead of queued while one is waiting.
-export const DEX_POW_CLASSES = [['transferSent', 'ack', 'sharePublish', 'shareRequest', 'deal', 'claimed', 'refunded', 'summon'],
+// Stamping order: heartbeats and post-lock safety messages, then negotiation with a trade's counterparty, then
+// everything else. A signer whose heartbeat waited behind its trade messages looked offline to traders (90 s), and
+// every trade needs the whole committee. Declines answer strangers: stamped last, and dropped while one is waiting.
+export const DEX_POW_CLASSES = [['heartbeat', 'transferSent', 'ack', 'sharePublish', 'shareRequest', 'deal', 'claimed', 'refunded', 'summon'],
   ['take', 'accept', 'reveal', 'terms', 'termsSig', 'working', 'abort']];
 export const DEX_POW_LOW = ['decline'];
+// Per-connection inbound limit. A signer or venue receives the whole network's traffic over a few connections (offers,
+// the venue's book, chat and every trade); at 64 kB/s those connections were blocked for 30 s at a time and the
+// buyers' dealings on them were dropped, so most trades never reached the whole committee.
+export const SERVER_ROLES = ['service', 'signer'];
+export const SERVER_RATE = { rateBytesPerSecond: 2_000_000, rateBurstBytes: 8_000_000 };
+export const TRADER_RATE = { rateBytesPerSecond: 64_000, rateBurstBytes: 256_000 };
 
 export function dexTransport(config) {
   if (!['service', 'signer', 'trader', 'market-feed'].includes(config.role)) throw new Error('Explicit peer role required');
@@ -27,6 +34,6 @@ export function dexTransport(config) {
       powEnabled: true, powDifficulty: DEX_POW_BITS,
       powClasses: DEX_POW_CLASSES, powLowKinds: DEX_POW_LOW,
       powRequiredChannels: ['intercom-dex:offers', 'intercom-dex:signers', CHAT_CHANNEL], powRequiredPrefixes: ['intercom-dex:t:'],
-      maxMessageBytes: 200_000, rateBytesPerSecond: 64_000, rateBurstBytes: 256_000 },
+      maxMessageBytes: 200_000, ...(SERVER_ROLES.includes(config.role) ? SERVER_RATE : TRADER_RATE) },
   };
 }

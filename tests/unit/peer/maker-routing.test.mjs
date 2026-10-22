@@ -189,3 +189,19 @@ test('warm makers skip keys beyond the pin limit instead of failing', async t =>
   assert.deepEqual((await f.send({ type: 'dex_warm', peerKeys: [key(20), key(21)] })).peerKeys, [key(20)]);
   assert.equal(f.bridge.makerPins.size, 16);
 });
+
+test('registry relay peers (signers, venue) are pinned with a direct connection, removed ones released, maker pins kept', async t => {
+  const f = fixture(t);
+  f.bridge.peer.blindRelay = { setRelays: keys => keys };
+  f.swarm.keyPair = { publicKey: Buffer.from(key(9), 'hex') };
+  const relays = keys => f.send({ type: 'relays.set', keys });
+  assert.equal((await relays([key(1), key(2), key(9)])).type, 'relays.set');
+  assert.deepEqual(f.joined.sort(), [key(1), key(2)], 'own key is never pinned');
+  await relays([key(1), key(2)]); assert.equal(f.joined.length, 2, 'repeating the registry pins nothing new');
+  await f.join(channel(3), key(2));                         // a maker that is also a registry peer
+  await relays([key(1), key(3)]);
+  assert.deepEqual([...new Set(f.joined)].sort(), [key(1), key(2), key(3)]);   // joinPeer is idempotent
+  assert.deepEqual(f.left, [], 'a peer still used as a maker stays joined');
+  await f.join(channel(3), null);
+  assert.deepEqual(f.left, [key(2)], 'released once neither the registry nor a maker route needs it');
+});

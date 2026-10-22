@@ -13,7 +13,7 @@ import { split, randomScalar } from '../../../src/core/vss.js';
 import { buildTerms, tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { selectCommittee } from '../../../src/core/committee.js';
 import { openStore } from '../../../src/roles/store.js';
-import { IN_FLIGHT_SLACK_SEC, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
+import { IN_FLIGHT_SLACK_SEC, SHARE_REQUESTS, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
 import { RegistryView, nowSec, random32, verifySummon, offerIdOf, SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, tracAddress, hex, SOL, SOL2, MINT, SIG } from '../core/helpers.mjs';
 
@@ -650,6 +650,15 @@ test('service requests missing committee shares of logged settlements at most ev
   s.clock.t += 600; await s.service.reconcile(); assert.equal(requests().length, 2);
   const second = s.trade(); await s.summon(second); await s.report(second); s.clock.t = second.terms.refundAfter;
   await s.service.reconcile(); assert.equal(requests().length, 2);
+});
+
+test('service asks for a missing share at most SHARE_REQUESTS times, then stops', async () => {
+  const s = setup({ immediate: true }), trade = s.trade();
+  await s.service.start(); s.service.stop(); await s.summon(trade); await s.report(trade);
+  const requests = () => s.bridge.sent.filter(x => x.envelope.kind === 'shareRequest');
+  for (let i = 1; i < 5; i++) await s.publish(trade, i, trade.shares[i - 1]);   // the fifth signer never publishes
+  for (let i = 0; i < SHARE_REQUESTS + 3; i++) { await s.service.reconcile(); s.clock.t += 600; }
+  assert.equal(requests().length, SHARE_REQUESTS);
 });
 
 test('only signers of the current registry count as online; other heartbeats are not kept', async () => {

@@ -175,7 +175,8 @@ maker or the taker can be either side; the sequence is the same.
     transaction became final before `sendBy + graceSec`, and that no other trade used it. It then publishes its
     share on the trade channel and on `intercom-dex:signers`, and re-sends it after 10, 20, 40, 80, 160, 320 and
     600 seconds and then every 600 seconds until `refundAfter`. A `shareRequest` from the seller or the venue gets
-    an answer at most once per 30 seconds per requester.
+    an answer at most once per 30 seconds per requester. The venue asks for a logged trade's missing shares at most
+    three times, ten minutes apart.
 12. **Claim.** The seller collects k shares, checks each against its saved commitments, reconstructs `s`, checks
     `sha256(le32(s)) = H` and claims with `le32(s)` as the preimage. The escrow pays the net amount to the
     recipient and the two fees to their vaults. If no claim lands, the buyer refunds after `refundAfter`. The escrow
@@ -362,14 +363,16 @@ wallet it cannot read hides nothing), and keeps its book across restarts.
   proof-of-work stamp `pow: {nonce, difficulty}`: `sha256(stableJSON({channel, from, id, message, nonce, origin,
   ts}))` must have at least 20 leading zero bits. Peers check it before relaying, also on open channels. Identical
   content reuses its stamp while the stamp is being computed and for 60 seconds after its timestamp.
-- A peer computes stamps in order of urgency: post-lock safety messages (`transferSent`, `ack`, `sharePublish`,
-  `shareRequest`, `deal`, `claimed`, `refunded`, `summon`), then negotiation with a trade's counterparty (`take`,
+- A peer computes stamps in order of urgency: signer heartbeats and post-lock safety messages (`heartbeat`,
+  `transferSent`, `ack`, `sharePublish`, `shareRequest`, `deal`, `claimed`, `refunded`, `summon`), then negotiation with a trade's counterparty (`take`,
   `accept`, `reveal`, `terms`, `termsSig`, `working`, `abort`), then everything else, and `decline` last. A more
   urgent stamp interrupts a running one. A decline is dropped, not queued, while another decline waits.
 - Chat is checked before delivery or relay: one message per 10 seconds and 20 per rolling hour per signing key,
   with no repeated text within 10 minutes. Trader and venue retain the last 100 accepted messages in memory only.
-- A message is at most 200000 bytes. Each connection may send 64000 bytes per second with a burst of 256000 bytes;
-  both are checked before a frame is decoded. A trade accepts at most 400 messages per sender and buffers at most
+- A message is at most 200000 bytes. Each connection may send a trader 64000 bytes per second with a burst of 256000
+  bytes, and a signer or the venue 2000000 bytes per second with a burst of 8000000 bytes (they receive the whole
+  network's traffic over a few connections); both are checked before a frame is decoded. A connection over its limit
+  three times within 5 seconds is blocked for 30 seconds. A trade accepts at most 400 messages per sender and buffers at most
   100 messages or 4 MB per sender.
 - Blind relays carry encrypted traffic between peers that can't connect directly. The registry's signer
   `relayKey` entries (active, not removed) and `serviceRelayKey` replace the dynamic relay list with every new

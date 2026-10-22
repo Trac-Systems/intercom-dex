@@ -24,6 +24,8 @@ const ACCEPTS = {
 };
 const DONE = { buyer: ['complete', 'refunded'], seller: ['complete', 'aborted', 'lost'], signer: ['published', 'expired', 'aborted'] };
 export const tradeChannel = ref => `intercom-dex:t:${ref}`;
+// Buyer messages a committee signer passes on to the other signers over the signers channel.
+export const FORWARDED = ['deal', 'working'];
 const MAX_PER_SENDER = 400;
 // A published signer repeats its share on its own at 10, 20, 40 ... 640 seconds and then only answers requests: every
 // repeat costs a fresh work stamp, and a seller that still misses shares asks for them (shareRequest) every 30 s.
@@ -218,7 +220,7 @@ export class TradeHost {
   }
 
   #save(trade) {
-    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, ...record } = trade;
+    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, forwarded, ...record } = trade;
     this.store.put(`trade-${trade.key}`, record);
   }
 
@@ -254,6 +256,15 @@ export class TradeHost {
     // Every take reaches the maker's serialized admission queue, including additional takes by the same peer.
     if (message?.kind === 'take' && this.hooks.unrouted.length) {
       for (const hook of this.hooks.unrouted) await hook(channel, message);
+      return;
+    }
+    // A committee signer that got the buyer's dealing on the trade channel passes the signed original on over the
+    // signers channel (FORWARDED). The others check it exactly as if it had arrived on the trade channel: the dealing
+    // is sent once, often before every signer joined that new channel, and a signer that missed it timed out.
+    if (channel === 'intercom-dex:signers' && FORWARDED.includes(message?.kind) && typeof message.ch === 'string') {
+      for (const trade of this.trades.values()) {
+        if (trade.role === 'signer' && trade.state.tradeId && message.ch === tradeChannel(trade.state.tradeId)) this.#accept(trade, message.ch, message);
+      }
       return;
     }
     if (channel === 'intercom-dex:signers' && ['sharePublish', 'shareRequest'].includes(message?.kind)) {
@@ -306,6 +317,13 @@ export class TradeHost {
     // An authenticated message/presence from the maker on this offer channel proves a usable peer path.
     if (s.mode === 'taker' && m.from === s.peer && channel === tradeChannel(s.offerId) && trade.makerConnectedAt == null) trade.makerConnectedAt = performance.now();
     if (process.env.DEX_DEBUG) this.log('recv', trade.key.slice(0, 12), channel.slice(-8), m.kind, m.from.slice(0, 8));
+    if (trade.role === 'signer' && FORWARDED.includes(m.kind)) {
+      trade.forwarded ??= new Set();
+      if (!trade.forwarded.has(message.sig)) {
+        trade.forwarded.add(message.sig);
+        this.bridge.send('intercom-dex:signers', message).catch(e => this.log('forward', m.kind, e.message));
+      }
+    }
     if (recovery) { this.#resend(trade, channel, m.from, m.kind === 'shareRequest' ? 30 : 3); return true; }
     if (m.kind === 'termsSig') trade.raw.push(m);   // kept for the signer summons; nothing else is retained
     const waiting = trade.buffer.filter(x => x.from === m.from);

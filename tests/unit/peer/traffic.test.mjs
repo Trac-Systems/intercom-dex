@@ -9,7 +9,7 @@ const loader = registerHooks({ resolve(specifier, context, next) {
 } });
 const { default: DexBridge } = await import('../../../peer/features/dex-bridge.js');
 loader.deregister();
-import { dexTransport, DEX_POW_BITS, DEX_POW_CLASSES, DEX_POW_LOW } from '../../../peer/features/dex-transport.js';
+import { dexTransport, DEX_POW_BITS, DEX_POW_CLASSES, DEX_POW_LOW, SERVER_RATE, TRADER_RATE } from '../../../peer/features/dex-transport.js';
 import { generateIdentity, encodeKey } from '../../../src/core/keys.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 
@@ -142,7 +142,8 @@ test('safety and negotiation stamps interrupt running background work, overtake 
   now += 60000; held = false;
   const payloads = await Promise.all([transfer, take, accept, background, queued, decline]);
   await Promise.all(more);
-  assert.deepEqual(order, ['book', 'transferSent', 'take', 'accept', 'offer', 'heartbeat', 'decline', 'decline', 'decline', 'decline']);
+  // Heartbeats share the first class: a signer whose heartbeat waited behind trade traffic looked offline to traders.
+  assert.deepEqual(order, ['book', 'heartbeat', 'transferSent', 'take', 'accept', 'offer', 'decline', 'decline', 'decline', 'decline']);
   for (const p of payloads) {
     assert.equal(p.ts, now);
     assert.equal(sc._checkPow(p, p.channel), true);
@@ -227,9 +228,12 @@ test('dex config pins the owner operationally, enables one difficulty, defaults 
     assert.equal(policy.sidechannel.ownerKeys['intercom-dex'], key);
     assert.equal(policy.sidechannel.powDifficulty, DEX_POW_BITS);
     assert.deepEqual(policy.sidechannel.powClasses, DEX_POW_CLASSES); assert.deepEqual(policy.sidechannel.powLowKinds, DEX_POW_LOW);
-    for (const kind of ['transferSent', 'ack', 'sharePublish', 'deal', 'claimed', 'refunded', 'summon']) assert.ok(DEX_POW_CLASSES[0].includes(kind), kind);
+    for (const kind of ['heartbeat', 'transferSent', 'ack', 'sharePublish', 'deal', 'claimed', 'refunded', 'summon']) assert.ok(DEX_POW_CLASSES[0].includes(kind), kind);
     assert.deepEqual(DEX_POW_LOW, ['decline']);
     assert.deepEqual(policy.sidechannel.powRequiredPrefixes, ['intercom-dex:t:']);
+    // Servers carry the whole network's traffic per connection; traders keep the strict limit.
+    const rate = role === 'trader' ? TRADER_RATE : SERVER_RATE;
+    assert.equal(policy.sidechannel.rateBytesPerSecond, rate.rateBytesPerSecond); assert.equal(policy.sidechannel.rateBurstBytes, rate.rateBurstBytes);
   }
   assert.throws(() => dexTransport({ role: 'trader', servicePeerKey: key, serveRelay: true }), /Traders/);
   assert.throws(() => dexTransport({ role: 'signer' }), /servicePeerKey/);

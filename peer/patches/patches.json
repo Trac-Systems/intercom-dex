@@ -1,0 +1,10 @@
+[
+ {
+  "name": "bounded-replicate-flush",
+  "package": "trac-peer",
+  "version": "0.4.11",
+  "file": "trac-peer/src/index.js",
+  "original": "            this.swarm.join(this.config.channel, { server: true, client: true });\n            await this.swarm.flush();\n",
+  "patched": "            this.swarm.join(this.config.channel, { server: true, client: true });\n            // intercom-dex patch (bounded-replicate-flush): flush() waits until every node found on the subnet topic was\n            // tried, three at a time (about 190 RESET nodes: 9 minutes). Replication needs only the first connections:\n            // continue 10 s after the first one, or after 60 s at most; the swarm keeps connecting in the background.\n            await new Promise((resolve) => {\n                let done = false, first = null;\n                const finish = () => { if (done) return; done = true; clearTimeout(cap); clearTimeout(first); this.swarm.off('connection', onConnection); resolve(); };\n                const onConnection = () => { if (first === null) first = setTimeout(finish, 10000); };\n                const cap = setTimeout(finish, 60000);\n                if (this.swarm.connections.size > 0) onConnection();\n                this.swarm.on('connection', onConnection);\n                this.swarm.flush().then(finish, finish);\n            });\n"
+ }
+]

@@ -8,7 +8,9 @@ The protocol is in [SPEC.md](SPEC.md); the network profile fields are in [NETWOR
 
 Install from a tagged release, never from `main`. Download `intercom-dex-vX.Y.Z.tar.gz` from the
 [releases page](https://github.com/Trac-Systems/intercom-dex/releases), compare its sha256 with the release page,
-unpack it into a new folder, and run `npm ci` and `npm ci --prefix peer` there. Keep configs and data folders
+unpack it into a new folder, and run `npm ci` and `npm ci --prefix peer` there. `npm ci --prefix peer` also applies the peer's
+patches to its installed dependencies (`peer/scripts/apply-patches.mjs`); after an install with `--ignore-scripts`,
+run `node peer/scripts/apply-patches.mjs` yourself. Keep configs and data folders
 outside the release folder, so that an upgrade only replaces the program.
 
 To upgrade, install the new release the same way next to the old one. Stop the role program, then its peer, start

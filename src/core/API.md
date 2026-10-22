@@ -842,7 +842,8 @@ balances after either no lock or a refund.
 
 - `shareRequest:{tradeId}` is strict. A published signer accepts it only from the
   seller or configured service identity, once per requester/trade/30 s, until
-  refundAfter. Seller requests use the trade channel; service requests use
+  refundAfter. The service asks for a logged trade's missing shares at most
+  three times (`SHARE_REQUESTS`), 600 s apart. Seller requests use the trade channel; service requests use
   `intercom-dex:signers`. Published signers resend only their publication at
   10/20/40/80/160/320/600 seconds, then every 600 seconds. `present` retains its
   separate 3-second requester limit. Waiting outboxes retain the 10-second cadence,

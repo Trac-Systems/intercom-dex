@@ -26,6 +26,8 @@ export const MAX_UNPROVEN_WATCHES = 20000, UNMATCHED_PER_SENDER = 16;
 // A summoned trade counts against its offer's published size until it is logged, or until this long after its send
 // window and grace ended (time for the claim and the seller's report); a trade that died by then frees the size again.
 export const IN_FLIGHT_SLACK_SEC = 600;
+// How often the venue asks the committee for a logged trade's missing shares (ten minutes apart).
+export const SHARE_REQUESTS = 3;
 
 // The venue: publishes the signer registry, the order book and tickers, checks every reported trade on both chains
 // before logging it, and accounts the signers' share of the venue fee (paid later, after a holding period).
@@ -431,12 +433,15 @@ export class Service {
   reconcile() {
     return this.#serialize(async () => {
       // Shares only count toward credits of logged settlements, so only those are asked for; summoned trades that never
-      // settled would otherwise cost a public message each every ten minutes until their refund time.
+      // settled would otherwise cost a public message each every ten minutes until their refund time. A share still
+      // missing after SHARE_REQUESTS asks is not coming (its signer never held it): asking until refund made every signer
+      // publish its share again every ten minutes for two days, and the work stamps held their heartbeats back.
       for (const [tradeId, refundAfter] of this.watched) {
         if (this.now() >= refundAfter || this.settlements.get(tradeId)?.status !== 'logged') continue;
         const w = this.store.get(`watch-${tradeId}`);
-        if (!w || this.now() - (w.shareRequestAt ?? -Infinity) < 600 || w.terms.committee.every((_, i) => w.shares[i + 1])) continue;
-        this.store.put(`watch-${tradeId}`, { ...w, shareRequestAt: this.now() });
+        if (!w || (w.shareRequests ?? 0) >= SHARE_REQUESTS || this.now() - (w.shareRequestAt ?? -Infinity) < 600 ||
+          w.terms.committee.every((_, i) => w.shares[i + 1])) continue;
+        this.store.put(`watch-${tradeId}`, { ...w, shareRequestAt: this.now(), shareRequests: (w.shareRequests ?? 0) + 1 });
         this.host.sendPublic(SIGNERS, 'shareRequest', { tradeId }).catch(e => this.log('share request', e.message));
       }
       for (const w of this.waitingForWatch.values()) {

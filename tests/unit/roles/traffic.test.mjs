@@ -134,3 +134,27 @@ test('a signer still waiting for the dealing announces itself again every ten se
   f.tr.state = { ...f.tr.state, phase: 'holding' };
   await f.tick(30); assert.equal(presents(), 2);
 });
+
+test('a signer passes the buyer dealing on over the signers channel once, and a signer that missed it accepts that copy', async t => {
+  const state = sim.snapshots.get('signer1:awaitDeal'), ch = tradeChannel(state.tradeId);
+  const buyer = sim.nodes.get('buyer'), sent = sim.log.find(x => x.name === 'buyer' && x.action.type === 'send' && x.action.kind === 'deal');
+  assert.ok(sent, 'the simulation recorded the dealing');
+  const dealing = seal({ kind: 'deal', body: sent.action.body, ch }, buyer.identity.secretKey, { ts: state.now, nonce: hex() });
+  // The signer that got it on the trade channel forwards the unchanged envelope once.
+  const first = await host(t, 'signer', state, sim.nodes.get('signer1').identity);
+  first.h.bridge.emit('message', ch, dealing); await new Promise(r => setImmediate(r)); await first.tr.queue;
+  first.h.bridge.emit('message', ch, dealing); await new Promise(r => setImmediate(r)); await first.tr.queue;
+  const forwarded = first.sent.filter(x => x.ch === 'intercom-dex:signers' && x.envelope.kind === 'deal');
+  assert.equal(forwarded.length, 1); assert.deepEqual(forwarded[0].envelope, dealing);
+  assert.notEqual(first.tr.state.phase, 'awaitDeal');
+  // A signer that missed it on the trade channel takes the copy from the signers channel.
+  const other = await host(t, 'signer', sim.snapshots.get('signer2:awaitDeal') ?? state, sim.nodes.get('signer2').identity);
+  other.h.bridge.emit('message', 'intercom-dex:signers', dealing); await new Promise(r => setImmediate(r)); await other.tr.queue;
+  assert.notEqual(other.tr.state.phase, 'awaitDeal');
+  // A copy for another trade's channel, or a forged one, changes nothing.
+  const third = await host(t, 'signer', sim.snapshots.get('signer2:awaitDeal') ?? state, sim.nodes.get('signer2').identity);
+  third.h.bridge.emit('message', 'intercom-dex:signers', { ...dealing, ch: tradeChannel('f'.repeat(64)) });
+  third.h.bridge.emit('message', 'intercom-dex:signers', seal({ kind: 'deal', body: sent.action.body, ch }, sim.nodes.get('seller').identity.secretKey, { ts: state.now, nonce: hex() }));
+  await new Promise(r => setImmediate(r)); await third.tr.queue;
+  assert.equal(third.tr.state.phase, 'awaitDeal');
+});

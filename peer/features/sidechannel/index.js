@@ -316,9 +316,8 @@ class Sidechannel extends Feature {
       state.strikes += 1;
       if (state.strikes >= this.maxStrikes) {
         state.blockedUntil = now + this.blockMs;
-        if (this.debug) {
-          console.log(`[sidechannel] rate-limit block ${this._getRemoteKey(connection)} for ${this.blockMs}ms`);
-        }
+        // Logged always: a block drops every message on the connection for blockMs, trade messages included.
+        console.log(`[sidechannel] rate-limit block ${this._getRemoteKey(connection)} for ${this.blockMs}ms`);
       }
       return false;
     }
