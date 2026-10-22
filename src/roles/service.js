@@ -7,6 +7,7 @@ import { BookFeed } from '../market/book-feed.js';
 import { RegistryRelays } from '../net/relays.js';
 import { OfferBook } from '../market/book.js';
 import { ticker } from '../market/ticker.js';
+import { MakerFunds } from '../market/funds.js';
 import { TradeHost } from './host.js';
 import { deriveEscrowPda } from '../solana/escrow.js';
 import { open, createReplayCache } from '../core/envelope.js';
@@ -44,6 +45,8 @@ export class Service {
     // First receipt time per share message: a copy re-sent after a failed write keeps its original receipt time.
     this.firstSeen = new Map();
     this.book = new OfferBook();
+    // A restart keeps the book: dashboards hide offers the venue's book does not list, so an empty book emptied them.
+    try { this.book.restore(store.get('book-offers'), this.now()); } catch (e) { this.log('book restore', e.message); }
     this.bookFeed = new BookFeed();
     this.relays = new RegistryRelays(bridge);
     const savedFee = store.get('service-fee-policy');
@@ -88,6 +91,8 @@ export class Service {
       for (const m of u.messages) this.unmatchedCounts.set(m.from, (this.unmatchedCounts.get(m.from) ?? 0) + 1);
     }
     this.heartbeats = new Map();
+    this.funds = new MakerFunds({ solana, trac, now: () => this.now(), log: (...a) => this.log(...a) });
+    this.unfunded = {}; this.hidden = new Set();
     if (latest) parseBody('status', { status: 'online', ts: now(), message: '', software: SOFTWARE, latest });
   }
 
@@ -149,7 +154,13 @@ export class Service {
       every(this.tickerMs, () => this.#publishTickers()), every(this.reconcileMs, () => this.reconcile())];
   }
 
-  stop() { this.host.stop(); for (const t of this.timers ?? []) clearInterval(t); }
+  stop() { this.host.stop(); for (const t of this.timers ?? []) clearInterval(t); this.#saveBook(true); }
+
+  #saveBook(now = false) {
+    if (!now && this.now() - (this.bookSavedAt ?? -Infinity) < 30) return;
+    this.bookSavedAt = this.now();
+    try { this.store.put('book-offers', this.book.saved()); } catch (e) { this.log('book save', e.message); }
+  }
 
   #registryWork(work) {
     const next = this.registryQueue.then(work);
@@ -187,14 +198,30 @@ export class Service {
 
   async #publishBooks() {
     const now = this.now();
+    this.#saveBook();
+    const makers = new Set();
     for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
-      const offers = this.book.snapshot(p.pair, now).filter(o => o.registryVersion === this.registry.version && meetsVersion(o.software, this.registry.minSoftware));
+      const listed = this.book.snapshot(p.pair, now).filter(o => o.registryVersion === this.registry.version && meetsVersion(o.software, this.registry.minSoftware));
+      this.funds.refresh(listed);
+      for (const o of listed) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
+      const offers = listed.filter(o => {
+        const funded = this.funds.funded(o, p);
+        if (funded === this.hidden.has(o.offerId)) {
+          if (funded) this.hidden.delete(o.offerId); else this.hidden.add(o.offerId);
+          this.log(funded ? 'offer funded again' : 'offer hidden, maker cannot fund the smallest trade', p.pair, o.side, o.offerId.slice(0, 12),
+            o.side === 'sell' ? o.maker.tracAddr : o.maker.solAddr, JSON.stringify(this.funds.balances(o)));
+        }
+        return funded;
+      });
+      this.unfunded[p.pair] = listed.length - offers.length;
       const message = this.bookFeed.next(p.pair, this.registry.version, offers, now, () => {
         const seq = (this.store.get('book-sequence')?.seq ?? 0) + 1;
         this.store.put('book-sequence', { seq }); return seq;
       });
       if (message) await this.host.sendPublic(MAIN, message.kind, message.body);
     }
+    this.funds.forget(makers);
+    for (const id of this.hidden) if (!this.book.get(id, now)) this.hidden.delete(id);
   }
 
   async #publishTickers() {
@@ -225,8 +252,11 @@ export class Service {
     } else if (channel === OFFERS && m.kind === 'cancel') this.book.cancel(m.body.offerId, m.from);
     else if (channel === OFFERS && m.kind === 'settled') return this.#settled(m);
     else if (channel === SIGNERS && m.kind === 'summon') this.#summon(m);
-    else if (channel === SIGNERS && m.kind === 'heartbeat') this.heartbeats.set(m.from, { ...m.body, at: this.now() });
+    else if (channel === SIGNERS && m.kind === 'heartbeat' && this.#listed(m.from)) this.heartbeats.set(m.from, { ...m.body, at: this.now() });
   }
+
+  // Only signers of the current registry count as online; anyone can send a heartbeat on the public channel.
+  #listed(dexKey) { return this.registry.signers.some(s => s.dexKey === dexKey); }
 
   // The service watches trades whose committee it verified, so it knows who may publish which share.
   #summon(m) {
@@ -375,8 +405,10 @@ export class Service {
   // Admission and reconciliation share a queue, including escrow uniqueness and capacity checks.
   reconcile() {
     return this.#serialize(async () => {
+      // Shares only count toward credits of logged settlements, so only those are asked for; summoned trades that never
+      // settled would otherwise cost a public message each every ten minutes until their refund time.
       for (const [tradeId, refundAfter] of this.watched) {
-        if (this.now() >= refundAfter) continue;
+        if (this.now() >= refundAfter || this.settlements.get(tradeId)?.status !== 'logged') continue;
         const w = this.store.get(`watch-${tradeId}`);
         if (!w || this.now() - (w.shareRequestAt ?? -Infinity) < 600 || w.terms.committee.every((_, i) => w.shares[i + 1])) continue;
         this.store.put(`watch-${tradeId}`, { ...w, shareRequestAt: this.now() });
@@ -570,7 +602,7 @@ export class Service {
       feeAccounting: Object.fromEntries(Object.entries(accounting).map(([collector, r]) => [collector,
         { ...r, fees: r.fees.toString(), signerCredits: r.signerCredits.toString() }])),
       settlements: { pending: count('pending'), rejected: count('rejected'), expired: count('expired') },
-      signersOnline: [...this.heartbeats].filter(([, h]) => this.now() - h.at < 90).map(([k]) => k),
-      book: Object.fromEntries(this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open').map(p => [p.pair, this.book.snapshot(p.pair, this.now()).length])), payouts: this.payouts };
+      signersOnline: [...this.heartbeats].filter(([k, h]) => this.now() - h.at < 90 && this.#listed(k)).map(([k]) => k),
+      book: Object.fromEntries(this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open').map(p => [p.pair, this.book.snapshot(p.pair, this.now()).length])), unfunded: this.unfunded, payouts: this.payouts };
   }
 }

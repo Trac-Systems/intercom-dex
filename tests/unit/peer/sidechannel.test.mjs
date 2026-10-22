@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Sidechannel from '../../../peer/features/sidechannel/index.js';
 import c from '../../../peer/node_modules/compact-encoding/index.js';
+import safetyCatch from '../../../peer/node_modules/safety-catch/index.js';
 
 function receiver(config = {}) {
   const sidechannel = new Sidechannel({}, { maxMessageBytes: 10000, welcomeRequired: false, ...config });
@@ -32,11 +33,16 @@ test('every frame is charged before decoding, including oversized, malformed and
   assert.equal(parse.mock.callCount(), 0);
   const clean = receiver({ rateBurstBytes: 10000 });
   const malformed = wire('{');
-  assert.throws(() => decode(clean.message, malformed), SyntaxError);
+  // protomux passes decode errors to safety-catch, which rethrows SyntaxError and RangeError and ends the process.
+  const failure = bytes => { try { decode(clean.message, bytes); } catch (e) { return e; } assert.fail('decode must fail'); };
+  const bad = failure(malformed);
+  assert.match(bad.message, /Malformed/); assert.doesNotThrow(() => safetyCatch(bad));
   assert.equal(clean.sidechannel.rateLimits.get(clean.connection).tokens, 10000 - malformed.length);
   const truncated = c.encode(c.uint, 10);
-  assert.throws(() => decode(clean.message, truncated), /Truncated/);
+  const cut = failure(truncated);
+  assert.match(cut.message, /Truncated/); assert.doesNotThrow(() => safetyCatch(cut));
   assert.equal(clean.sidechannel.rateLimits.get(clean.connection).tokens, 10000 - malformed.length - truncated.length);
+  assert.doesNotThrow(() => safetyCatch(failure(wire('\u0000\u00ff\u00d2\u009f'))));
 });
 
 test('JSON depth 32 is accepted, depth 33 is refused before parsing, respecting strings and escapes', t => {

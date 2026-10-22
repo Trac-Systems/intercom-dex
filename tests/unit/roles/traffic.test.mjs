@@ -99,6 +99,30 @@ test('a restarted signer re-publishes only trades still inside the repeat schedu
   }
 });
 
+test('a signer joins channels only of trades it still runs or serves, and leaves a channel once serving ends', async t => {
+  const node = sim.nodes.get('signer1'), published = sim.state('signer1'), refundAfter = published.terms.refundAfter;
+  const timers = [], joins = [], leaves = [], records = new Map(), clock = { now: published.now };
+  t.mock.method(globalThis, 'setInterval', fn => { timers.push(fn); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const stored = (key, phase, tradeId) => records.set(`trade-${key}`, { key, role: 'signer', state: { ...structuredClone(published), phase, tradeId },
+    lifetimeSec: 172800 + 3600, outbox: {}, raw: [], buffer: [], publicationAt: clock.now - 5000, publicationDelay: 1280 });
+  stored('serving', 'published', published.tradeId);
+  for (const phase of ['aborted', 'expired']) stored(phase, phase, hex());
+  const bridge = new EventEmitter(); bridge.join = async ch => { joins.push(ch); }; bridge.leave = async ch => { leaves.push(ch); };
+  bridge.send = async () => {};
+  const store = { list: p => [...records.keys()].filter(k => k.startsWith(p)), get: k => records.get(k), put: (k, v) => records.set(k, structuredClone(v)) };
+  const h = new TradeHost({ bridge, store, identity: { secretKey: node.identity.secretKey, publicKey: encodeKey(node.identity.publicKey) },
+    serviceKey: encodeKey(sim.f.service.publicKey), now: () => clock.now });
+  await h.start(); t.after(() => h.stop());
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  assert.deepEqual(joins, [tradeChannel(published.tradeId)], 'aborted and expired trades join nothing');
+  timers[0](); await new Promise(r => setImmediate(r)); assert.deepEqual(leaves, []);
+  clock.now = refundAfter; timers[0](); await new Promise(r => setImmediate(r));
+  assert.deepEqual(leaves, [tradeChannel(published.tradeId)], 'serving ended: its channel is left once');
+  timers[0](); await new Promise(r => setImmediate(r)); assert.equal(leaves.length, 1);
+  assert.equal(Object.hasOwn(records.get('trade-serving'), 'channelsLeft'), false);
+});
+
 test('a signer still waiting for the dealing announces itself again every ten seconds, and only while it waits', async t => {
   const state = sim.snapshots.get('signer1:awaitDeal'), node = sim.nodes.get('signer1');
   const f = await host(t, 'signer', state, node.identity), ch = tradeChannel(state.tradeId);

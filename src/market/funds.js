@@ -1,0 +1,74 @@
+import { quoteAmount } from './assets.js';
+import { MIN_SOL } from '../wallets/accounting.js';
+
+// Maker funds: the venue reads each maker's wallet and leaves an offer out of its published book while the maker cannot
+// fill even the pair's smallest trade (a seller without the base asset or the TNK transfer fee, a buyer without the
+// USDC or the SOL for the escrow lock). The offer stays in the book and returns once the funds are there. A wallet
+// that could not be read never hides an offer.
+export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4;
+
+export class MakerFunds {
+  constructor({ solana, trac, now, log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
+    Object.assign(this, { solana, trac, now, log, ttlSec, readsAtOnce });
+    this.wallets = new Map();   // `${chain}:${address}` -> { balances, at } (balances null after a failed read)
+    this.reading = new Set();
+  }
+
+  // false only when a read showed too little; true or unknown keep the offer, and so does any error here.
+  funded(offer, pair) {
+    try { return this.#funded(offer, pair); } catch { return true; }
+  }
+
+  #funded(offer, pair) {
+    const min = BigInt(pair.minBaseAmount);
+    if (offer.side === 'sell') {
+      const b = this.#cached('trac', offer.maker.tracAddr);
+      if (!b) return true;
+      const base = pair.base.id, fee = BigInt(b.feeTnk);
+      if (base === 'TNK') return BigInt(b.TNK) >= min + fee;
+      return BigInt(b[base] ?? '0') >= min && BigInt(b.TNK) >= fee;
+    }
+    const b = this.#cached('solana', offer.maker.solAddr);
+    if (!b) return true;
+    return BigInt(b.USDC) >= BigInt(quoteAmount(pair, min.toString(), offer.price)) && BigInt(b.SOL) >= BigInt(MIN_SOL);
+  }
+
+  // Start reads for makers whose reading is missing or older than the TTL, a few at a time; never waits for them.
+  refresh(offers) {
+    const due = [];
+    for (const o of offers) {
+      const [chain, address] = o.side === 'sell' ? ['trac', o.maker.tracAddr] : ['solana', o.maker.solAddr];
+      const key = `${chain}:${address}`, w = this.wallets.get(key);
+      if (this.reading.has(key) || due.some(d => d.key === key) || (w && this.now() - w.at < this.ttlSec)) continue;
+      due.push({ key, chain, address });
+    }
+    for (const d of due.slice(0, Math.max(0, this.readsAtOnce - this.reading.size))) this.#read(d);
+  }
+
+  // The last balances read for this offer's maker (null when unread or unreadable).
+  balances(offer) {
+    return offer.side === 'sell' ? this.#cached('trac', offer.maker.tracAddr) : this.#cached('solana', offer.maker.solAddr);
+  }
+
+  forget(keep) {
+    for (const key of this.wallets.keys()) if (!keep.has(key)) this.wallets.delete(key);
+  }
+
+  #cached(chain, address) {
+    const w = this.wallets.get(`${chain}:${address}`);
+    return w && this.now() - w.at < 2 * this.ttlSec ? w.balances : null;
+  }
+
+  async #read({ key, chain, address }) {
+    this.reading.add(key);
+    try {
+      const balances = chain === 'trac' ? await this.trac.balances(address) : await this.solana.walletBalances(address);
+      this.wallets.set(key, { balances, at: this.now() });
+    } catch (e) {
+      this.wallets.set(key, { balances: null, at: this.now() });
+      this.log('funds read', chain, address.slice(0, 12), e.message);
+    } finally {
+      this.reading.delete(key);
+    }
+  }
+}

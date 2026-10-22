@@ -42,6 +42,18 @@ test('required exact and prefix channels enforce PoW even when open; missing, we
   assert.equal(delivered.length, 1); assert.equal(relayed.length, 1);
 });
 
+test('a handler error drops only that message: protomux would rethrow it and end the process', async t => {
+  const { sc, delivered, receive } = receiver({ openChannels: ['test'] });
+  const check = sc._checkInvite.bind(sc);
+  let fail = true;
+  t.mock.method(sc, '_checkInvite', (...args) => { if (fail) { fail = false; throw new TypeError('bad payload'); } return check(...args); });
+  const first = await sc._buildPayload('test', { content: 'one' }), second = await sc._buildPayload('test', { content: 'two' });
+  assert.doesNotThrow(() => receive(first));
+  assert.equal(delivered.length, 0);
+  receive(second);
+  assert.equal(delivered.length, 1);
+});
+
 test('owner-only enforcement applies to open channels, verifies the original signature and never relays strangers', async () => {
   const owner = wallet(), stranger = wallet();
   const { sc, receive, delivered, relayed } = receiver({ openChannels: ['test'], ownerWriteChannels: ['test'], ownerKeys: { test: owner.publicKey } }, { wallet: owner });

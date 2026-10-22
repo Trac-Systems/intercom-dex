@@ -153,6 +153,13 @@ export class TradeHost {
     if (resume) { trade.state.stepElapsedMs = 0; trade.state.connectedAtMs = null; }
     this.trades.set(trade.key, trade);
     this.#save(trade);
+    // A signer's finished trade that it no longer serves needs no channel: a restart that joined every stored trade's
+    // channel at once (hundreds of topics) held the heartbeats back for minutes.
+    if (this.#idleSigner(trade)) {
+      trade.channelsLeft = true;
+      if (resume) this.log('resumed', trade.key, trade.role, trade.state.phase);
+      return;
+    }
     // A published signer past its repeat schedule only answers share requests: a restart re-publishes nothing for it
     // (re-publishing every recent trade at once queued hundreds of work stamps ahead of the heartbeats).
     const quiet = this.#serving(trade) && ((trade.publicationDelay ?? 10) > PUBLICATION_LAST_DELAY_SEC ||
@@ -211,7 +218,7 @@ export class TradeHost {
   }
 
   #save(trade) {
-    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, ...record } = trade;
+    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, ...record } = trade;
     this.store.put(`trade-${trade.key}`, record);
   }
 
@@ -311,6 +318,23 @@ export class TradeHost {
   // A signer that published keeps serving its share until the escrow's refund time (sellers may reconnect late).
   #serving(trade) {
     return trade.role === 'signer' && trade.state.phase === 'published' && this.now() < trade.state.terms.refundAfter;
+  }
+
+  #idleSigner(trade) {
+    return trade.role === 'signer' && isFinished(trade) && !this.#serving(trade);
+  }
+
+  // Leave a channel once no trade of this host needs it; joined topics otherwise piled up for the whole uptime.
+  #leaveChannels(trade) {
+    trade.channelsLeft = true;
+    for (const ch of this.#channels(trade)) {
+      const keys = this.byChannel.get(ch);
+      keys?.delete(trade.key);
+      if (keys?.size) continue;
+      this.byChannel.delete(ch);
+      if (!this.joined.delete(ch)) continue;
+      Promise.resolve().then(() => this.bridge.leave(ch)).catch(e => this.log('leave', ch.slice(-8), e.message));
+    }
   }
 
   // Someone joined late: send them everything this identity already said on that channel (receivers drop repeats).
@@ -533,6 +557,7 @@ export class TradeHost {
         }
         continue;
       }
+      if (this.#idleSigner(trade) && !trade.channelsLeft) this.#leaveChannels(trade);
       if (isFinished(trade)) continue;
       this.#presence(trade);
       if (trade.role === 'seller' && s.phase === 'awaitShares' && s.shares.length < s.terms.k && now < s.terms.refundAfter &&

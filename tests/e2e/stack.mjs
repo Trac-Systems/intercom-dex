@@ -41,7 +41,10 @@ const oldRepo = process.env.DEX_E2E_OLD_REPO || null;
 const oldNames = new Set((process.env.DEX_E2E_OLD ?? '').split(',').filter(Boolean));
 if (oldNames.size && (!oldRepo || !path.isAbsolute(oldRepo))) throw new Error('Set DEX_E2E_OLD_REPO to an absolute checkout path');
 const OLD_SOFTWARE = oldNames.size ? JSON.parse(readFileSync(path.join(oldRepo, 'package.json'), 'utf8')).version : null;
-const codeOf = n => oldNames.has(n) ? oldRepo : repo;
+const codeMap = env => Object.fromEntries((process.env[env] ?? '').split(',').filter(Boolean).map(x => x.split('=')));
+const roleCode = codeMap('DEX_E2E_CODE'), peerCode = { ...roleCode, ...codeMap('DEX_E2E_PEER_CODE') };
+const codeOf = n => roleCode[n] ?? (oldNames.has(n) ? oldRepo : repo);
+const peerCodeOf = n => peerCode[n] ?? codeOf(n);
 const softwareOf = n => oldNames.has(n) ? OLD_SOFTWARE : SOFTWARE;
 const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ['wallets', 'reset-sell', 'tnk-buy', 'cheating-dealer', 'cheating-certificate', 'signers-offline', 'not-enough-signers', 'signers-vanish-before-ack', 'crowd', 'silent-taker', 'refund'];
 const relayMode = scenarios.some(n => ['relay', 'relay-none'].includes(n));
@@ -188,7 +191,7 @@ try {
     const faultFile = path.join(dirs[n], 'relay-faults.json');
     if (relayMode) await fs.writeFile(faultFile, JSON.stringify({ isolatedKey: peerKeys.bob, capture: n === 's1' }));
     const peerArgs = relayMode ? [path.join(repo, 'tests/e2e/relay-runner.mjs'), '--config', file, '--faults', faultFile] : ['scripts/pear-runner.mjs', '--config', file];
-    const p = launch(`peer-${n}`, process.execPath, peerArgs, { cwd: path.join(codeOf(n), 'peer'), logDir, marker: 'DEX_PEER_READY',
+    const p = launch(`peer-${n}`, process.execPath, peerArgs, { cwd: path.join(peerCodeOf(n), 'peer'), logDir, marker: 'DEX_PEER_READY',
       env: { PEAR_RUNNER_STDIN: '0', DEX_LEGACY_PEAR_RUN: '0', XDG_CONFIG_HOME: path.join(dirs[n], 'pear-config'), XDG_DATA_HOME: path.join(dirs[n], 'pear-data') } });
     stops.push(p.stop);
     bridges[n] = { url: `ws://127.0.0.1:${bridgePort}`, tokenFile, ready: p.ready };

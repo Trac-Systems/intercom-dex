@@ -52,6 +52,19 @@ export class OfferBook {
     if (o.remaining <= 0n) this.offers.delete(offerId);
   }
 
+  // Saved by the venue so a restart keeps the offers it already verified; restore keeps those still inside the window.
+  saved() {
+    return { offers: [...this.offers.values()].map(o => ({ ...o, remaining: o.remaining.toString() })), cancelled: [...this.cancelled] };
+  }
+
+  restore(saved, now) {
+    for (const [id, expiry] of saved?.cancelled ?? []) if (expiry > now) this.cancelled.set(id, expiry);
+    for (const o of saved?.offers ?? []) {
+      if (o.expiresAt <= now || now - o.lastSeen >= 300 || this.cancelled.has(o.offerId) || BigInt(o.remaining) <= 0n) continue;
+      this.offers.set(o.offerId, { ...o, remaining: BigInt(o.remaining) });
+    }
+  }
+
   get(offerId, now) {
     const o = this.offers.get(offerId);
     return o && o.expiresAt > now && now - o.lastSeen < OFFER_FRESH_SEC ? o : null;

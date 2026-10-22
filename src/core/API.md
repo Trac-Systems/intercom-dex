@@ -864,7 +864,9 @@ balances after either no lock or a refund.
 - Full `book:{pair,registryVersion,ts,seq,levels,remaining?}` uses at most 50 aggregated levels
   per side. Levels are `{side,price,baseAmount,offers}`; `offers` is a count.
   Only full books accept optional `remaining: [{offerId,amount}]`, at most 200 unique IDs with base-unit
-  integer strings. The venue includes the first 200 open offers in its existing book order. Neither books
+  integer strings. The venue includes the first 200 open offers in its existing book order, leaving out offers
+  whose maker's wallet cannot fund the pair's smallest trade (seller: the base asset and the 0.03 TNK transfer
+  fee; buyer: the USDC and 0.01 SOL; read at most every 300 s, an unreadable wallet hides nothing). Neither books
   nor deltas contain offer bodies; listeners obtain these from maker-signed `intercom-dex:offers` announcements.
   `bookDelta:{pair,seq,upserts,removes}` is cumulative against that full snapshot;
   removes are `{side,price}`. The envelope timestamp orders deltas within one seq.

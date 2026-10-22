@@ -351,7 +351,9 @@ before 0.1.14), and book observations expire after 300 seconds. A take at a pric
 recently (within 70 seconds for offers made by 0.1.14 or later, 150 seconds for older ones), oldest offer first. Full books also publish compact `remaining` rows (at most 200 unique
 offer IDs and base-unit integer amount strings); deltas carry only level changes. Offer bodies come from the
 makers' announcements. The market feed's individual `left` is null until known from a full book; offers missing
-from a newer full book's `remaining` for their pair are removed.
+from a newer full book's `remaining` for their pair are removed. The venue leaves an offer out of its books while
+the maker's wallet cannot fund the pair's smallest trade (it reads makers' wallets at most every 300 seconds; a
+wallet it cannot read hides nothing), and keeps its book across restarts.
 
 ## 12. Transport limits, proof-of-work and relays
 

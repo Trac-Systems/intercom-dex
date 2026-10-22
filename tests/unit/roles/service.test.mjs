@@ -635,18 +635,70 @@ test('service status announces software and latest metadata without starting wor
   assert.equal(s.service.host.trades.size, 0); assert.equal(s.calls.escrow, 0);
 });
 
-test('service requests missing committee shares at most every ten minutes until refund', async () => {
+test('service requests missing committee shares of logged settlements at most every ten minutes until refund', async () => {
   const s = setup({ immediate: true }), trade = s.trade();
   await s.service.start(); s.service.stop(); await s.summon(trade);
   const requests = () => s.bridge.sent.filter(x => x.envelope.kind === 'shareRequest');
-  await s.service.reconcile(); assert.equal(requests().length, 1);
+  await s.service.reconcile(); assert.equal(requests().length, 0, 'a summoned trade without a logged settlement is not asked about');
+  s.clock.t += 600; await s.service.reconcile(); assert.equal(requests().length, 0);
+  await s.report(trade); await s.service.reconcile();
+  assert.equal(s.service.settlements.get(trade.id).status, 'logged'); assert.equal(requests().length, 1);
   await s.service.reconcile(); assert.equal(requests().length, 1);
   s.clock.t += 599; await s.service.reconcile(); assert.equal(requests().length, 1);
   s.clock.t++; await s.service.reconcile(); assert.equal(requests().length, 2);
   for (let i = 1; i <= 5; i++) await s.publish(trade, i, trade.shares[i - 1]);
   s.clock.t += 600; await s.service.reconcile(); assert.equal(requests().length, 2);
-  const second = s.trade(); await s.summon(second); s.clock.t = second.terms.refundAfter;
+  const second = s.trade(); await s.summon(second); await s.report(second); s.clock.t = second.terms.refundAfter;
   await s.service.reconcile(); assert.equal(requests().length, 2);
+});
+
+test('only signers of the current registry count as online; other heartbeats are not kept', async () => {
+  const s = setup({ immediate: true });
+  await s.service.start(); s.service.stop();
+  const beat = identity => s.emit(SIGNERS, s.envelope(identity, 'heartbeat', { registryVersion: s.service.registry.version, software: '0.1.0', status: 'online', holdCount: 0 }, SIGNERS));
+  const listed = s.f.signers[0].identity;
+  await beat(listed); await beat(s.f.buyer);
+  assert.deepEqual(s.service.status().signersOnline, [encodeKey(listed.publicKey)]);
+  assert.equal(s.service.heartbeats.size, 1);
+  s.clock.t += 90; assert.deepEqual(s.service.status().signersOnline, []);
+});
+
+test('an offer whose maker cannot fund the smallest trade is left out of the published book until funds arrive', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  let tnk = '0';
+  s.service.funds.trac = { balances: async () => ({ TNK: tnk, RESET: '0', feeTnk: '30000000000000000' }) };
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)); };
+  const shown = () => {
+    const last = s.bridge.sent.filter(x => ['book', 'bookDelta'].includes(x.envelope.kind) && x.envelope.body.pair === s.offer.pair).at(-1)?.envelope;
+    return last?.kind === 'book' ? last.body.remaining.map(r => r.offerId) : last;
+  };
+  await tick(5); assert.deepEqual(shown(), [s.offer.offerId], 'shown until its wallet was read');
+  await tick(5); await tick(60);
+  assert.deepEqual(shown(), [], 'an empty wallet hides the offer');
+  assert.equal(s.service.status().unfunded[s.offer.pair], 1);
+  assert.equal(s.service.book.snapshot(s.offer.pair, s.clock.t).length, 1, 'the offer itself stays');
+  tnk = '1000000000000000000'; await tick(300);
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS)); await tick(60);
+  assert.deepEqual(shown(), [s.offer.offerId]);
+  assert.equal(s.service.status().unfunded[s.offer.pair], 0);
+});
+
+test('a restarted venue keeps its book: offers seen in the last five minutes return, cancelled and stale ones do not', async () => {
+  const s = setup({ immediate: true }); await s.service.start();
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  s.service.book.fill(s.offer.offerId, '1000000000000000000');
+  s.service.stop();
+  const again = setup({ dir: s.dir, immediate: true, clock: s.clock });
+  const [kept] = again.service.book.snapshot(s.offer.pair, s.clock.t);
+  assert.equal(kept.offerId, s.offer.offerId); assert.equal(kept.baseAmount, '2000000000000000000');
+  s.clock.t += 300;
+  assert.equal(setup({ dir: s.dir, immediate: true, clock: s.clock }).service.book.snapshot(s.offer.pair, s.clock.t).length, 0, 'not heard for five minutes');
+  s.clock.t -= 300;
+  await again.service.start(); await again.emit(OFFERS, again.envelope(s.f.seller, 'cancel', { offerId: s.offer.offerId }, OFFERS)); again.service.stop();
+  assert.equal(setup({ dir: s.dir, immediate: true, clock: s.clock }).service.book.snapshot(s.offer.pair, s.clock.t).length, 0, 'cancelled');
 });
 
 test('service schedules full books at sixty seconds and sends only changed deltas between them', async t => {

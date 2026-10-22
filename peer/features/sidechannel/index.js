@@ -2,36 +2,57 @@ import Feature from 'trac-peer/src/artifacts/feature.js';
 import b4a from 'b4a';
 import c from '../../node_modules/compact-encoding/index.js';
 
-// Charge the frame before decoding; skip oversized or deeply nested JSON before parsing its text.
+// Charge the frame before decoding; skip oversized or deeply nested JSON before parsing its text. A frame that is not
+// well-formed JSON fails with a plain Error, so protomux closes only that connection: it rethrows SyntaxError and
+// RangeError (safety-catch), which would end the whole process.
 const boundedJson = (limit, charge) => ({
   preencode: c.json.preencode,
   encode: c.json.encode,
   decode(state) {
-    if (!charge(state.end - state.start)) { state.start = state.end; return null; }
-    const start = state.start;
-    const length = c.uint.decode(state);
-    if (length > limit) {
-      state.start = Math.min(state.end, state.start + length);
-      return null;
+    try {
+      return decodeBounded(state, limit, charge);
+    } catch (e) {
+      throw new Error(`Malformed sidechannel frame: ${e?.message ?? e}`);
     }
-    const end = state.start + length;
-    if (end > state.end) throw new RangeError('Truncated JSON frame');
-    let depth = 0, quoted = false, escaped = false;
-    for (let i = state.start; i < end; i++) {
-      const byte = state.buffer[i];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (byte === 92) escaped = true;
-        else if (byte === 34) quoted = false;
-      } else if (byte === 34) quoted = true;
-      else if (byte === 123 || byte === 91) {
-        if (++depth > 32) { state.start = end; return null; }
-      } else if (byte === 125 || byte === 93) depth--;
-    }
-    state.start = start;
-    return c.json.decode(state);
   }
 });
+
+function decodeBounded(state, limit, charge) {
+  if (!charge(state.end - state.start)) { state.start = state.end; return null; }
+  const start = state.start;
+  const length = c.uint.decode(state);
+  if (length > limit) {
+    state.start = Math.min(state.end, state.start + length);
+    return null;
+  }
+  const end = state.start + length;
+  if (end > state.end) throw new RangeError('Truncated JSON frame');
+  let depth = 0, quoted = false, escaped = false;
+  for (let i = state.start; i < end; i++) {
+    const byte = state.buffer[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (byte === 92) escaped = true;
+      else if (byte === 34) quoted = false;
+    } else if (byte === 34) quoted = true;
+    else if (byte === 123 || byte === 91) {
+      if (++depth > 32) { state.start = end; return null; }
+    } else if (byte === 125 || byte === 93) depth--;
+  }
+  state.start = start;
+  return c.json.decode(state);
+}
+
+// One peer's message must never end the process: a handler error drops that message (protomux would rethrow a
+// TypeError from the handler, and a rejected promise reaches the same path).
+const guarded = (onError, handler) => (payload) => {
+  try {
+    const result = handler(payload);
+    return result && typeof result.then === 'function' ? result.catch(onError) : result;
+  } catch (e) {
+    onError(e);
+  }
+};
 import crypto from 'crypto';
 import { powWorker } from './pow-client.js';
 import PeerWallet from 'trac-wallet';
@@ -886,7 +907,9 @@ class Sidechannel extends Feature {
 
     const message = channel.addMessage({
       encoding: boundedJson(this.maxMessageBytes, bytes => this._checkRate(connection, bytes)),
-      onmessage: (payload) => {
+      onmessage: guarded((e) => {
+        if (this.debug) console.log(`[sidechannel:${entry.name}] drop (handler error) ${e?.message ?? e}`);
+      }, (payload) => {
         if (!current() || perConn.get(entry.name) !== record || channel.closed || channel.destroyed) return;
         if (payload === null || this._isBlocked(connection)) return;
         let payloadJson = null;
@@ -1037,7 +1060,7 @@ class Sidechannel extends Feature {
           }
         }
         this._relay(entry.name, payload, connection);
-      }
+      })
     });
 
     record = { channel, message, authSent: false };
