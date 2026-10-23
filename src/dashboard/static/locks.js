@@ -2,7 +2,7 @@
 // or offers next to an order ticket, and one bottom panel with the reader's positions and activity. Data from
 // /api/locks/*; with ?locksDemo=1 in the address every locks call is answered by locks-demo.js instead.
 import { h, fill, relative, amt } from './dom.js';
-import { show } from './dialogs.js';
+import { show, begin } from './dialogs.js';
 import { virtualList, serverList } from './vlist.js';
 import { demoApi, demoState } from './locks-demo.js';
 import { TERMS, ASSETS, blockNo, short, money, plain, positive, addDecimal, mulDecimal, isDone, isLoan, isPaid, assetOf, actionOf, TAKE,
@@ -181,29 +181,30 @@ function choice(cls, items, key, fallback, onPick, aria) {
 const race = onRace => { onRace?.(); show(h('h3', null, 'Already taken'), h('p', null, RACE), h('div', { class: 'actions' }, close())); };
 const failed = (heading, e) => show(h('h3', null, heading), line('error', errorText(e)), h('div', { class: 'actions' }, close()));
 async function step({ heading, input, rows = [], risk, more, done, onRace, onDone }) {
-  show(h('h3', null, heading), h('p', { class: 'muted' }, 'Checking…'));
+  const live = begin(h('h3', null, heading), h('p', { class: 'muted' }, 'Checking…'));
   const preview = () => call('/api/locks/preview', input);
   let p, timer = 0;
-  try { p = await preview(); } catch (e) { return raced(e) ? race(onRace) : failed(heading, e); }
-  draw();
+  try { p = await preview(); } catch (e) { return live() && (raced(e) ? race(onRace) : failed(heading, e)); }
+  if (live()) draw();
   function draw(note) {
     clearTimeout(timer);
     const confirm = h('button', { class: 'primary', type: 'button', onclick: async () => {
       clearTimeout(timer); confirm.disabled = true; confirm.textContent = 'Working…';
       try {
         const r = await call('/api/locks/act', { ...(p.input ?? input), confirm: p.confirm });
-        show(h('h3', null, 'Done'), h('p', null, r.result?.text ?? done), h('div', { class: 'actions' }, close()));
         onDone?.(); refreshNow();
+        if (live()) show(h('h3', null, 'Done'), h('p', null, r.result?.text ?? done), h('div', { class: 'actions' }, close()));
       } catch (e) {
-        if (e.reason === 'confirmation_expired') { try { p = await preview(); return draw('Refreshed. Check and confirm again.'); } catch (e2) { e = e2; } }
-        raced(e) ? race(onRace) : failed('It did not go through', e);
+        if (e.reason === 'confirmation_expired') { try { p = await preview(); if (live()) draw('Refreshed. Check and confirm again.'); return; } catch (e2) { e = e2; } }
+        if (live()) raced(e) ? race(onRace) : failed('It did not go through', e);
       }
     } }, 'Confirm');
     show(h('h3', null, heading), kvTable([...rows, ...feeTable(p.fees)]),
       h('p', { class: 'lk-risk' }, risk, tip([p.sentence, more].filter(Boolean), 'In full')),
       note ? h('p', { class: 'lk-msg' }, note) : null,
       h('div', { class: 'actions' }, confirm, h('button', { type: 'button', onclick: () => document.querySelector('#dialog').close() }, 'Back')));
-    timer = setTimeout(async () => { if (!confirm.isConnected || confirm.disabled) return; try { p = await preview(); if (confirm.isConnected) draw(); } catch { /* Confirm refreshes it */ } }, REFRESH_MS);
+    // The quiet refresh only redraws a dialog that is still open on this step; a closed one stays closed.
+    timer = setTimeout(async () => { if (!live() || confirm.disabled) return; try { p = await preview(); if (live() && !confirm.disabled) draw(); } catch { /* Confirm refreshes it */ } }, REFRESH_MS);
   }
 }
 
