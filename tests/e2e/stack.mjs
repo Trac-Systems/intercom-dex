@@ -11,7 +11,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { fileURLToPath } from 'node:url';
 import { resetSourceURL } from '../reset-source.mjs';
 import { getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction, createMintToInstruction } from '@solana/spl-token';
-import { startValidator, setupMarket, send, balance, LOCAL_RPC } from '../integration/solana/harness.mjs';
+import { startIsolatedValidator, setupMarket, send, balance } from '../integration/solana/harness.mjs';
 import { createWallet } from '../../src/trac/wallet.js';
 import PeerWallet from '../../peer/node_modules/trac-wallet/index.js';
 import { MIN_SOL, MIN_TNK, MSB_FEE } from '../../src/wallets/accounting.js';
@@ -31,7 +31,7 @@ import { createKeyring } from '../../src/roles/keyring.js';
 import { calculateFees, deriveEscrowPda } from '../../src/solana/escrow.js';
 import { waitForControl } from './control-ready.mjs';
 
-const { startDevnet } = await import(resetSourceURL('scripts/lib/devnet-network.mjs'));
+import { startLocalDevnet } from '../integration/trac/local-devnet.mjs';
 const { beaconOptions } = await import(resetSourceURL('tests/helpers/chain.mjs'));
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -117,8 +117,9 @@ try {
     await fs.writeFile(certificateFile, JSON.stringify(await proveLock({ secretHex: d.privateState.secretHex, statement: lockStatement(d.deal) }, { zkeyPath })));
   }
   // Solana: local validator with the mainnet program, a local USDC-like mint, platform (10 bps) and venue (50 bps).
-  const validator = await startValidator({ maxLifetimeMs: 3 * 3600 * 1000 });
+  const validator = await startIsolatedValidator({ maxLifetimeMs: 3 * 3600 * 1000 });
   stops.push(() => validator.stop());
+  const LOCAL_RPC = validator.rpc;
   const market = await setupMarket(validator);
   const { connection, mint } = market;
   const extraTraders = [...(scenarios.some(n => ['crowd', 'silent-taker'].includes(n)) ? ['charlie', 'dana', 'erin'] : []), ...(scenarios.includes('wallets') ? ['autowallet'] : [])];
@@ -141,7 +142,8 @@ try {
   log('solana ready; mint', mint.toBase58());
 
   // RESET devnet.
-  const network = await startDevnet({ pear: true, cleanup: false });
+  const tracArea = path.join(repo, '.test-tmp/trac'); await fs.mkdir(tracArea, { recursive: true });
+  const network = await startLocalDevnet(await fs.mkdtemp(path.join(tracArea, 'spot-')));
   stops.push(() => network.close());
   const manifest = network.manifest;
   log('devnet ready');

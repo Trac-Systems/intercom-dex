@@ -1,6 +1,7 @@
 import ScBridge from './sc-bridge/index.js';
 import { peerPresent } from './dex-presence.js';
 import b4a from 'b4a';
+import { handleLocksJoin } from './locks-bridge.js';
 
 export const DEX_CHANNELS = ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signers', 'intercom-dex:chat'];
 const TRADE_CHANNEL = /^intercom-dex:t:[0-9a-f]{64}$/;
@@ -135,6 +136,7 @@ export default class DexBridge extends ScBridge {
   }
 
   _handleClientMessage(client, message) {
+    if (handleLocksJoin(this, client, message)) return;
     const type = message?.type;
     if (!['dex_join', 'dex_presence', 'dex_warm', 'leave', 'relays.set', 'relays.stats'].includes(type) && !Object.hasOwn(this.handlers, type)) return super._handleClientMessage(client, message);
     const reply = (payload) => this._broadcastToClient(client, Number.isInteger(message.id) ? { id: message.id, ...payload } : payload);

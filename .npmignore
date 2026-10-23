@@ -1,0 +1,16 @@
+node_modules
+.local/
+.test-tmp/
+data/
+dex-data/
+peer-data/
+logs/
+*.log
+.npm-cache/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+docs/LOCKS-SPEC.md

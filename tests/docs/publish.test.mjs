@@ -12,20 +12,20 @@ const rules = [
   ['process wording', /\b(?:brie[f]s?|second[- ]revie[w]|core[- ]fixe[s])\b|\b(?:review|round|finding)\s*#?\d+\b/i],
   ['process attribution', /\b(?:primar[y]|helpe[r]|owne[r]|agen[t])\s+(?:said|asked|requested|reviewed|replaced|fixed|implemented|approved|instructed)\b/i],
   ['development tooling', /\b(?:code[x]|claud[e]|opu[s]|sonne[t]|haik[u]|astr[a]|gemin[i]|gp[t][- ]?\d*|openmayhe[m]|opena[i]|windsur[f])\b|\bcurso[r]\s+(?:AI|IDE|editor|MCP)\b/i],
-  ['machine identity', /\b(?:muffi[n]|playba[y]|castaway[s])\b|MAYHEM_INTERCO[M]/i],
+  ['machine identity', /\b(?:muffi[n]|playba[y](?!\.games\/games\/)|castaway[s])\b|MAYHEM_INTERCO[M]/i],
   ['historical wording', /\b(?:previousl[y]|used t[o]|was vulnerabl[e]|regressio[n](?: for)?|the old (?:harness|implementation))\b/i],
   ['publication wording', /\b(?:local[- ]onl[y]|not publishe[d]|unpublishe[d])\b/i],
   ['private hostname', /\b(?:[a-z0-9-]+\.)+(?:interna[l]|loca[l]|la[n])\b(?!\.[a-z])/i],
 ];
 const publicHosts = new Set([
-  'nodejs.org', 'github.com', 'explorer.solana.com', 'circom.info', 'www.tradingview.com', 'reset.much.fun', 'www.apache.org', 'www.w3.org',
+  'nodejs.org', 'github.com', 'explorer.solana.com', 'circom.info', 'www.tradingview.com', 'reset.much.fun', 'play' + 'bay.games', 'www.apache.org', 'www.w3.org',
   'api.mainnet-beta.solana.com', 'public.rpc.solanavibestation.com', 'solana.api.pocket.network',
   'solana.leorpc.com', 'rpc.solanatracker.io', 'solana-rpc.publicnode.com',
   ['reset', 'open' + 'mayhem', 'ai'].join('.'),
 ]);
 const bootstrapIPs = [[116, 202, 214, 149], [157, 180, 12, 214]].map(parts => parts.join('.'));
 const localIP = ip => /^127\.\d+\.\d+\.\d+$/.test(ip) || ip === '0.0.0.0' || /^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.\d+$/.test(ip);
-const excluded = file => /(^|\/)package-lock\.json$/.test(file) || file.startsWith('peer/vendor/reset/');
+const excluded = file => file === 'docs/LOCKS-SPEC.md' || /(^|\/)package-lock\.json$/.test(file) || file.startsWith('peer/vendor/reset/');
 const privateFile = file => /(^|\/)(?:node_modules|\.test-tmp|\.local|data|dex-data|peer-data|logs|\.idea|\.vscode)(\/|$)|(?:\.log|\.sw[op]|~)$|(^|\/)\.DS_Store$/i.test(file);
 
 function checkText(file, text) {
@@ -99,6 +99,9 @@ test('release text checks allow protocol terms, generated fixtures and exact pub
   assert.equal(excluded('peer/vendor/reset/contract/contract.js'), true);
   assert.equal(excluded('peer/package-lock.json'), true);
   assert.equal(excluded('package.json'), false);
+  assert.equal(excluded('docs/LOCKS-SPEC.md'), true);
+  assert.match(readFileSync(join(root, '.gitattributes'), 'utf8'), /^docs\/LOCKS-SPEC\.md export-ignore$/m);
+  assert.match(readFileSync(join(root, '.npmignore'), 'utf8'), /^docs\/LOCKS-SPEC\.md$/m);
   assert.equal(excluded('src/core/API.md'), false);
   for (const file of ['.local/note.md', '.test-tmp/capture.json', 'data/wallet.json', '.vscode/settings.json', 'run.log']) assert.equal(privateFile(file), true);
 });

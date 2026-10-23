@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountBalances, amountUnits, withdrawalDestination, validatePayout, MIN_SOL, MIN_TNK } from './accounting.js';
+import { accountBalances, accountLockBalances, amountUnits, withdrawalDestination, validatePayout, MIN_SOL, MIN_TNK } from './accounting.js';
 import { walletFile, rpcAdvice } from './setup.js';
 import { SystemProgram } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
@@ -43,15 +43,16 @@ export class WalletManager {
 
   state() {
     return { offers: [...(this.role.mine?.values() ?? [])], trades: [...(this.role.host?.trades.values() ?? [])].map(t => ({ role: t.role, state: t.state })),
-      withdrawals: this.pending() };
+      withdrawals: this.pending(), ...(this.role.locks ? { locks: [...this.role.locks.positions.values()] } : {}) };
   }
 
-  async balances() {
+  async balances({ positionId = null } = {}) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const before = JSON.stringify(this.state()), balances = await this.raw(), state = this.state();
       if (before !== JSON.stringify(state)) continue;
-      const result = accountBalances({ balances, ...state, trader: this.config.role === 'trader', feeTnk: balances.feeTnk,
+      let result = accountBalances({ balances, ...state, trader: this.config.role === 'trader', feeTnk: balances.feeTnk,
         registry: version => this.role.registry.snapshot(version) });
+      if (this.role.locks) result = accountLockBalances(result, state.locks.filter(p => p.positionId !== positionId), this.role.locks.me.lockKey, balances.feeTnk);
       if (balances.collectors) Object.assign(result.USDC, { collectedFees: balances.collectedFees, collectors: balances.collectors });
       return result;
     }

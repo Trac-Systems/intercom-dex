@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import net from 'node:net';
+import dgram from 'node:dgram';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { resolve } from 'node:path';
@@ -18,17 +20,39 @@ export const LOCAL_RPC = 'http://127.0.0.1:18899';
 
 // maxLifetimeMs: a stuck test can never leave a validator behind (SIGKILL after this long).
 export async function startValidator({ maxLifetimeMs = 140000 } = {}) {
+  return validator({ maxLifetimeMs, ports: { rpc: 18899, faucet: 19900, gossip: 18001, dynamic: 18010 } });
+}
+
+export async function startIsolatedValidator({ maxLifetimeMs = 140000 } = {}) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const base = 20000 + Math.floor(Math.random() * 30000), held = [];
+    try {
+      for (const port of [base, base + 1, base + 2, base + 3, ...Array.from({ length: 51 }, (_, i) => base + 10 + i)]) {
+        const tcp = net.createServer(); held.push(() => new Promise(r => tcp.close(r)));
+        await new Promise((r, j) => { tcp.once('error', j); tcp.listen(port, '127.0.0.1', r); });
+        const udp = dgram.createSocket('udp4'); held.push(() => new Promise(r => udp.close(r)));
+        await new Promise((r, j) => { udp.once('error', j); udp.bind(port, '127.0.0.1', r); });
+      }
+    } catch { await Promise.allSettled(held.map(close => Promise.resolve().then(close))); continue; }
+    await Promise.allSettled(held.map(close => Promise.resolve().then(close)));
+    return validator({ maxLifetimeMs, ports: { rpc: base, faucet: base + 2, gossip: base + 3, dynamic: base + 10 } });
+  }
+  throw new Error('No free validator port range');
+}
+
+async function validator({ maxLifetimeMs, ports, existing = null, warpSlot = null }) {
+  const rpc = `http://127.0.0.1:${ports.rpc}`;
   const artifactDir = process.env.DEX_SOLANA_TEST_DIR ?? resolve(root, '.test-tmp/solana');
   await mkdir(artifactDir, { recursive: true });
-  const runDir = await mkdtemp(resolve(artifactDir, 'ledger-'));
-  const buyer = Keypair.generate();
+  const runDir = existing?.runDir ?? await mkdtemp(resolve(artifactDir, 'ledger-'));
+  const buyer = existing?.buyer ?? Keypair.generate();
   const config = resolve(runDir, 'cli.yml');
-  await writeFile(config, `json_rpc_url: ${LOCAL_RPC}\nwebsocket_url: ''\nkeypair_path: ${runDir}/unused.json\ncommitment: confirmed\n`);
+  await writeFile(config, `json_rpc_url: ${rpc}\nwebsocket_url: ''\nkeypair_path: ${runDir}/unused.json\ncommitment: confirmed\n`);
   const output = createWriteStream(resolve(runDir, 'process.log'));
   const child = spawn('solana-test-validator', [
     '--config', config, '--bind-address', '127.0.0.1', '--gossip-host', '127.0.0.1',
-    '--rpc-port', '18899', '--faucet-port', '19900', '--gossip-port', '18001',
-    '--dynamic-port-range', '18010-18060', '--ledger', resolve(runDir, 'ledger'), '--reset', '--quiet',
+    '--rpc-port', String(ports.rpc), '--faucet-port', String(ports.faucet), '--gossip-port', String(ports.gossip),
+    '--dynamic-port-range', `${ports.dynamic}-${ports.dynamic + 50}`, '--ledger', resolve(runDir, 'ledger'), ...(existing ? ['--warp-slot', String(warpSlot)] : ['--reset']), '--quiet',
     '--mint', buyer.publicKey.toBase58(), '--bpf-program', PROGRAM_ID.toBase58(), resolve(root, 'vendor/ln_usdt_escrow.mainnet.so'),
   ], { cwd: runDir, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
@@ -68,18 +92,32 @@ export async function startValidator({ maxLifetimeMs = 140000 } = {}) {
     let healthy = false;
     while (Date.now() < deadline) {
       if (ended) throw new Error(`${exitDescription}; see ${runDir}/ledger/validator.log`);
-      try { healthy = await rpcCall(LOCAL_RPC, 'getHealth', [], { timeoutMs: 500 }) === 'ok'; }
+      try { healthy = await rpcCall(rpc, 'getHealth', [], { timeoutMs: 500 }) === 'ok'; }
       catch { /* Startup is not ready yet. */ }
       if (healthy) break;
       await delay(200);
     }
     if (!healthy) throw new Error(`Validator startup timed out; see ${runDir}/ledger/validator.log`);
-    const connection = new Connection(LOCAL_RPC, {
+    const connection = new Connection(rpc, {
       commitment: 'confirmed', disableRetryOnRateLimit: true,
       fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(3000)]) }),
     });
     if (await connection.getBalance(buyer.publicKey) === 0) throw new Error('RPC did not serve this test genesis');
-    return { connection, buyer, pid: child.pid, runDir, stop };
+    return { connection, buyer, rpc, pid: child.pid, runDir, stop,
+      async warp(seconds) {
+        if (!Number.isSafeInteger(seconds) || seconds < 1) throw new Error('Positive warp duration required');
+        const slot = await connection.getSlot('finalized');
+        await stop();
+        const target = slot + Math.ceil(seconds / 0.2);
+        const resumed = await validator({ maxLifetimeMs, ports, existing: { runDir, buyer }, warpSlot: target });
+        const end = Date.now() + 45000;
+        while (await resumed.connection.getSlot('finalized') <= target) {
+          if (Date.now() >= end) { await resumed.stop(); throw new Error('Warp finality timeout'); }
+          await delay(250);
+        }
+        return resumed;
+      },
+    };
   } catch (error) { await stop(); throw error; }
 }
 

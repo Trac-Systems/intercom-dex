@@ -4,7 +4,9 @@ import { openSync, writeSync, fsyncSync, closeSync, renameSync, readFileSync, re
 import { join, extname } from 'node:path';
 import { createModel } from './model.js';
 import { createNextOffer } from './next-offer.js';
-import { createActions, createConfirmations } from './actions.js';
+import { createActions, createConfirmations, createLockActions } from './actions.js';
+import { createLocksModel } from './model.js';
+import { lockError, errorResult } from '../locks/position.js';
 import { TrafficLog } from './traffic.js';
 import { decimalAmount } from './format.js';
 import { priceUnits } from '../market/assets.js';
@@ -187,6 +189,7 @@ export function dashboardHandler({ token, port, model, actions, confirmations, t
     res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   };
   const routes = {
+    ...createLocksRoutes({ model: model?.locks, actions: actions?.locks, confirmations, log }),
     'GET /api/state': async () => {
       const state = await model.state();
       if (state.trader?.pairs.length) {
@@ -254,6 +257,58 @@ export function dashboardHandler({ token, port, model, actions, confirmations, t
         if (req.method === 'GET') log('dashboard', url.pathname, error.message);
         send(res, error.status ?? 400, { error: error.message });
       }
+    });
+  };
+}
+
+// The same routes serve dashboard cookies and control bearer authentication.
+export function createLocksRoutes({ model, actions, confirmations = null, log = () => {} }) {
+  const run = fn => async (...args) => {
+    try { if (!model || !actions) throw lockError('locks_disabled'); return await fn(...args); }
+    catch (error) {
+      // A malformed request is a form problem; anything else is shown as it happened and logged.
+      const result = errorResult(error.status === 400 && !error.reason ? lockError('invalid_input', `${error.message}.`) : error);
+      if (result.reason === 'unexpected') log('locks', error?.stack ?? String(error));
+      return result;
+    }
+  };
+  return {
+    'GET /api/locks': run(url => {
+      const q = query(url, ['asset', 'product', 'page', 'minSize', 'maxSize', 'minTerm', 'maxTerm']);
+      return model.list({ ...q, page: integer(q.page, 'page', 0, 0, 1000000),
+        minTerm: integer(q.minTerm, 'minTerm', undefined, 0, Number.MAX_SAFE_INTEGER), maxTerm: integer(q.maxTerm, 'maxTerm', undefined, 0, Number.MAX_SAFE_INTEGER) });
+    }),
+    'GET /api/locks/mine': run(url => { const q = query(url, ['positionId', 'asset']); if (q.asset && !['RESET', 'TNK'].includes(q.asset)) throw lockError('invalid_input'); return model.mine(q.positionId, q.asset); }),
+    'GET /api/locks/events': run(url => { const q = query(url, ['since', 'asset']); if (q.asset && !['RESET', 'TNK'].includes(q.asset)) throw lockError('invalid_input'); return model.events(integer(q.since, 'since', 0, 0, Number.MAX_SAFE_INTEGER), q.asset); }),
+    'GET /api/locks/settings': run(url => { const q = query(url, ['asset']); if (q.asset && !['RESET', 'TNK'].includes(q.asset)) throw lockError('invalid_input'); return model.settings(); }),
+    'POST /api/locks/settings': run(body => { if (body.asset && !['RESET', 'TNK'].includes(body.asset)) throw lockError('invalid_input'); return model.setSettings(body); }),
+    'POST /api/locks/preview': run(async body => {
+      const preview = await actions.preview(body.action, body.input ?? body);
+      return { ...preview, ...(confirmations ? { confirm: confirmations.issue(`locks:${body.action}`, preview.input) } : {}) };
+    }),
+    'POST /api/locks/act': run(async body => {
+      if (confirmations) confirmations.consume(`locks:${body.action}`, { action: body.action, ...actions.normalize(body.action, body.input ?? body) }, body.confirm);
+      return { ok: true, result: await actions.run(body.action, body.input ?? body) };
+    }),
+  };
+}
+
+// Compose with the existing control handler. This export does not open a socket.
+export function locksControlHandler({ token, client, fallback = (_req, res) => { res.writeHead(404); res.end(); } }) {
+  const routes = createLocksRoutes({ model: client && createLocksModel(client), actions: client && createLockActions(client) });
+  return (req, res) => {
+    let url;
+    try { url = new URL(req.url, 'http://127.0.0.1'); } catch { res.writeHead(400); res.end(); return; }
+    const route = routes[`${req.method} ${url.pathname}`];
+    if (!route) return fallback(req, res);
+    const reply = (code, value) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
+    if (!same(req.headers.authorization, `Bearer ${token}`)) return reply(401, { error: 'unauthorized' });
+    let body = '', tooLarge = false;
+    req.on('data', chunk => { body += chunk; if (Buffer.byteLength(body) > MAX_BODY) { tooLarge = true; req.destroy(); } });
+    req.on('end', async () => {
+      if (tooLarge) return;
+      try { reply(200, await route(req.method === 'POST' ? JSON.parse(body || '{}') : url)); }
+      catch (error) { reply(400, errorResult(error)); }
     });
   };
 }

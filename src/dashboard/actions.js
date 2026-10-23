@@ -6,6 +6,7 @@ import { amountUnits, withdrawalDestination } from '../wallets/accounting.js';
 import { amount, shortKey } from './format.js';
 import { withdrawalView } from './model.js';
 import { STALE_OFFER_MESSAGE } from '../market/book.js';
+import { lockError } from '../locks/position.js';
 
 export const CONFIRM_TTL_MS = 120000;
 const HEX64 = /^[0-9a-f]{64}$/, PRICE = /^(0|[1-9][0-9]*)(\.[0-9]{1,12})?$/;
@@ -21,9 +22,9 @@ export function createConfirmations({ secret = randomBytes(32), clock = () => Da
     consume(action, input, token) {
       const [exp, sig] = String(token ?? '').split('.'), at = Number(exp);
       for (const [t, e] of used) if (e < clock()) used.delete(t);
-      if (!Number.isSafeInteger(at) || at < clock() || !/^[0-9a-f]{64}$/.test(sig ?? '')) throw new Error('Confirmation expired or missing; review the action again');
-      if (!timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(mac(action, input, at), 'hex'))) throw new Error('Confirmation does not match this action');
-      if (used.has(token)) throw new Error('This confirmation was already used');
+      if (!Number.isSafeInteger(at) || at < clock() || !/^[0-9a-f]{64}$/.test(sig ?? '')) throw Object.assign(new Error('Confirmation expired or missing; review the action again'), { reason: 'confirmation_expired' });
+      if (!timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(mac(action, input, at), 'hex'))) throw Object.assign(new Error('Confirmation does not match this action'), { reason: 'confirmation_expired' });
+      if (used.has(token)) throw Object.assign(new Error('This confirmation was already used'), { reason: 'confirmation_expired' });
       used.set(token, at);
     },
   };
@@ -159,5 +160,78 @@ export function createActions({ config, role, wallets = null, balances = null, n
   const runs = kind === 'trader' ? { ...trader.run, withdraw: runWithdraw }
     : kind === 'service' ? { markPaid: input => role.markPaid(input.dexKey, input.tradeIds), withdraw: runWithdraw } : {};
   return { names: Object.keys(previews), preview: (name, input) => previews[name](input ?? {}), run: (name, input) => runs[name](input),
+    ...(kind === 'trader' && role.locks ? { locks: createLockActions(role.locks) } : {}),
     maxTake: kind === 'trader' ? input => trader.maxTake(input ?? {}) : null };
+}
+
+export function createLockActions(client) {
+  const names = ['post', 'take', 'repay', 'exercise', 'cancel', 'refund'];
+  const normalize = (action, input = {}) => {
+    if (!client) throw lockError('locks_disabled');
+    if (!names.includes(action) || !input || typeof input !== 'object' || Array.isArray(input)) throw lockError('invalid_input');
+    const { action: ignored, confirm, ...value } = input;
+    if (value.asset !== undefined && !['RESET', 'TNK'].includes(value.asset)) throw lockError('invalid_input');
+    if (action !== 'post') {
+      if (Object.keys(value).some(k => !['positionId', 'product', 'asset'].includes(k))) throw lockError('invalid_input');
+      const p = client.positions?.get(value.positionId) ?? client.book?.get(value.positionId);
+      if (p && (value.asset && value.asset !== (p.post.terms.asset ?? 'RESET') || value.product && value.product !== p.post.product)) throw lockError('invalid_input');
+      return value;
+    }
+    const asset = value.asset ?? value.terms?.asset ?? 'RESET', product = value.product;
+    if (!['loan', 'call', 'put'].includes(product) || value.asset && value.terms?.asset && value.asset !== value.terms.asset) throw lockError('invalid_input');
+    if (value.terms) {
+      if (Object.keys(value).some(k => !['product', 'terms', 'asset'].includes(k))) throw lockError('invalid_input');
+      return { product, terms: { ...value.terms, asset } };
+    }
+    const fields = product === 'loan' ? ['principal', 'repay', 'collateral', 'fee', 'termBlocks'] : ['amount', 'premium', 'strikeTotal', 'expiryBlock'];
+    if (Object.keys(value).some(k => !['product', 'asset', 'offerUntilBlock', ...fields].includes(k))) throw lockError('invalid_input');
+    const terms = { asset };
+    for (const k of fields.filter(k => !['fee', 'termBlocks', 'expiryBlock'].includes(k))) terms[k] = amountUnits(['amount', 'collateral'].includes(k) ? asset : 'USDC', value[k]).toString();
+    if (product === 'loan') {
+      terms.termBlocks = value.termBlocks;
+      if (value.fee !== undefined) {
+        const fee = value.fee === '0' ? 0n : amountUnits('USDC', value.fee);
+        if (BigInt(terms.repay) !== BigInt(terms.principal) + fee) throw lockError('invalid_input');
+      }
+    } else terms.expiryBlock = value.expiryBlock;
+    if (!Number.isSafeInteger(client.counted)) throw lockError('clock_unavailable');
+    const max = client.registry?.usable?.params.offerMaxBlocks ?? 144;
+    terms.offerUntilBlock = value.offerUntilBlock ?? Math.min(client.counted + Math.min(144, max), terms.expiryBlock === undefined ? Number.MAX_SAFE_INTEGER : terms.expiryBlock - 1);
+    return { product, terms };
+  };
+  return {
+    names, normalize,
+    async preview(action, input = {}) {
+      const normalized = normalize(action, input), preview = client.preview({ ...normalized, action });
+      if (action === 'post' && preview.product === 'put' && client.adapters.escrowCosts) {
+        const cost = await client.adapters.escrowCosts({ registry: client.registry.usable, amount: preview.terms.strikeTotal });
+        preview.amounts.escrowTotal = cost.total; preview.amounts.escrowPlatformFee = (BigInt(cost.total) - BigInt(preview.terms.strikeTotal)).toString();
+      }
+      const a = preview.amounts, t = preview.terms, asset = preview.asset ?? t?.asset ?? 'RESET';
+      let sentence = preview.now;
+      if (a && t) {
+        const usd = n => `${amount(n, 'USDC').text} USDC`, base = `${amount(t.collateral ?? t.amount, asset).text} ${asset}`;
+        if (action === 'post' && preview.product === 'loan') sentence = `You get ${usd(a.makerReceives)} once a lender takes this. Pay back ${usd(t.repay)} in ${t.termBlocks} counted Bitcoin blocks, or the lender keeps your ${base}.`;
+        else if (action === 'post') sentence = `You lock ${preview.product === 'put' ? usd(t.strikeTotal) : base} until block ${t.expiryBlock}. You receive ${usd(a.makerReceives)} when someone takes this.`;
+        else if (action === 'take') sentence = preview.product === 'put'
+          ? `Protect against a drop: lock your ${base} for the term and pay ${usd(a.openingTotal)}. A small Solana message before block ${t.expiryBlock} sells it for ${usd(t.strikeTotal)}.`
+          : `Pay ${usd(a.openingTotal)} to take this offer. ${preview.now}`;
+        else if (action === 'exercise' && preview.product === 'put') sentence = `Send a small Solana message to sell your locked ${base} for ${usd(t.strikeTotal)}. Release follows about an hour after the message is finalized.`;
+        else if (action === 'repay') sentence = `Pay back ${usd(t.repay)}. Your ${base} returns about an hour after payment, once the verified Bitcoin median time covers it.`;
+        else if (action === 'refund') sentence = `Refund your unclaimed escrow after its on-chain refund deadline. The holder keeps their asset if it is refunded.`;
+        else if (action === 'cancel') sentence = `Cancel this offer and collect the locked funds after enough signers accept.`;
+        if (a.escrowTotal) sentence += ` Escrow funding ${usd(a.escrowTotal)}, including ${usd(a.escrowPlatformFee)} platform fee.`;
+        if (['post', 'take'].includes(action)) sentence += ` Opening total ${usd(a.openingTotal)}: maker receives ${usd(a.makerReceives)}; service fee ${usd(a.openingFee)}.`;
+      }
+      return { ...preview, sentence, input: { action, ...normalized } };
+    },
+    run(action, input = {}) {
+      const value = normalize(action, input);
+      if (action === 'post') return client.post(value);
+      if (action === 'take') return client.take(value.positionId);
+      if (action === 'cancel') return client.cancel(value.positionId);
+      if (action === 'refund') return client.refund(value.positionId);
+      return client.pay(value.positionId, action);
+    },
+  };
 }

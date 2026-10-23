@@ -10,7 +10,7 @@ a Solana escrow that opens only with a secret. A committee of signers holds piec
 the coins on Trac, the signers check the transfer on their own nodes and publish their pieces, and the seller opens
 the escrow with them. If the trade stalls, the buyer refunds after `refundAfter`.
 
-You drive one trader through eight MCP tools. The trader program does every chain step by itself: it locks, sends,
+You drive one trader through MCP tools. The trader program does every spot-trade chain step by itself: it locks, sends,
 claims and refunds without further tool calls. Your job is to choose offers, explain amounts and fees, keep the
 program running and report the outcome.
 
@@ -428,3 +428,210 @@ the buyer locks. Say that the coins must be sent within 15 minutes and that a st
 After the trade finishes, say which phase it ended in and, for `aborted`, the reason in plain words.
 
 The protocol behind all of this is in [docs/SPEC.md](docs/SPEC.md).
+
+## Locks tools
+
+Loans, covered calls and cash-secured puts use a separate locks venue and signer registry. Use the locks tools
+only after that client is configured. Amounts are integer base-unit strings: USDC 6 decimals, RESET 8, TNK 18.
+Every position is taken whole. A loan's maker is its borrower; an option's maker is its writer. A taker is a
+lender or an option holder. Do not send a manual wallet transfer to substitute for a locks payment.
+
+Explain the full commitment before post or take: the RESET/TNK and USDC amounts, opening fee, repayment or strike,
+counted Bitcoin deadline, and both `now` and `ifMissed`. The user's permission to trade spot does not by itself
+specify permission to borrow, lend or write options. Follow the scope and size limits they gave you.
+
+### dex_locks
+
+Arguments: `asset` (optional), `product` (optional), `page` (optional), `minSize` (optional), `maxSize` (optional), `minTerm` (optional), `maxTerm` (optional).
+
+Lists posted positions. `product` is `loan`, `call` or `put`; omit it for all. `page` starts at zero. Size filters
+refer to the selected asset’s base units, including a loan's collateral. Terms are counted Bitcoin blocks: loan duration or
+remaining option life. Returns `{rows,page,total,next}`, 50 rows; `next: null` ends paging. Every row
+contains a `positionId`, terms, state, `now`, `ifMissed` and deadlines. Refresh before acting on an old result.
+
+### dex_lock_post
+
+Arguments: `product`, `terms`, `asset` (optional).
+
+`terms.asset` selects RESET or TNK.
+
+`product` is `loan`, `call` or `put`. Loan `terms` have `collateral`, `principal`, `repay`, `termBlocks` and
+`offerUntilBlock`. Call and put terms have `amount`, `premium`, `strikeTotal`, `expiryBlock` and `offerUntilBlock`.
+Amounts are positive integer strings; heights and term lengths are safe integers. The call and loan lock the chosen RESET/TNK asset; the put writer locks the whole strike in USDC. The registry supplies the TNK reserve.
+Returns the new position in `creating`, with its ID and plain explanation. At least n−1 signers must agree on the lock
+before funding starts. Failed key generation needs a fresh post, nonce and position ID.
+
+The put writer publishes a random `escrowPreimage`; claiming still requires E’s recipient signature.
+“Protect against a drop” locks the holder’s RESET/TNK for the term: reservation, second DKG for H, final H funding,
+then the premium payment. If the reservation lapses without opening, H returns to the holder.
+
+### dex_lock_take
+
+Arguments: `positionId`, `asset` (optional).
+
+Starts a reservation for one whole posted position, returning its current status. The client pays the principal
+or premium exactly, with the opening fee deducted from the maker’s receipt, only after k distinct signer reservations leave at
+least `payMarginSec` each, checked again before submission. `already_taken` before payment costs nothing.
+A late opening payment can lose the money without opening the position. Never bypass the reservation check.
+Follow `taking` until k signers confirm `running`; do not take another copy because it is slow.
+
+### dex_lock_pay
+
+A put writer can also use `step: "refund"` after `refundAfter` while the escrow is unclaimed. The confirmed refund returns H to the holder.
+
+Arguments: `positionId`, `step`, `asset` (optional).
+
+`step: repay` is for the loan borrower, and sends the full `repay` amount to the lender. `step: exercise` is for
+the option holder: a call sends `strikeTotal` USDC to its writer, a put sends a small signed Solana exercise memo with no token transfer. Exercise sends E to the holder. H waits for finalized escrow settlement: a claim sends H to the writer; a refund returns H to the holder. Expiry returns H to the holder and E to the writer. Returns position
+status after the payment and its `paid` announcement. Finalized payment evidence determines the winner; a tool
+reply alone does not mean a sweep finished. Use one full payment. Overpayment counts, partial payments do not
+add up, and the extra amount is not returned automatically. Repayment and exercise have no opening fee.
+
+### dex_lock_cancel
+
+Arguments: `positionId`, `asset` (optional).
+
+Requests cancellation of your own posted position and returns status. A signer cannot accept while it has a
+live reservation. A request is not a completed cancellation: wait for `ended:cancelled` and `released`.
+Running positions cannot be cancelled through this tool.
+
+### dex_lock_status
+
+Arguments: `positionId` (optional), `settings` (optional), `asset` (optional).
+
+Returns `{rows,counted,settings}`. With no ID it lists all your positions; otherwise just that one. Position fields
+are `positionId`, `product`, `asset`, `state`, maker and taker public identities, `terms`, `registryVersion`,
+`counterparty` (short key), `nextAction`, `dueBlock`, `expiryBlock`, `blocksLeft`, `refundAfter`, `now`,
+`ifMissed`, `outcome`, and any `reason` with `whatToDo`. Shares and wallet secrets are never returned.
+
+`settings` updates any of `autoRepay`, `repayBlocksBefore`, `autoExercise`, `exerciseBlocksBefore`,
+`exerciseMarginBps`, `autoSweep`. Defaults are true, 6, true, 6, 100, true respectively. A partial settings object
+keeps omitted values. `autoSweep` is always true; setting false is refused. Settings persist across restarts.
+
+Automatic repayment starts at N=`repayBlocksBefore` blocks before due if free USDC covers the whole repayment.
+Automatic exercise starts at M=`exerciseBlocksBefore` blocks before expiry when the DEX last price makes it
+worth doing after `exerciseMarginBps`: for calls, RESET/TNK value less the margin must exceed the strike; for puts,
+RESET/TNK value plus the margin must be below the strike. No price means no automatic exercise. Calls still need USDC; puts already hold the asset in H. Both need SOL for network fees. It does not guarantee resale at the last trade's price.
+
+Tune N and M upward when RPC reads or finality are slow. Both accept 1 to 12960 blocks; the price margin accepts
+0 to 10000 bps. Raise the margin to require more price distance from the strike. Turn automatic payments off
+only if the user wants to manage them and will act before the deadline. Always leave sweeping on.
+
+### dex_lock_events
+
+Arguments: `since` (optional), `asset` (optional).
+
+Returns `{rows,events,next,oldest,truncated}`. `since` is a nonnegative integer cursor, initially zero. Save `next`
+and pass it on the following call. Raw `events` carry `cursor`, `at` in Unix seconds; dashboard `rows` use `id` and milliseconds. Both include `asset`,, `kind`, `positionId`, and state,
+step or failure information as appropriate. The 1000 retained events include `creating`, `funding`, `posted`,
+`taking`, `running`, `paid`, `cancel_requested`, `ended`, `released`, `settings`, `attention`. With `truncated`,
+refresh status because some older events have been removed. Reads never authorize another payment.
+
+### States and what to say
+
+| State | What happens and what to do |
+| --- | --- |
+| `creating` | Waiting for at least n−1 matching lock attestations over the qualified dealer set Q. |
+| `funding` | Funds are being sent or checked. Keep the program running; do not pay by hand. |
+| `posted` | The whole funded position is available. A maker may request cancellation. |
+| `taking` | Reservation or opening payment is pending. Read status and events; do not duplicate it. |
+| `running` | Show `now`, `ifMissed`, blocks left and automatic settings. |
+| `ended:repaid` | Borrower paid in time and receives the loan collateral. |
+| `ended:defaulted` | Loan was not repaid in time; lender receives collateral. |
+| `ended:exercised` | Holder exercised in time and receives the lock. |
+| `ended:expired` | Option or untaken offer expired; maker receives the lock. The option premium stays paid. |
+| `ended:cancelled` | Maker's cancellation was accepted; maker receives the lock. |
+| `ended:unfunded` | Attempt ended before funding. Retry with a new position ID; never fund the failed address. |
+| `released` | Winner's sweep finalized. Report completion. |
+
+Use the returned sentences directly. A borrower might see "Pay back 103 USDC by block 920,160 (~14 days)."
+and "The lender keeps your 1 RESET." A lender sees "You get 103 USDC by block 920,160, or the 1 RESET.
+Nothing to do." A call holder sees "You may buy 1 RESET for 300 USDC until block 920,160 (~3 days)."
+and "The right expires, the fee is not returned." Approximate time is blocks × 10 minutes, never a promise.
+
+### Choosing lock offers and pacing
+
+Compare the principal with repayment and collateral for a loan, and the premium, strike and remaining blocks
+for an option. Respect registry size and aggregate exposure limits; a large collateral amount does not prove
+that selling it later will repay a loan's value. Inspect both addresses, the pinned venue and the saved registry
+version. A position keeps its fees and committee when the venue publishes a newer registry.
+
+Take one position at a time until its opening result is known. After a reservation refusal, let that reservation
+expire before trying the same position again. After three failures across different positions, pause for five
+minutes, check signer availability, wallet balances, RESET counted height and Solana RPC health. Check events
+about once a minute while an action runs; use cursors and pages. Do not repeatedly post new positions because
+funding, repayment or collection is slow. Release requests are answered at most once per 60 seconds per
+requester and position. The client uses event-driven work, not blanket network retries over all locks.
+
+### Deadlines while offline
+
+The deadline is a Bitcoin block counted by RESET. Solana payments must have `blockTime < T(N)` for the
+verified Bitcoin header at that height; exactly at T(N) is late. A late signer scans recipient history, including
+payments whose payer never sent `paid`. Put exercise is a finalized Solana memo signed by the holder, under the same strict timestamp rule.
+Early release takes usually 1–2 hours after payment: `blockTime <= M(counted)`, the median of 11 verified Bitcoin headers, proves it precedes a future deadline.
+Neither a wall-clock estimate nor when an agent noticed a payment decides the winner.
+
+If this conversation stops while a separately running trader stays online, its automatic payments and sweeping
+continue. If the trader or its peer stops, they do not. If a borrower misses the deadline, the lender gets the
+collateral. If a holder misses expiry, the option ends and the premium stays paid. Restarting cannot extend a
+deadline. Keep free funds available before the automatic window and leave enough SOL and TNK for fees.
+
+RESET/TNK locks rely on enough signers surviving with their shares; they have no trustless refund. Put USDC locks
+can be refunded by the writer through the escrow after `refundAfter` while unclaimed. The venue can store sealed
+releases for an offline winner, but cannot reconstruct lost signer shares or change a decision. Keep the data
+folder and its encrypted transaction journals; restart picks up pending operations without creating a duplicate
+payment. Signers can be replaced by handover while at least k survive. Never discard a pending journal to force a retry.
+
+### Lock failures
+
+Lock errors are JSON `{ok:false,reason,whatToDo}` and MCP marks them as errors. `whatToDo` is the action to
+take, not a promise that no payment moved. Only a prepayment refusal such as `already_taken` costs nothing.
+For `payment_pending`, keep the original position and transaction journal until its chain result is known.
+
+| Reason | What to do |
+| --- | --- |
+| `locks_disabled` | Configure the separate locks venue and client first. |
+| `invalid_input` | Check product, integer base units, addresses, block heights and tool fields. |
+| `registry_unavailable` | Wait for a valid signed registry from the pinned locks venue. |
+| `venue_unavailable` | Retry the book read when the locks venue is reachable. |
+| `registry_conflict` | Pause new positions and ask the venue to resolve conflicting registry content. |
+| `product_paused` | Choose an open product or wait. |
+| `update_required` | Use a release meeting the locks registry's minimum software. |
+| `limit_exceeded` | Reduce size or wait for existing exposure to end; do not split to evade a cap. |
+| `term_out_of_range` | Use a term and offer deadline allowed by the registry. |
+| `unknown_position` | Refresh the book or your positions and copy the position ID again. |
+| `not_your_position` | Use a position belonging to the current locks identity. |
+| `own_offer` | Choose another maker's offer. |
+| `already_taken` | Choose another offer; this attempt sent no opening payment. |
+| `offer_expired` | Refresh and choose an offer with time left. |
+| `wrong_state` | Read status and act only on its current state. |
+| `signers_unavailable` | Wait for enough committee signers; never pay by hand. |
+| `dkg_failed` | Retry with a fresh nonce and position ID; do not fund the failed address. |
+| `lock_mismatch` | Do not fund; retry key generation with a new position. |
+| `reservation_expired` | Let it lapse, request a fresh take and wait for new reservations. |
+| `reservation_active` | Wait for that reservation to end before cancellation. |
+| `insufficient_funds` | Add the payment asset and leave SOL and TNK for network fees. |
+| `fee_changed` | Escrow fees changed after admission; funding waits for the quoted fee to return. |
+| `refund_not_ready` | Wait until finalized Solana time reaches `refundAfter`, then request refund again. |
+| `payment_pending` | Reconcile the existing transaction; keep its journal and never duplicate the payment. |
+| `collect_pending` | The released coins are moving out of the lock; wait, the app retries on its own. |
+| `payment_failed` | Inspect the finalized failure before retrying this step. |
+| `deadline_passed` | Do not pay; collect the outcome and any funds released to you. |
+| `clock_unavailable` | Wait for the local RESET counted height and verified Bitcoin header. |
+| `invalid_message` | Ignore it and use authenticated committee and venue messages. |
+| `invalid_share` | Retain valid shares and request the other committee members' releases. |
+| `adapter_unavailable` | Configure the locks transport, chain and durable transaction adapters. |
+| `protocol_unavailable` | Use compatible locks signer and peer software; do not fund an unsupported put or draw. |
+| `sweep_pending` | Keep the program and its transaction journal running for collection. |
+| `settings_invalid` | Use booleans, positive block offsets and a margin between 0 and 10000 bps. |
+| `confirmation_expired` | The dashboard preview is older than two minutes or changed; preview again and confirm. |
+| `unexpected` | An error without a known reason; `whatToDo` carries its message. Retry; check the role log if it repeats. |
+
+Registry fields, every limit, message and exact payment rule are in [docs/LOCKS.md](docs/LOCKS.md).
+
+Opening fees: a loan charges `floor(principal * fee.loanBps / 10000)`; an option charges
+`min(premium, max(fee.optionMin, floor(premium * fee.optionBps / 10000)))`. The taker pays exactly the shown amount.
+At 50 loan bps, 100 USDC splits into 99.50 for the borrower and 0.50 for the collector; repayment stays 103.
+At 1000 option bps and a 0.05 USDC minimum, 5 USDC splits into 4.50 and 0.50. A 0.01 premium is capped at 0.01.
+Show `openingTotal`, `makerReceives`, and `openingFee`. No service fee applies on repayment, exercise, cancel or sweep.
+Put writers pay only the global escrow platform fee; `escrowCollector` has zero trade bps.

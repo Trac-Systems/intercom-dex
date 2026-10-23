@@ -15,6 +15,7 @@ import { chatInputSchema, parseBody } from '../core/schemas.js';
 import { seal } from '../core/envelope.js';
 import { sha256Hex } from '../core/canonical.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
+import { createLocksClient } from '../locks/client.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
@@ -42,7 +43,7 @@ const beforeLock = t => !isFinished(t) && !t.state.lockAttempted && !t.state.loc
 // A trader: posts and takes offers, then runs the buyer or seller side of each trade.
 // `me` = {dexKey, tracAddr, solAddr}; `solana`/`trac` are the chain adapters for this trader's own keys.
 export class Trader {
-  constructor({ bridge, identity, store, solana, trac, me, serviceKey, mint, platformCollector, profile = null, proof, log = console.log }) {
+  constructor({ bridge, identity, store, solana, trac, me, serviceKey, mint, platformCollector, profile = null, proof, log = console.log, locks = null }) {
     if (typeof proof?.zkey !== 'string' || !isAbsolute(proof.zkey)) throw new Error('Traders require proof.zkey as an absolute path');
     Object.assign(this, { bridge, identity, store, me, serviceKey, mint: profile?.mint ?? mint, platformCollector: profile?.platformCollector ?? platformCollector, profile, log });
     this.certificates = new CertificatePool({ store, proof, log });
@@ -61,6 +62,8 @@ export class Trader {
     this.book = this.bookView.books;       // pair -> latest service book
     this.tickers = new Map();
     this.chat = new MarketChat({ chatRelays: profile?.chatRelays ?? [] });
+    if (locks?.venueKey) this.locks = createLocksClient({ ...locks,
+      adapters: { ...locks.adapters, lastPrice: locks.adapters?.lastPrice ?? ((asset = 'RESET') => this.tickers.get(`${asset}/USDC`)?.last ?? null) } });
   }
 
   async start() {
@@ -82,9 +85,12 @@ export class Trader {
     this.viewing = new Map();
     this.warmTimer = setInterval(() => this.#warm().catch(() => {}), WARM_MS);
     this.warmTimer.unref?.();
+    // Locks never keep spot trading from starting.
+    if (this.locks) await this.locks.start().catch(e => this.log('locks start', e.message));
   }
 
-  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer); }
+  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer);
+    this.locks?.stop().catch(e => this.log('locks stop', e.message)); }
 
   // The dashboard reports the offers a click on its best ask and bid would take.
   noteViewing(pair, offerIds) { this.viewing?.set(pair, { at: nowSec(), offerIds: offerIds.filter(Boolean) }); }

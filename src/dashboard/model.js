@@ -1,3 +1,4 @@
+import { inTheMoney } from '../locks/client.js';
 import { existsSync } from 'node:fs';
 import { isFinished } from '../roles/host.js';
 import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
@@ -340,6 +341,7 @@ export function createModel({ config, role, wallets = null, bridge, nextOffer = 
 
   return {
     balances,
+    ...(kind === 'trader' && role.locks ? { locks: createLocksModel(role.locks) } : {}),
     pair(name) { return registryPair(registryOf(role), name, { open: false }); },
     book(name) {
       if (kind !== 'trader') throw new Error('The order book is only available to traders');
@@ -388,5 +390,40 @@ export function createModel({ config, role, wallets = null, bridge, nextOffer = 
       }
       return out;
     },
+  };
+}
+
+export function createLocksModel(client) {
+  const row = value => {
+    const asset = value.asset ?? value.terms?.asset ?? 'RESET', out = { ...value, asset };
+    for (const [key, units] of Object.entries(value.terms ?? {})) out[key] = ['collateral', 'amount'].includes(key) ? amount(units, asset)
+      : ['principal', 'repay', 'premium', 'strikeTotal'].includes(key) ? amount(units, 'USDC') : units;
+    for (const [key, units] of Object.entries(value.amounts ?? {})) if (['opening', 'openingTotal', 'openingFee', 'makerReceives', 'escrowTotal', 'escrowPlatformFee'].includes(key)) out[key] = amount(units, 'USDC');
+    const price = client.adapters.lastPrice?.(asset);
+    if (typeof price === 'string' && /^(0|[1-9][0-9]*)(\.[0-9]{1,12})?$/.test(price)) {
+      const [whole, fraction = ''] = price.split('.'), scaled = BigInt(whole + fraction.padEnd(12, '0'));
+      const valueNow = BigInt(value.terms.collateral ?? value.terms.amount) * scaled / 10n ** BigInt((asset === 'TNK' ? 18 : 8) + 6);
+      out[value.product === 'loan' ? 'collateralNow' : 'priceNow'] = amount(valueNow, 'USDC');
+      if (value.product !== 'loan') out.worthUsing = inTheMoney({ post: { product: value.product, terms: value.terms } }, price, client.settings.exerciseMarginBps);
+    }
+    // Paid already: nothing left to do but wait for the release.
+    out.needsAction = value.state === 'running' && value.paid !== true && (value.nextAction === 'repay' || value.nextAction === 'exercise' && out.worthUsing === true);
+    return out;
+  };
+  // The service's fee terms from the venue's current settings, as percentages people read.
+  const service = () => {
+    const r = client.registry?.usable; if (!r?.fee) return null;
+    const pct = bps => Number(bps) / 100, share = r.fee.signerShareBps ?? 4000;
+    return { loanPct: pct(r.fee.loanBps), optionPct: pct(r.fee.optionBps), optionMin: (Number(r.fee.optionMin) / 1e6).toString(),
+      signerPct: pct(share), venuePct: pct(10000 - share), tnkReserve: (Number(r.params?.tnkReserve ?? 0) / 1e18).toString() };
+  };
+  const settings = () => ({ ...client.getSettings(), autoRepayBlocks: client.getSettings().repayBlocksBefore, service: service() });
+  return {
+    list: async input => { await client.refreshBook(input); const result = client.list(input); return { ...result, rows: result.rows.map(row) }; },
+    mine: (id, asset) => ({ rows: client.status(id).filter(p => !asset || p.asset === asset).map(row), counted: client.counted,
+      prices: Object.fromEntries(['RESET', 'TNK'].map(a => [a, client.adapters.lastPrice?.(a) ?? null])) }),
+    events: (since, asset) => { const result = client.readEvents(since); return { ...result, rows: result.events.filter(e => !asset || e.asset === asset).map(e => ({ ...e, id: e.cursor, at: e.at * 1000 })) }; },
+    settings,
+    setSettings(input) { const { autoRepayBlocks, asset, ...value } = input; if (autoRepayBlocks !== undefined) value.repayBlocksBefore = autoRepayBlocks; client.setSettings(value); return settings(); },
   };
 }

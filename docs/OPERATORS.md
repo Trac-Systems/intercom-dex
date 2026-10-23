@@ -276,3 +276,50 @@ peers never do. Peers use a relay when its key is listed in the registry, as a s
 Registry relay keys replace the list with every new registry version, and static `relayKeys` are added to it. A new
 peer that can't connect to anyone needs a static relay key, because it can't receive the registry before it has a
 path.
+## Running lock signers and a locks venue
+
+Lock signers run as separate processes with separate locks identities, box keys, data folders and peer
+connections. Do not reuse a spot DEX signer's process or signing identity. A locks venue likewise publishes
+its own signed registry under a key that locks clients pin. It stores position status and opaque sealed releases
+for offline parties; it never decides which party receives a lock.
+
+Before accepting positions, check the registry's strict majority `k > n/2`, active committee, supported software,
+per-position sizes, aggregate `totalLocked` limits and reserve settings. A signer holds at most 2000 open
+positions and at most 50 for one maker key, or less if its registry lowers those limits. Limits and the exact
+protocol are in [LOCKS.md](LOCKS.md#registry-and-limits).
+
+Run each signer's own RESET reader and use its counted Bitcoin height and recorded hashes. Verify Bitcoin
+header bytes against those hashes before using the header time. Give each signer reliable Solana RPC
+endpoints. An operator's own paid endpoint is trusted on its own (`solana.need: 1`), as for DEX roles; with only
+public endpoints, payment checks require two agreeing reads. Do not rely on the public shared servers' capacity for a busy signer. An RPC outage
+must leave a payment undecided, never be treated as proof that no payment exists.
+
+Back up the complete encrypted data directory and keep its password or store key separately. The backup must
+include DKG state, final shares, registry snapshots, reservations, verified payments and durable decisions.
+Store a share durably before `lockReady`, and a decision durably before release. Restore exactly that decision
+after a crash; never reset a decided position to undecided or run two copies of one signer's identity. A backup
+from before a release may lack its decision, so restore the latest journal and reconcile before serving.
+
+Keep shares until the position is collected. Test that backups can be decrypted without exposing them in logs.
+RESET/TNK locks have no trustless recovery if enough signer shares are lost. A put writer can refund unclaimed
+USDC through the escrow after `refundAfter`; a holder should collect before that refund can race its claim.
+An unavailable signer may return after a deadline and check the chain history to reach the same decision.
+
+Only registry and heartbeat broadcasts run every 30 seconds. Do not create retry timers over all positions or
+join all position channels at startup. Answer active requests, page books in at most 100 rows, and limit release
+answers to once per 60 seconds per requester and position. Keep the DEX registry and its traffic separate.
+
+Traders enable locks on their existing peer with `locks: true` and pin `locks.venueKey` in the trader config.
+The client uses separate encrypted locks keys, registry snapshots and transaction journals. Without this
+configuration the trader starts only the existing spot services. Signer peers remain dedicated to locks.
+Advertise `assets.RESET` and `assets.TNK`, per-asset bounds, `loanBps`, `optionBps`, `optionMin`, and
+`signerShareBps`. The put `escrowCollector` configuration must charge zero trade bps.
+
+A put needs two locks: writer USDC in E, holder RESET/TNK plus reserve in H before premium payment. The writer
+publishes a random escrow preimage; recipient authorization still requires the E scalar signature. A signed
+Solana memo exercises the put. Validate median time past from 11 verified headers for release usually 1–2 hours
+after payment; do not use Trac transfer timing in deadline decisions.
+
+DKG uses a common qualified set Q with at least n−1 dealers and at least n−1 matching readiness attestations.
+Store sealed shares for offline members at the venue. Signers can be replaced by handover while at least k
+survive. Put writers retain the program refund after `refundAfter`; RESET/TNK have no trustless fallback.

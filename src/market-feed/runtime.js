@@ -8,7 +8,7 @@ import { TradeHistory } from './history.js';
 
 export async function startMarketFeed({ config, profile, bridge, password, log = () => {} }) {
   if (!isAbsolute(config.dataDir ?? '')) throw new Error('market-feed dataDir must be absolute');
-  if (!config.marketFeed || Object.keys(config.marketFeed).some(k => !['port', 'viewerKeyFile'].includes(k))) throw new Error('Expected marketFeed: {port, viewerKeyFile}');
+  if (!config.marketFeed || Object.keys(config.marketFeed).some(k => !['port', 'viewerKeyFile', 'locksVenueKey'].includes(k))) throw new Error('Expected marketFeed: {port, viewerKeyFile, locksVenueKey?}');
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   let feed, server, closing, keys, history;
   const close = () => closing ??= (async () => {
@@ -25,8 +25,8 @@ export async function startMarketFeed({ config, profile, bridge, password, log =
     keys = await openKeyring(file, password);
     if (keys.solanaSecret) throw new Error('market-feed requires its own wallet-free data directory');
     feed = new MarketFeed({ bridge, store: openStore(config.dataDir, keys.storeKey), identity: keys.identity,
-      profile, serviceKey: config.serviceKey, log, history });
-    server = await startMarketFeedHttp({ feed, ...config.marketFeed });
+      profile, serviceKey: config.serviceKey, locksVenueKey: config.marketFeed.locksVenueKey ?? null, log, history });
+    server = await startMarketFeedHttp({ feed, port: config.marketFeed.port, viewerKeyFile: config.marketFeed.viewerKeyFile });
     await feed.start();
     return { feed, server, close };
   } catch (error) { await close(); throw error; }

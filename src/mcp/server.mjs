@@ -9,6 +9,7 @@ import { readPrivateFile } from '../roles/keyring.js';
 import { controlCall } from '../wallets/control.js';
 import { registerWalletTools } from './wallet-tools.js';
 import { registerChatTools } from './chat-tools.js';
+import { registerLocksTools } from './locks-tools.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -62,6 +63,7 @@ const units = z.string().regex(/^[1-9][0-9]*$/).describe('Integer base units: TN
 const server = new McpServer({ name: 'intercom-dex', version: SOFTWARE });
 registerWalletTools(server, call);
 registerChatTools(server, call);
+registerLocksTools(server, call);
 server.registerTool('dex_status', { description: 'This trader: addresses, own offers, trades, registry pairs and update required status' },
   async () => text(await call('GET', '/status')));
 server.registerTool('dex_book', { description: 'Reconstructed best 50 price levels per side, 24 h ticker, and fresh other-maker offers with venue remaining sizes for a pair', inputSchema: { pair } },

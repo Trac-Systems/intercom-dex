@@ -9,7 +9,7 @@ import { MainSettlementBus } from 'trac-msb/src/index.js';
 import { createConfig as msbConfig, ENV as MSB_ENV } from 'trac-msb/src/config/env.js';
 import DexProtocol from '../contract/protocol.js';
 import DexContract from '../contract/contract.js';
-import { dexTransport } from '../features/dex-transport.js';
+import { hasLocks, joinsLocks, peerTransport, makeLocksHandlers } from '../features/locks-bridge.js';
 import Sidechannel from '../features/sidechannel/index.js';
 import BlindRelay from '../features/blind-relay/index.js';
 import DexBridge, { DEX_CHANNELS } from '../features/dex-bridge.js';
@@ -21,7 +21,7 @@ import { resolveProfile } from '../../src/net/profile-core.js';
 
 const hex32 = /^[0-9a-f]{64}$/;
 const FIELDS = new Set(['environment', 'msbBootstrap', 'msbChannel', 'msbDhtBootstrap', 'peerDhtBootstrap',
-  'chatRelays', 'role', 'servicePeerKey', 'storeDirectory', 'subnetChannel', 'validatorKey', 'relayKeys', 'serveRelay', 'bridge', 'trac', 'msbNetworkId']);
+  'chatRelays', 'locks', 'role', 'servicePeerKey', 'storeDirectory', 'subnetChannel', 'validatorKey', 'relayKeys', 'serveRelay', 'bridge', 'trac', 'msbNetworkId']);
 
 export function validateConfig(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('Expected a peer configuration object');
@@ -34,6 +34,7 @@ export function validateConfig(config) {
     if (!Array.isArray(config[key]) || !config[key].length || config[key].some(x => typeof x !== 'string' || !/^[a-zA-Z0-9.\[\]:-]+:\d+$/.test(x)))
       throw new Error(`Explicit ${key} required`);
   if (typeof config.storeDirectory !== 'string' || !path.isAbsolute(config.storeDirectory)) throw new Error('Absolute storeDirectory required');
+  if (config.locks !== undefined && (typeof config.locks !== 'boolean' || !['trader', 'market-feed'].includes(config.role))) throw new Error('locks switch is for traders and the market feed only');
   const b = config.bridge;
   if (!b || !Number.isInteger(b.port) || b.port < 1024 || b.port > 65535 || typeof b.tokenFile !== 'string' || !path.isAbsolute(b.tokenFile))
     throw new Error('bridge needs {port, tokenFile (absolute)}');
@@ -77,7 +78,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
   const config = { ...operational, ...profile.peer, chatRelays: profile.chatRelays };
   config.subnetChannel = subnetChannel(config.storeDirectory, config.subnetChannel);
   validateConfig(config);
-  const transport = dexTransport(config);
+  const transport = peerTransport(config);
   const token = fs.readFileSync(config.bridge.tokenFile, 'utf8').trim();
   if (token.length < 32) throw new Error('Bridge token too short');
   let bus, peer, resetPeer, relay, sidechannel, bridge, closing, finish;
@@ -127,9 +128,10 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     resetReady.then(r => { if (closing) return r?.close(); resetPeer = r; step('reset reader ready'); },
       error => { console.error(`RESET reader failed: ${error.message}`); void close().finally(() => process.exit(1)); });
     const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer: resetReady }) : {};
+    if (hasLocks(config)) Object.assign(handlers, makeLocksHandlers({ bus, config, resetPeer: resetReady }));
     bridge = new DexBridge(peer, { host: '127.0.0.1', port: config.bridge.port, token, requireAuth: true, handlers,
       info: { peerPubkey: peer.wallet.publicKey, swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex'),
-        msbAddress: bus.wallet?.address ?? null, environment: config.environment, networkProfile: profile, servicePeerKey: config.servicePeerKey, role: config.role } });
+        msbAddress: bus.wallet?.address ?? null, environment: config.environment, networkProfile: profile, servicePeerKey: config.servicePeerKey, role: config.role, locks: joinsLocks(config) } });
     sidechannel = new Sidechannel(peer, { ...transport.sidechannel,
       onMessage: (channel, payload, connection) => bridge.handleSidechannelMessage(channel, payload, connection) });
     peer.sidechannel = sidechannel;

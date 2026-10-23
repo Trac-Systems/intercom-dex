@@ -905,3 +905,114 @@ balances after either no lock or a refund.
   yields to any pending more urgent stamp at its next chunk. The dex uses
   `DEX_POW_CLASSES` and `DEX_POW_LOW` (`['decline']`) from dex-transport.js.
   The dex uses one difficulty, 20 bits, on offers, signers and trade channels.
+## Locks
+
+Locks use separate identities, channels and registry snapshots. A trader uses its existing peer with
+`locks: true`; lock signers use dedicated peers. Set `locks.venueKey` in the trader configuration to enable
+`createTraderLocks` from `src/wallets/locks.js`. Without it, no locks keys, client or routes are created.
+The complete protocol is in [LOCKS.md](../../docs/LOCKS.md).
+
+```js
+createPost({product,maker,terms,registryVersion,createdAt?,nonce?,escrowPreimage?,drawSlot?}, registry?, context?)
+validatePost(post, registry?, {counted?,totalLocked?,openPositions?,makerPositions?}?)
+positionId(post) // sha256(stableJSON(post))
+selectCommittee(registry, positionId, finalizedDrawSeed?)
+products[product].decide(position, facts) // {winner,outcome}; puts also give winners:{E,H}
+// facts = {counted,T,M,payments:[{step,blockTime,ok,amount?}],cancelAccepted,reservation?,scanned?}
+// T: verified timestamp, height->timestamp map, or synchronous function T(height).
+// M: verified median time past at counted, or synchronous M(counted).
+// Before deadline: blockTime <= M(counted). At deadline: blockTime < T(deadline).
+// No RESET/TNK transfer is a deadline fact. Put exercise is a holder-signed finalized Solana memo.
+// A nonpayment decision needs the complete finalized history scan; scanned:false defers it.
+
+new LocksClient({venueKey,identity,box,me,store,registry,transport,clock,adapters,now?,settings?,software?})
+client.start(); client.stop()
+client.post({product,terms})
+client.take(positionId)
+client.pay(positionId, 'repay'|'exercise')
+client.refund(positionId) // Put writer; existing unclaimed escrow after refundAfter.
+client.cancel(positionId)
+client.receive(channel, envelope)
+client.onClock()
+client.requestRelease(positionId)
+client.refreshBook({product?,asset?,page?})
+client.list({product?,asset?,page?,minSize?,maxSize?,minTerm?,maxTerm?})
+client.status(positionId?)
+client.preview({action,product?,terms?,positionId?})
+client.getSettings(); client.setSettings(partial)
+client.readEvents(since=0)
+```
+
+Every new post names `terms.asset`: RESET (8 decimals) or TNK (18 decimals). USDC has 6 decimals. A put also
+publishes a random 32-byte `escrowPreimage`; its hash is the escrow hash and its lock recipient must still sign
+the claim. Take reserves first, prepares/funds holder lock H, then pays the premium. Exercise releases E to
+holder; H waits for finalized escrow settlement. Claimed sends H to writer, refunded returns H to holder; expiry returns E to writer and H to holder. A lapsed reservation returns funded H to its holder.
+
+Opening fees come from the maker receipt: loan `floor(principal * loanBps / 10000)`; option
+`min(premium,max(optionMin,floor(premium * optionBps / 10000)))`. `openingTotal` is exactly the shown principal
+or premium; `makerReceives + openingFee = openingTotal`. Repayment stays the full `repay`. Put escrow funding
+adds only the program platform fee and requires zero collector trade bps. Example: 100 USDC at 50 bps pays
+99.50 to the borrower and 0.50 to the collector; 5 USDC at 1000 bps pays 4.50 and 0.50.
+
+The encrypted durable store supplies synchronous `get/put/list`. Position writes and signed transaction bytes
+precede effects. `WalletManager` applies `accountLockBalances` and serializes locks admission with spot trading
+and withdrawals. Confirmed external locks are separate from pending wallet reservations. Runtime ports:
+
+| Port | Contract |
+| --- | --- |
+| `exclusive(work)` | Run through the wallet admission queue. |
+| `admit({registry})` | Require the matching locks protocol and a free SOL allowance before new funding. |
+| `fundingFee()` | Current TNK fee for each pending funding transfer. |
+| `freeBalance(asset,{positionId?})` | Free base units, excluding the current position's own reservation when rechecking it. |
+| `lastPrice(asset)` | Last DEX RESET/USDC or TNK/USDC decimal price, or null. |
+| `solanaPay.build({payer,payee,amount,fee,collector,mint,memo})` | Net maker transfer plus fee in one transaction. |
+| `solanaPay.verify/scan({endpoints,need,...expected})` | At least two finalized readers; scan also needs `fromSlot`. |
+| `submit({id,transaction,position,step,beforeSend?,scalar?,sendBefore?})` | Durable signed bytes, callback before signing and sending, winner fee payer, optional raw-scalar signature. |
+| `transfer({id,asset,amount,to,nonce,position})` | Journal and send the ordinary transfer with its exact locks funding nonce. |
+| `reconcile({id,step,position,input})` | Reconcile original bytes; never sign a replacement payment. |
+| `hasIntent(id)` | Whether signed Solana or Trac bytes exist; an unsigned client intent may resume preparation. |
+| `escrowCosts({registry,amount})`, `fundEscrow({id,position})` | Read finalized platform/collector configs, reserve full cost and fund E. |
+| `tracFor(scalarWallet)` | Adapter bound to `{...scalarSigner(a),address}`. |
+| `tracLock.sweep({a,to,adapter,positionId,journal,asset})` | Journaled RESET then TNK, or one TNK sweep, minus MSB fee. |
+| `edvss.verifyShare(j,share,C)`, `reconstruct(shares,k,C)`, `publicOf(a)` | Validate every share and the reconstructed public key. |
+| `escrowLock.claimAndSweep({a,escrowPreimage,winnerSol,mint,amount,tradeFeeCollector,programId})` | Atomic claim, transfer and close; caller signs after setting blockhash. |
+
+Successful operations return `{ok:true,finalized:true,signature?,txHash?}`. Everything else stays pending until
+reconciliation proves its outcome. Neither a submission acknowledgement nor wallet balance changes establish
+finality. Early release is usually 1–2 hours after payment, once the verified Bitcoin median covers it.
+
+`src/locks/transport.js` is the wire schema. A `lockRequest` contains `{positionId,post}`; its envelope signs the
+post. Venue book messages contain `{positions,page,pageSize,total,requester}`. Each row contains original
+`posted` attestations that authenticate the post, registry version and lock commitments; no detached signature
+or duplicated readiness list is required. `opened` quorum comparison omits the member-specific j field.
+
+Holder DKG, funding and release messages carry `takeId` with the same `positionId`; absence of `takeId` means E
+or the maker's asset lock. Readiness binds A, C, Q, chain and address, with at least n−1 matching members.
+`opened.holderLock` binds the holder lock for the writer. Release sealing context is
+`{positionId,from:j,to:winner.lockKey}` plus `takeId` for H, scope `release`. Use `openShare` and `fromLe32`,
+then verify against C before reconstruction. Historical venue pickup verifies original signer envelopes.
+Valid release receipts for fee credits are sent only after the winner's sweep finalizes.
+
+The configured control server composes the locks routes under the existing bearer authentication. Dashboard
+routes retain cookie/host/origin checks and exact one-use confirmations. All relevant routes accept `asset`.
+
+| Route | Response/input |
+| --- | --- |
+| `GET /api/locks?product=&asset=&page=` | `{rows,total,page,next}`, 50 rows; size/term filters remain available. |
+| `GET /api/locks/mine?positionId=&asset=` | `{rows,counted,prices}`; each row has role, state, asset, now, ifMissed, nextAction, deadlines and fee amounts. |
+| `GET /api/locks/events?since=&asset=` | `{rows,next,events,oldest,truncated}`; rows have id, at (milliseconds), text, asset. |
+| `POST /api/locks/preview` | `{sentence,input,confirm?,amounts,...status}`; `input` is canonical and can be passed unchanged to act. |
+| `POST /api/locks/act` | `{ok:true,result:{positionId,...status}}`. |
+| `GET /api/locks/settings` | Automatic settings, including UI alias `autoRepayBlocks`. |
+| `POST /api/locks/settings` | Partial automatic settings; returns the full settings. |
+
+Dashboard post inputs are flat decimal strings: loan `{action:'post',product,asset,principal,collateral,fee,repay,termBlocks}`;
+options `{action:'post',product,asset,amount,strikeTotal,premium,expiryBlock}`. The service sets a bounded offer
+window unless given. The base-unit form `{action,input:{product,terms}}` remains available for MCP. Other actions
+take `{action,positionId,asset?}`. Dashboard act also needs `confirm`; the control bearer token authorizes tool
+actions directly. Formatted row amounts are `{units,text,unit}`. Unknown fields and duplicate query parameters
+are refused. Errors return `{ok:false,reason,whatToDo}`. `already_taken` before payment costs nothing.
+
+RESET/TNK locks require enough surviving signers; handover can replace signers while at least k survive.
+Put writers can refund unclaimed USDC after `refundAfter`. See [SKILL.md](../../SKILL.md#locks-tools) for
+all seven tools, settings, states and actionable failures.

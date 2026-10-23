@@ -92,3 +92,67 @@ export function accountBalances({ balances, offers = [], trades = [], registry, 
       breakdown: Object.fromEntries(['offers', 'trades', 'escrow', 'fees', 'withdrawals'].map(k => [k, r[k].toString()])) }];
   }));
 }
+
+// Lock funding is outside the wallet after finality; pending transactions reserve wallet funds.
+// Callers combine this with accountBalances while holding the same wallet admission lock.
+export function lockCommitments(positions, lockKey) {
+  const rows = Object.fromEntries(Object.keys(DECIMALS).map(asset => [asset, { pending: 0n, locked: 0n }]));
+  for (const p of positions) {
+    if (p.state === 'released') continue;
+    const maker = p.post.maker.lockKey === lockKey, taker = p.taker?.lockKey === lockKey;
+    if (!maker && !taker) continue;
+    const t = p.post.terms, product = p.post.product, ops = p.operations ?? {}, asset = t.asset ?? 'RESET';
+    const reserve = BigInt(p.registry.params.tnkReserve);
+    const funding = asset === 'TNK' ? [['TNK', (BigInt(t.collateral ?? t.amount) + reserve).toString()]]
+      : [['RESET', t.collateral ?? t.amount], ['TNK', reserve.toString()]];
+    const hold = (items, prefix, own, funded, winner) => {
+      for (const [currency, amount] of items) {
+        const op = ops[prefix + currency], final = funded || op?.status === 'confirmed';
+        if (final) { if (winner ? winner === (maker ? 'maker' : 'taker') : own) rows[currency].locked += BigInt(amount); }
+        else if (own && (p.state !== 'ended:unfunded' || op)) rows[currency].pending += BigInt(amount);
+      }
+    };
+    if (product === 'put') {
+      if (ops.sweep?.status !== 'confirmed' && p.escrowStatus !== 'refunded') hold([['USDC', t.strikeTotal]], 'fund:', maker, p.funded, p.winner);
+      if (maker && !p.funded && ops['fund:USDC']?.status !== 'confirmed') rows.USDC.pending += BigInt(p.escrowCost ?? t.strikeTotal) - BigInt(t.strikeTotal);
+      if (p.taker && ops[`sweep:H:${p.takeId}`]?.status !== 'confirmed') hold(funding, `fund:H:${p.takeId}:`, taker, p.holderFunded, p.holderDecision?.winner);
+    } else hold(funding, 'fund:', maker, p.funded, p.winner);
+    const opening = `open:${p.takeId}`;
+    if (taker && p.state === 'taking' && ops[opening]?.status !== 'confirmed') rows.USDC.pending += BigInt(t.principal ?? t.premium);
+    for (const [step, op] of Object.entries(ops)) {
+      if (op.status === 'confirmed' || step.startsWith('fund:') || step.startsWith('sweep') || step === opening && taker && p.state === 'taking') continue;
+      const input = op.input;
+      rows[input.asset ?? 'USDC'].pending += BigInt(input.amount ?? '0') + BigInt(input.fee ?? '0');
+    }
+  }
+  return Object.fromEntries(Object.entries(rows).map(([asset, row]) => [asset, { pending: row.pending.toString(), locked: row.locked.toString() }]));
+}
+
+export function lockNetworkFees(positions, lockKey, feeTnk = MSB_FEE) {
+  let sol = 0n, tnk = 0n;
+  for (const p of positions) {
+    const maker = p.post.maker.lockKey === lockKey, taker = p.taker?.lockKey === lockKey;
+    if ((!maker && !taker) || p.state === 'released' || p.state === 'ended:unfunded' && !p.holderLock) continue;
+    sol += BigInt(MIN_SOL);
+    const holder = p.post.product === 'put';
+    if (holder ? !taker || p.holderFunded : !maker || p.funded) continue;
+    const prefix = holder ? `fund:H:${p.takeId}:` : 'fund:';
+    const assets = p.post.terms.asset === 'TNK' ? ['TNK'] : ['RESET', ...(BigInt(p.registry.params.tnkReserve) > 0n ? ['TNK'] : [])];
+    for (const asset of assets) if (p.operations?.[prefix + asset]?.status !== 'confirmed') tnk += BigInt(feeTnk);
+  }
+  return { SOL: sol.toString(), TNK: tnk.toString() };
+}
+
+export function accountLockBalances(balances, positions, lockKey, feeTnk = MSB_FEE) {
+  const locks = lockCommitments(positions, lockKey), result = structuredClone(balances);
+  const fees = lockNetworkFees(positions, lockKey, feeTnk);
+  for (const [asset, row] of Object.entries(result)) {
+    const pending = BigInt(locks[asset].pending), locked = BigInt(locks[asset].locked), fee = BigInt(fees[asset] ?? '0');
+    row.balance = (BigInt(row.balance) + locked).toString();
+    row.committed = (BigInt(row.committed) + pending + locked + fee).toString();
+    row.free = max(0n, BigInt(row.free) - pending - fee).toString();
+    row.breakdown.fees = (BigInt(row.breakdown.fees) + fee).toString();
+    row.breakdown.locks = pending.toString(); row.breakdown.locked = locked.toString();
+  }
+  return result;
+}

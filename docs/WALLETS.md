@@ -241,3 +241,31 @@ for `all`), covering a crash after saving completion but before printing. New fe
 or a different destination/amount allow a new withdrawal. Missing finalized
 history or balance evidence leaves the request pending, without a replacement
 payment. Retain the data folder and journals when moving machines.
+## Wallet commitments for locks
+
+A lock is separate from both traders' ordinary wallets. While funding is pending, its RESET, TNK or USDC counts
+as committed in the funding wallet. After finality, those funds are external locked balances, not spendable
+wallet money. Lock accounting adds `breakdown.locks` for pending wallet commitments and `breakdown.locked`
+for funded external locks. A pending opening, repayment or exercise reserves its payment until reconciliation.
+Do not count the same funding twice or spend a pending payment's reservation through a withdrawal.
+
+Keep enough free USDC for automatic loan repayment or call exercise, and RESET or TNK for the put holder lock at take. Keep SOL and
+TNK for network fees. The `tnkReserve` inside a RESET lock funds its final transfers and is distinct from wallet
+fees. Opening fees go directly to the locks registry collector; put escrow funding also includes the program's
+escrow fees. [LOCKS.md](LOCKS.md) describes the payment rules and refund conditions.
+
+Back up the complete locks data directory, the separate identity and box key, registry snapshots, sealed
+releases, payment intents and signed transaction journals. Keep encryption passwords separately. Recovery
+reconciles pending transactions instead of signing a second payment. Do not delete a pending journal because
+a payment or sweep is slow. Status and events expose public facts only, never scalar shares or signing keys.
+
+RESET/TNK locks rely on enough signers surviving and retaining their shares; they cannot be refunded without the
+threshold. For put USDC locks, the writer may refund through the escrow after `refundAfter` while unclaimed.
+Losing the writer's wallet key also loses its ability to sign that refund. See [operator backups](OPERATORS.md#running-lock-signers-and-a-locks-venue).
+
+Lock admissions, spot trading and withdrawals share the wallet admission queue. Pending holder funding and the
+full opening amount are reserved before a put take. Final lock funds appear outside the spendable wallet.
+Network reserves include the pending funding transfers and a SOL allowance for each active position.
+Opening fees are deducted from the maker receipt, with exact total, fee and net amounts shown. Put exercise
+spends only Solana network fees on a signed memo. Early release is usually 1–2 hours after payment.
+Signers can be replaced by handover while at least k survive; a put writer can refund after `refundAfter`.

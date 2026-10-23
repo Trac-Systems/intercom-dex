@@ -271,12 +271,12 @@ test('two taker identities choosing the same commitment cannot overwrite a reser
 test('maker emits strict decline reasons once per nonce, declines malformed takes as invalid, and never answers unauthenticated, unparseable or unrelated ones', async () => {
   const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
   const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
-  const ch = 'intercom-dex:t:' + offer.offerId;
+  const ch = 'intercom-dex:t:' + offer.offerId, now = nowSec();
   const base = peer => ({ offerId: offer.offerId, pair: offer.pair, registryVersion: 1, software: '0.1.0', baseAmount: offer.baseAmount,
-    taker: peer.me, commitment: random32(), sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 });
+    taker: peer.me, commitment: random32(), sendBy: now + 900, refundAfter: now + 86400 });
   registryPair(f.registry, 'TNK/USDC').minBaseAmount = '1000';
   for (const [patch, reason] of [[{ software: '0.0.9' }, 'version'], [{ baseAmount: '1000000000000000001' }, 'insufficient'], [{ baseAmount: '999' }, 'invalid'],
-    [{ sendBy: nowSec() - 1 }, 'invalid'], [{ pair: 'RESET/USDC' }, 'invalid'], [{ registryVersion: 2 }, 'invalid'], [{ refundAfter: nowSec() + 86401 }, 'invalid']]) {
+    [{ sendBy: now - 1 }, 'invalid'], [{ pair: 'RESET/USDC' }, 'invalid'], [{ registryVersion: 2 }, 'invalid'], [{ refundAfter: now + 86401 }, 'invalid']]) {
     const peer = party(), nonce = await channelPost(t, bridge, peer, 'take', { ...base(peer), ...patch }, ch);
     const last = bridge.sent.at(-1).envelope;
     assert.equal(last.kind, 'decline'); assert.deepEqual(last.body, { offerId: offer.offerId, takeNonce: nonce, reason });

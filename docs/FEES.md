@@ -63,3 +63,22 @@ per collector, and signer payout credits tagged with their collector.
 The local stack scenario is `DEX_PROOF_ZKEY=/absolute/proving.zkey node tests/e2e/stack.mjs fee-change`.
 It holds a taken trade after signed terms, rotates the venue fee, then checks that
 the old trade and a new trade finish with exact token balances in both fee vaults.
+## Lock fees
+
+Locks fees come out of what the maker receives. The taker pays exactly the shown principal or premium.
+Loans charge `floor(principal * fee.loanBps / 10000)`; calls and puts charge
+`min(premium, max(fee.optionMin, floor(premium * fee.optionBps / 10000)))`.
+
+At 50 loan bps, 100 USDC pays 99.50 to the borrower and 0.50 to `fee.collector`. An agreed 103 USDC repayment
+stays 103. At 1000 option bps and a 0.05 USDC minimum, a 5 USDC premium pays 4.50 to the writer and 0.50 to the
+collector. A 0.01 USDC premium is all fee, capped at 0.01. Rates are at most 1000 bps. Previews and position
+rows show exact `openingTotal`, `makerReceives` and `openingFee` amounts.
+
+There is no locks service fee on repayment, exercise, cancellation or sweep. Put writers fund `strikeTotal`
+plus only the escrow program's global platform fee: `fee.escrowCollector` must have a zero-bps trade config.
+The holder locks RESET/TNK plus `tnkReserve` before paying the premium. A put exercise is a small Solana memo.
+Both sides keep SOL for fees and account rent; Trac locks include TNK for sweeps.
+
+`fee.signerShareBps` defaults to 4000. That portion goes in equal parts to committee members in qualified
+set Q that delivered valid releases for the final decision; the venue keeps the rest. Credits remain
+provisional 7 days before becoming final. See [Locks](LOCKS.md).

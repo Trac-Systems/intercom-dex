@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { z } from 'zod';
 import { hexKey, chatInputSchema, chatSinceSchema } from '../core/schemas.js';
 import { seal } from '../core/envelope.js';
@@ -13,15 +13,17 @@ import { BookView } from '../market/book-feed.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 import { MarketView } from '../market-feed/view.js';
 import { TradeHistory } from '../market-feed/history.js';
+import { MAIN as LOCKS_MAIN, receiver as locksReceiver, join as joinLocks } from '../locks/transport.js';
 
 const MAIN = 'intercom-dex', OFFERS = 'intercom-dex:offers';
 const viewerInput = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$(?![\s\S])/), name: z.string().min(1).max(256), text: z.string() }).strict();
 
 // Public data only. No trade host, proof worker, chain adapter or wallet is constructed.
 export class MarketFeed {
-  constructor({ bridge, identity, store, serviceKey, profile, now = nowSec, log = () => {}, history = new TradeHistory() }) {
-    hexKey.parse(serviceKey); hexKey.parse(identity.publicKey);
-    Object.assign(this, { bridge, identity, store, serviceKey, profile, now, log, history });
+  constructor({ bridge, identity, store, serviceKey, profile, locksVenueKey = null, now = nowSec, log = () => {}, history = new TradeHistory() }) {
+    hexKey.parse(serviceKey); hexKey.parse(identity.publicKey); if (locksVenueKey !== null) hexKey.parse(locksVenueKey);
+    Object.assign(this, { bridge, identity, store, serviceKey, profile, locksVenueKey, now, log, history });
+    this.locksReceive = locksReceiver(now); this.locks = null;
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.verify = publicReceiver(now);
@@ -42,6 +44,7 @@ export class MarketFeed {
     try {
       await this.relays.update(this.registry.usable);
       for (const channel of [MAIN, OFFERS, CHAT_CHANNEL]) await this.bridge.join(channel);
+      if (this.locksVenueKey) await joinLocks(this.bridge, LOCKS_MAIN);
       this.timer = setInterval(() => { try { this.view(); } catch { this.log('market-feed refresh failed'); } }, 1000);
     } catch (error) { this.stop(); throw error; }
   }
@@ -59,6 +62,7 @@ export class MarketFeed {
 
   async receive(channel, raw) {
     if (raw?.ch !== channel) return false;
+    if (channel === LOCKS_MAIN) return this.#locks(raw);
     if (channel === CHAT_CHANNEL) {
       const record = this.chat.receive(raw);
       if (!record) return false;
@@ -104,6 +108,18 @@ export class MarketFeed {
   }
 
   view() { return this.market.snapshot(this.registry.usable); }
+
+  // The lock venue's newest signed summary, served as it came (Market World's loans and options).
+  #locks(raw) {
+    if (!this.locksVenueKey || raw.from !== this.locksVenueKey || raw.kind !== 'summary') return false;
+    const m = this.locksReceive(raw);
+    if (!m || m.body.ts > this.now() + 60 || this.locks && m.body.ts <= this.locks.ts) return false;
+    const json = JSON.stringify({ v: 1, ...m.body });
+    this.locks = { ts: m.body.ts, json, etag: '"' + createHash('sha256').update(json).digest('hex') + '"' };
+    return true;
+  }
+
+  locksView() { return this.locks; }
 
   historyPair(pair) { return registryPair(this.registry.usable, pair, { open: false }); }
 

@@ -5,37 +5,43 @@ import { tradingView } from './trading.js';
 import { walletsView } from './wallets.js';
 import { trafficView } from './traffic.js';
 import { signerView, venueView } from './roles.js';
+import { locks, lendView, optionsView } from './locks.js';
 
 const main = $('#main');
 const ROLE_TABS = { trader: ['Trading', tradingView], signer: ['Signer', signerView], service: ['Venue', venueView] };
+const LOCK_TABS = [['lend', 'Borrow & Lend'], ['options', 'Options']];
 const views = {};
-let data = null, tab = null;
+let data = null, tab = null, picked = false;
 
 function tabs() {
-  const list = [[data.role, ROLE_TABS[data.role][0]], ...(data.wallets ? [['wallets', 'Wallets']] : []), ['traffic', 'Traffic']];
+  const list = [[data.role, ROLE_TABS[data.role][0]], ...(data.role === 'trader' && locks.available ? LOCK_TABS : []), ...(data.wallets ? [['wallets', 'Wallets']] : []), ['traffic', 'Traffic']];
   const wanted = location.hash.slice(1);
   tab ??= list.some(([id]) => id === wanted) ? wanted : data.role;
+  // The locks tabs appear after the first poll; a link straight to one of them still lands there.
+  if (!picked && tab !== wanted && list.some(([id]) => id === wanted)) tab = wanted;
   $('#tabs').replaceChildren(...list.map(([id, label]) => h('button', { role: 'tab', type: 'button', 'aria-selected': String(tab === id), onclick: () => {
-    tab = id; history.replaceState(null, '', id === data.role ? '#' : `#${id}`); tabs(); show();
-  } }, label)));
+    tab = id; picked = true; history.replaceState(null, '', id === data.role ? '#' : `#${id}`); tabs(); show();
+  } }, label, locks.badge(id))));
+  $('#tabs [aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 function show() {
-  const make = { wallets: walletsView, traffic: trafficView }[tab] ?? ROLE_TABS[data.role][1];
+  const make = { wallets: walletsView, traffic: trafficView, lend: lendView, options: optionsView }[tab] ?? ROLE_TABS[data.role][1];
   views[tab] ??= make();
   if (main.firstChild !== views[tab].el) main.replaceChildren(views[tab].el);
-  main.className = tab === 'trader' ? 'wide' : '';
+  main.className = ['trader', 'lend', 'options'].includes(tab) ? 'wide' : '';
   views[tab].update(data);
 }
 
 async function poll() {
   try {
-    data = await api('/api/state');
+    data = await api('/api/state').catch(e => { if (locks.demo) return data ?? locks.demoState(); throw e; });
     $('#stale').hidden = true;
     $('#role').textContent = { trader: 'trader', signer: 'signer', service: 'venue' }[data.role];
     $('#network').textContent = data.network;
     if (!$('#tabs').children.length) tabs();
     show();
+    if (data.role === 'trader') locks.poll().then(appeared => { if (appeared) { tabs(); show(); } });
   } catch { $('#stale').hidden = false; }
 }
 onAction(() => poll());

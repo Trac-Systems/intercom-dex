@@ -101,3 +101,35 @@ set and signersOnline is filled, then keep reporting unfinished trades and call 
 Dashboard for the user: with "dashboard": {"port": 47202} in the trader config, open
 http://127.0.0.1:47202/?t=<contents of dataDir/dashboard.token>. It shows every trade with its deadlines,
 balances, offers and signers, and asks for confirmation before each action. A new token is written at every start.
+Locks: loans, covered calls and cash-secured puts have a separate pinned venue, registry, identities and channels.
+Exact protocol and registry limits: [LOCKS.md](LOCKS.md). Agent procedure: [SKILL.md](../SKILL.md#locks-tools).
+dex_locks {"product":"loan","page":0} - posted whole positions, 50/page; asset RESET or TNK; optional minSize/maxSize
+  in the selected asset base units and minTerm/maxTerm in counted Bitcoin blocks. Returns rows,page,total,next.
+dex_lock_post {"product":"loan","terms":{}} - terms must contain collateral, principal, repay, termBlocks,
+  offerUntilBlock for loans; amount,premium,strikeTotal,expiryBlock,offerUntilBlock for calls and puts.
+  Amounts are positive integer strings: RESET 8 decimals, TNK 18, USDC 6; TNK reserve comes from the registry.
+dex_lock_take {"positionId":"<64 hex>"} - reserve then pay only with k reservations and payMarginSec left.
+dex_lock_pay {"positionId":"<64 hex>","step":"repay"} - full repayment or exercise; overpay accepted, partial ignored.
+dex_lock_cancel {"positionId":"<64 hex>"} - maker cancellation request, refused while a reservation is live.
+dex_lock_status {} - own positions, now,ifMissed,nextAction,blocksLeft,dueBlock/expiryBlock,refundAfter and settings.
+  Optional positionId selects one. Optional settings updates autoRepay,repayBlocksBefore,autoExercise,
+  exerciseBlocksBefore,exerciseMarginBps,autoSweep. Defaults true,6,true,6,100,true. autoSweep cannot be disabled.
+dex_lock_events {"since":0} - events,next,oldest,truncated; retain next for the next read. Last 1000 events retained.
+Errors are {ok:false,reason,whatToDo}. already_taken before payment costs nothing; payment_pending needs the same
+transaction journal and reconciliation, never a duplicate payment. protocol_unavailable refuses unsupported funding.
+Solana deadlines require finalized matching payment blockTime < verified Bitcoin header T(N); equality is late.
+Put exercise is a finalized holder-signed Solana memo with blockTime < T(expiryBlock). Display time is blocks x 10 minutes.
+Keep the trader and peer running through payment and collection. An offline trader cannot repay or exercise;
+loans default to the lender's collateral, unused options lose their premium. RESET/TNK locks have no trustless
+refund and need enough surviving signer shares. Put writers can refund unclaimed USDC through escrow after
+refundAfter. Explain the commitment and obtain permission within the user's trading scope before post or take.
+
+All locks tools accept asset RESET or TNK. Every relevant row includes asset and exact opening total, maker
+receipt and fee. Fee is deducted from the maker: loan floor(principal*loanBps/10000); option
+min(premium,max(optionMin,floor(premium*optionBps/10000))). 100 USDC at 50 bps = 99.50 to borrower + 0.50 fee;
+5 USDC at 1000 bps = 4.50 to writer + 0.50 fee. No fee on repay/exercise/cancel/sweep.
+Protect against a drop locks your RESET/TNK for the term: reservation, holder lock H DKG and funding, then
+premium. Exercise is a small Solana message: E goes to holder, H to writer; expiry returns each lock.
+Early release is usually 1–2 hours after payment (median time trails the newest block by about an hour, and the RESET count trails Bitcoin by a few blocks), once blockTime <= median of 11 verified Bitcoin header times.
+Put writers can refund after refundAfter. RESET/TNK depend on enough signers; handover can replace signers
+while at least k survive. Trader uses one peer with locks:true; signer peers stay dedicated.

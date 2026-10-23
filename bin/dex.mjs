@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs one dex role (service | signer | trader | market-feed) next to its own peer. Usage: node bin/dex.mjs --config <abs path>
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import { createServer } from 'node:http';
@@ -9,7 +9,10 @@ import { Keypair } from '@solana/web3.js';
 import { Bridge } from '../src/net/bridge.js';
 import { openStore } from '../src/roles/store.js';
 import { secretFile } from '../src/roles/common.js';
-import { readPrivateFile, openKeyring } from '../src/roles/keyring.js';
+import { readPrivateFile, openKeyring, createKeyring } from '../src/roles/keyring.js';
+import { LockSigner } from '../src/roles/lock-signer.js';
+import { Clock } from '../src/locks/clock.js';
+import { LockVenue } from '../src/roles/lock-venue.js';
 import { Trader } from '../src/roles/trader.js';
 import { Signer } from '../src/roles/signer.js';
 import { Service } from '../src/roles/service.js';
@@ -19,6 +22,7 @@ import { createTracAdapter } from '../src/trac/adapter.js';
 import { ensureWallets, setupWallets, exportWallets } from '../src/wallets/setup.js';
 import { restoreVenue } from '../src/wallets/venue-backup.js';
 import { hiddenInput } from '../src/wallets/input.js';
+import { createTraderLocks } from '../src/wallets/locks.js';
 import { WalletManager } from '../src/wallets/manager.js';
 import { controlCall } from '../src/wallets/control.js';
 import { FeeManager } from '../src/fees/manager.js';
@@ -47,6 +51,8 @@ const allowed = { run: ['first-launch'], setup: ['import-solana', 'import-trac-m
 if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') ? 2 : 1)) throw new Error('Expected setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, or no command');
 if (Object.keys(values).some(k => k !== 'config' && !allowed[command].includes(k))) throw new Error('Option does not apply to this command');
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
+const locksRole = ['lock-signer', 'lock-venue'].includes(config.role);
+if (locksRole && !['run', 'setup'].includes(command)) throw new Error('Locks roles support run and setup');
 if (config.role === 'market-feed' && command !== 'run') throw new Error('market-feed only supports run');
 if (values['first-launch'] && config.role !== 'service') throw new Error('--first-launch is for the first start of a new venue only');
 if (['fee set', 'fee platform'].includes(command)) {
@@ -70,6 +76,13 @@ let profile;
 try { profile = resolveNetwork(config); }
 catch (error) { console.error(error.message); process.exit(1); }
 if (command === 'setup') {
+  if (locksRole) {
+    if (!isAbsolute(config.dataDir ?? '')) throw new Error('Absolute locks dataDir required');
+    mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+    const password = process.env[config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'] ?? await hiddenInput('New locks keyring password: ');
+    console.log(JSON.stringify(await createKeyring(join(config.dataDir, 'locks-keyring.json'), password), null, 2));
+    process.exit(0);
+  }
   const password = process.env[config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'] ?? await hiddenInput('New keyring password: ');
   const tracPassword = config.trac?.passwordEnv ? process.env[config.trac.passwordEnv] ?? await hiddenInput('New Trac wallet password: ') : password;
   const mnemonic = values['import-trac-mnemonic'] ? await hiddenInput('Trac mnemonic: ') : undefined;
@@ -119,11 +132,11 @@ if (['balances', 'withdraw'].includes(command)) {
 }
 const log = (...a) => console.log(new Date().toISOString(), config.role, ...a);
 
-if (!['service', 'signer', 'trader', 'market-feed'].includes(config.role)) throw new Error('role must be service, signer, trader or market-feed');
+if (!['service', 'signer', 'trader', 'market-feed', 'lock-signer', 'lock-venue'].includes(config.role)) throw new Error('Invalid role');
 if (config.role === 'trader' && (typeof config.proof?.zkey !== 'string' || !isAbsolute(config.proof.zkey))) {
   throw new Error('Traders require proof.zkey as an absolute path');
 }
-if (config.role !== 'market-feed') await checkProofFiles(config.role === 'trader' ? { zkeyPath: config.proof.zkey } : {});
+if (config.role !== 'market-feed' && !locksRole) await checkProofFiles(config.role === 'trader' ? { zkeyPath: config.proof.zkey } : {});
 
 const bridge = await new Bridge({ url: config.bridge.url, token: readPrivateFile(config.bridge.tokenFile, 256).trim() }).connect();
 const peerInfo = (await bridge.info()).info;
@@ -132,7 +145,24 @@ if (!/^[0-9a-f]{64}$/.test(config.servicePeerKey ?? '') || peerInfo.servicePeerK
   throw new Error('Role and peer must agree on role and servicePeerKey');
 }
 if (config.role === 'service' && peerInfo.peerPubkey !== config.servicePeerKey) throw new Error('Service peer key does not match owner');
-if (config.role === 'market-feed') {
+if (locksRole) {
+  if (!isAbsolute(config.dataDir ?? '')) throw new Error('Absolute locks dataDir required');
+  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
+  const file = join(config.dataDir, 'locks-keyring.json');
+  const password = process.env[config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'] ?? await hiddenInput('Locks keyring password: ');
+  if (!existsSync(file)) await createKeyring(file, password);
+  const keys = await openKeyring(file, password), store = openStore(join(config.dataDir, 'locks'), keys.storeKey);
+  const rpc = solanaSettings(config, profile);
+  if (config.role === 'lock-signer' && !rpc) throw new Error('Locks signer requires Solana RPC readers');
+  const role = config.role === 'lock-venue' ? new LockVenue({ bridge, identity: keys.identity, store, registryInput: config.registry, rpc, clock: new Clock({ bridge }), log }) :
+    new LockSigner({ bridge, identity: keys.identity, box: keys.box, store, serviceKey: config.serviceKey, profile, rpc, log });
+  await role.start();
+  if (config.control) createServer(controlHandler({ token: secretFile(config.control.tokenFile), role })).listen(config.control.port, '127.0.0.1');
+  console.log('DEX_ROLE_READY ' + JSON.stringify({ role: config.role, lockKey: keys.identity.publicKey, boxKey: keys.box.publicKey }));
+  const stop = code => { role.stop(); keys.storeKey.fill(0); bridge.close(); process.exit(code); };
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => stop(0));
+  bridge.on('close', () => stop(75));
+} else if (config.role === 'market-feed') {
   const password = process.env[config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'] ?? await hiddenInput('Market feed keyring password: ');
   const runtime = await startMarketFeed({ config, profile, bridge, password, log });
   console.log('DEX_ROLE_READY ' + JSON.stringify({ role: config.role, dexKey: runtime.feed.identity.publicKey }));
@@ -165,7 +195,7 @@ if (config.role === 'market-feed') {
     commitment: 'finalized', finality: 'finalized', confirmationTimeoutMs: 90000, mint: profile.mint, programId: profile.programId }) : null;
   const trac = createTracAdapter({ bridge, wallet, profile, resetGatewayUrl: config.trac?.resetGatewayUrl ?? null, usedTxFolder: join(config.dataDir, 'used-tx'), intentFolder: join(config.dataDir, 'trac-intents') });
 
-  let role;
+  let role, wallets;
   if (config.role === 'service') {
     role = new Service({ bridge, identity, store, solana, trac, profile, registryInput: config.registry, latest: config.latest, log,
       firstLaunch: values['first-launch'] === true });
@@ -174,9 +204,10 @@ if (config.role === 'market-feed') {
   } else if (config.role === 'trader') {
     const me = { dexKey: identity.publicKey, tracAddr: wallet.address, solAddr: keypair.publicKey.toBase58() };
     role = new Trader({ bridge, identity, store, solana, trac, me, profile, serviceKey: config.serviceKey, mint: profile.mint,
-      platformCollector: profile.platformCollector, proof: config.proof, log });
+      platformCollector: profile.platformCollector, proof: config.proof, log,
+      locks: createTraderLocks({ config, bridge, store, keypair, wallet, profile, rpc, wallets: () => wallets }) });
   } else throw new Error('role must be service, signer or trader');
-  const wallets = config.role === 'signer' ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
+  wallets = config.role === 'signer' ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
     addresses: { solana: keypair.publicKey.toBase58(), trac: wallet?.address ?? null } });
   if (wallets) role.wallets = wallets;
   const fees = config.role === 'service' ? new FeeManager({ config, keys, store, service: role, solana }) : null;

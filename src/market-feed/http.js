@@ -43,6 +43,13 @@ export async function startMarketFeedHttp({ feed, port, viewerKeyFile }) {
         if (req.headers['if-none-match']?.split(',').some(v => v.trim() === '*' || v.trim().replace(/^W\//, '') === etag)) return send(304, undefined, headers);
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', ...headers }); res.end(json); return;
       }
+      if (req.method === 'GET' && url.pathname === '/v1/locks/view' && !url.search) {
+        const locks = feed.locksView?.();
+        if (!locks) return send(503, { ok: false, error: 'locks_unavailable' }, { 'cache-control': 'max-age=5' });
+        const headers = { etag: locks.etag, 'cache-control': 'max-age=5' };
+        if (req.headers['if-none-match']?.split(',').some(v => v.trim() === '*' || v.trim().replace(/^W\//, '') === locks.etag)) return send(304, undefined, headers);
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', ...headers }); res.end(locks.json); return;
+      }
       if (req.method === 'GET' && ['/v1/market/candles', '/v1/market/trades'].includes(url.pathname)) {
         const candles = url.pathname.endsWith('/candles'); let query;
         try { query = historyQuery(url.searchParams, candles, feed); }

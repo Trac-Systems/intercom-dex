@@ -1,3 +1,4 @@
+import { locksControlHandler } from '../dashboard/server.js';
 // Shared local control handler; the runner binds it only to 127.0.0.1.
 export function controlHandler({ token, role, wallets = null, fees = null }) {
   const routes = {
@@ -21,7 +22,7 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
       return { peerKeys: await role.warmNow() };
     } } : {}),
   };
-  return (req, res) => {
+  const handler = (req, res) => {
     let body = '';
     req.on('data', c => { body += c; if (body.length > 65536) req.destroy(); });
     req.on('end', async () => {
@@ -35,4 +36,5 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
       } catch (e) { reply(400, { error: e.message }); }
     });
   };
+  return role.locks ? locksControlHandler({ token, client: role.locks, fallback: handler }) : handler;
 }
