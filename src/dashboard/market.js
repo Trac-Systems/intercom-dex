@@ -57,7 +57,8 @@ export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = b
     if (seen.offer.pair !== pair.pair || seen.offer.maker.dexKey === dexKey) continue;
     if (taken.skip.has(seen.offer.offerId)) continue;
     const o = availableOffer(seen, book, inventory, now, heardAt), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
-    if (left > 0n) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false, seen.lastSeen ?? seen.firstSeen);
+    // A rest below the pair's smallest trade cannot be taken.
+    if (left > 0n && left >= BigInt(pair.minBaseAmount ?? 1)) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false, seen.lastSeen ?? seen.firstSeen);
   }
   for (const o of mine) add({ ...o, baseAmount: o.available }, now, true);
   const levels = side => {

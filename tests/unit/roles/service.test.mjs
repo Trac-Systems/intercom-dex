@@ -710,6 +710,22 @@ test('a restarted venue keeps its book: offers seen in the last five minutes ret
   assert.equal(setup({ dir: s.dir, immediate: true, clock: s.clock }).service.book.snapshot(s.offer.pair, s.clock.t).length, 0, 'cancelled');
 });
 
+test('the venue leaves out an offer whose free rest is below the smallest trade', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)); };
+  const size = () => s.bridge.sent.filter(x => x.envelope.kind === 'book' && x.envelope.body.pair === s.offer.pair).at(-1)
+    .envelope.body.remaining.find(r => r.offerId === s.offer.offerId)?.amount ?? null;
+  await tick(5); assert.equal(size(), '3000000000000000000');
+  await s.summon(s.trade()); await s.summon(s.trade());
+  await tick(60); assert.equal(size(), '1000000000000000000');
+  // The pair's smallest trade rises to 1.5 while two trades of 1 hold part of the offer.
+  s.service.registry.pairs.find(p => p.pair === s.offer.pair).minBaseAmount = '1500000000000000000';
+  await tick(60); assert.equal(size(), null, 'a free rest of 1 is below the smallest trade of 1.5');
+});
+
 test('the published size leaves out summoned trades in progress, counts a logged trade once, and frees a dead one', async t => {
   const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
   t.mock.method(globalThis, 'clearInterval', () => {});

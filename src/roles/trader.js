@@ -357,7 +357,14 @@ export class Trader {
     for (const [id, offer] of this.mine) {
       const inv = this.#inventory(offer);
       if (offer.expiresAt <= now || inv.filled >= BigInt(offer.baseAmount)) { this.mine.delete(id); continue; }
-      try { this.#newPair(offer.pair, offer.registryVersion, offer.software); } catch { continue; }
+      let entry;
+      try { entry = this.#newPair(offer.pair, offer.registryVersion, offer.software); } catch { continue; }
+      // A rest below the pair's smallest trade can never be taken: the offer ends instead of being announced as dust.
+      if (inv.reserved === 0n && inv.available < BigInt(entry.minBaseAmount)) {
+        this.log('offer ends, its rest is below the smallest trade', id.slice(0, 12), inv.available.toString());
+        await this.cancelOffer(id).catch(e => this.log('offer end', e.message));
+        continue;
+      }
       if (inv.available > 0n) {
         await this.host.sendPublic(OFFERS, 'offer', offer);
         this.offers.set(id, { offer, from: this.identity.publicKey, firstSeen: this.offers.get(id)?.firstSeen ?? now, lastSeen: nowSec() });

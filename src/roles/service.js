@@ -235,9 +235,10 @@ export class Service {
         }
         return funded;
       }).flatMap(o => {
-        // The published size is what is still free: summoned trades in progress hold part of it.
+        // The published size is what is still free: summoned trades in progress hold part of it. A free rest below the
+        // pair's smallest trade cannot be taken and is left out.
         const free = BigInt(o.baseAmount) - (pending.get(o.offerId) ?? 0n);
-        return free > 0n ? [{ ...o, baseAmount: free.toString() }] : [];
+        return free >= BigInt(p.minBaseAmount) ? [{ ...o, baseAmount: free.toString() }] : [];
       });
       this.unfunded[p.pair] = listed.length - offers.length;
       const message = this.bookFeed.next(p.pair, this.registry.version, offers, now, () => {

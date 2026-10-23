@@ -470,6 +470,25 @@ test('maker reannounces every 45 seconds; traders rebuild service books but stil
   timers.find(x => x.ms === 45000).fn(); await new Promise(r => setImmediate(r)); assert.equal(bridge.sent.length, count);
 });
 
+test('an offer whose rest is below the smallest trade ends instead of being announced', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const f = fixture(); registryPair(f.registry, 'TNK/USDC').minBaseAmount = '1000';
+  const { t: maker, bridge } = await trader(party(), { registry: f.registry });
+  const o = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1500', price: '1' });
+  const add = (key, phase) => maker.host.trades.set(key, { key, role: 'seller', state: { offerId: o.offerId, mode: 'maker', phase, draft: { baseAmount: '1000' } } });
+  add('a', 'awaitDeal');
+  const announce = async () => { timers.find(x => x.ms === 45000).fn(); for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+  await announce();
+  assert.ok(maker.mine.has(o.offerId), 'a running trade may still give its amount back');
+  maker.host.trades.get('a').state.phase = 'complete';
+  const offers = bridge.sent.filter(x => x.envelope.kind === 'offer').length;
+  await announce();
+  assert.equal(maker.mine.has(o.offerId), false);
+  assert.ok(bridge.sent.some(x => x.envelope.kind === 'cancel' && x.envelope.body.offerId === o.offerId));
+  assert.equal(bridge.sent.filter(x => x.envelope.kind === 'offer').length, offers, 'the 500 rest is not announced');
+});
+
 test('only the buyer summons with both signatures, repeats while waiting, and stops at k acks', async () => {
   const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
   const id = termsTradeId(f.terms), ch = 'intercom-dex:t:' + id;

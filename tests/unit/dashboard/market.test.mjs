@@ -137,3 +137,9 @@ test('makers on 0.1.14+ announce every 45 s, so they count as silent after 70 s;
   assert.equal(build([fast, old]).asks[0].take.offerId, old.offer.offerId);   // the newer maker went quiet 100 s ago
   assert.equal(build([{ ...fast, lastSeen: now - 30 }, old]).asks[0].take.offerId, fast.offer.offerId);
 });
+
+test("another maker's rest below the pair's smallest trade is not shown", () => {
+  const dust = offer(1, '1', 'sell', '1'), real = offer(2, '2', 'sell', '100000000');
+  const strict = { ...pair, minBaseAmount: '100' };
+  assert.deepEqual(buildBook({ pair: strict, offers: [dust, real], dexKey, now }).asks.map(l => l.price), ['2']);
+});
