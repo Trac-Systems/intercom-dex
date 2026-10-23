@@ -2,6 +2,8 @@ import { buildRegistry } from '../core/registry.js';
 import { tradeId as termsTradeId, transferNonce, validateTerms } from '../core/terms.js';
 import { stableJSON, sha256Hex, hexToBytes, fromLe32, le32 } from '../core/canonical.js';
 import { reconstruct, verifyShare } from '../core/vss.js';
+import { checkDealShape, lockStatement } from '../core/dealing.js';
+import { verifyLock } from '../proof/lockproof.js';
 import { quoteAmount, registryPair, pairStatus, supportedBase, tradePrice } from '../market/assets.js';
 import { BookFeed } from '../market/book-feed.js';
 import { RegistryRelays } from '../net/relays.js';
@@ -28,6 +30,7 @@ export const MAX_UNPROVEN_WATCHES = 20000, UNMATCHED_PER_SENDER = 16;
 export const IN_FLIGHT_SLACK_SEC = 600;
 // How often the venue asks the committee for a logged trade's missing shares (ten minutes apart).
 export const SHARE_REQUESTS = 3;
+export const SHARE_ALERT_AFTER_SEC = 600, SHARE_ALERT_REPEAT_SEC = 7200;
 
 // The venue: publishes the signer registry, the order book and tickers, checks every reported trade on both chains
 // before logging it, and accounts the signers' share of the venue fee (paid later, after a holding period).
@@ -246,6 +249,7 @@ export class Service {
   async #public(channel, raw) {
     if (channel === CHAT_CHANNEL) { this.chat.receive(raw); return; }
     if (channel === SIGNERS && raw?.kind === 'sharePublish') return this.#shareMessage(raw);
+    if (channel === SIGNERS && ['deal', 'transferSent'].includes(raw?.kind)) return this.#tradeEvidence(raw);
     const m = this.receive(raw);
     if (!m || m.ch !== channel) return;
     if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from)) {
@@ -284,6 +288,99 @@ export class Service {
   // Only signers of the current registry count as online; anyone can send a heartbeat on the public channel.
   #listed(dexKey) { return this.registry.signers.some(s => s.dexKey === dexKey); }
 
+  // Forwarded envelopes retain the trader's signature and original trade channel.
+  #tradeEvidence(raw) {
+    return this.#serialize(async () => {
+      const id = raw?.body?.tradeId, name = `watch-${id}`;
+      const w = this.watched.has(id) && this.store.get(name);
+      if (!w || this.now() >= w.terms.refundAfter || raw.ch !== `intercom-dex:t:${id}`) return;
+      let m;
+      try { m = open(raw, { now: this.now(), seen: createReplayCache(), maxAgeSec: w.terms.refundAfter - w.terms.sendBy + 3600 }); }
+      catch { return; }
+      if (m.kind === 'transferSent' && m.from === w.terms.seller.dexKey && !w.txHash) {
+        this.store.put(name, { ...w, txHash: m.body.txHash });
+      }
+      if (m.kind === 'deal' && m.from === w.terms.buyer.dexKey && !w.deal) {
+        if (!checkDealShape(m.body, w.terms) || !await verifyLock(lockStatement(m.body), m.body.proof)) return;
+        const current = this.store.get(name);
+        if (current) this.store.put(name, { ...current, deal: { H: m.body.H, commitments: m.body.commitments } });
+      }
+    });
+  }
+
+  #shareCount(w) {
+    const r = this.settlements.get(w.tradeId), H = r?.status === 'logged' ? r.report.hashHex : w.deal?.H ?? w.escrowHash;
+    if (!H) return 0;
+    const groups = new Map();
+    for (const [index, x] of Object.entries(w.shares)) {
+      if (x.H !== H || x.commitments?.length !== w.terms.k || x.at > w.terms.refundAfter ||
+          !w.terms.committee[Number(index) - 1] || (w.deal && stableJSON(x.commitments) !== stableJSON(w.deal.commitments))) continue;
+      try {
+        if (!verifyShare(Number(index), fromLe32(hexToBytes(x.share, 32)), x.commitments)) continue;
+        const key = stableJSON(x.commitments);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ id: Number(index), share: fromLe32(hexToBytes(x.share, 32)) });
+      } catch {}
+    }
+    let have = 0;
+    for (const shares of groups.values()) {
+      // With a settlement but no saved deal, k shares must also open the settled hash.
+      if (!w.deal && shares.length >= w.terms.k && sha256Hex(le32(reconstruct(shares, w.terms.k))) !== H) continue;
+      have = Math.max(have, shares.length);
+    }
+    return have;
+  }
+
+  #alert(w) {
+    const now = this.now();
+    if (w.transferFinalAt == null || now - w.transferFinalAt < SHARE_ALERT_AFTER_SEC || now >= w.terms.refundAfter) return null;
+    const have = this.#shareCount(w), needed = w.terms.k;
+    return have < needed ? { tradeId: w.tradeId, have, needed, transferFinalAt: w.transferFinalAt, refundAfter: w.terms.refundAfter } : null;
+  }
+
+  async #checkShares() {
+    for (const [id, refundAfter] of this.watched) {
+      if (this.now() >= refundAfter) continue;
+      const name = `watch-${id}`;
+      let w = this.store.get(name);
+      const r = this.settlements.get(id), txHash = r?.report.txHash ?? w?.txHash;
+      if (!w || !txHash) continue;
+      if (w.transferFinalAt == null && r?.status === 'logged') {
+        w = { ...w, transferFinalAt: r.transferFinalAt ?? r.loggedAt };
+        this.store.put(name, w);
+      }
+      if (w.transferFinalAt == null) {
+        const t = w.terms;
+        let proof;
+        try { proof = await this.trac.verifyTransfer({ asset: t.base.id, txHash, from: t.seller.tracAddr,
+          to: t.buyer.tracAddr, minAmount: t.baseAmount, nonce: transferNonce(id), tradeId: id, finalBefore: Number.MAX_SAFE_INTEGER }); }
+        catch { continue; }
+        if (proof?.ok !== true || proof.final !== true || proof.amount !== t.baseAmount) continue;
+        const at = proof.finalizedAt;
+        w = { ...this.store.get(name), transferFinalAt: Number.isSafeInteger(at) && at >= 0 && at <= this.now() ? at : this.now() };
+        this.store.put(name, w);
+      }
+      // A venue may have missed the forwarded deal. Bind published commitments to a matching finalized escrow
+      // before counting them; k shares must then reconstruct its hash, just as for a logged settlement.
+      if (!w.deal && !w.escrowHash && r?.status !== 'logged' && this.now() - (w.shareEscrowAt ?? -Infinity) >= 60) {
+        this.store.put(name, { ...w, shareEscrowAt: this.now() });
+        for (const hashHex of new Set(Object.values(w.shares).map(x => x.H))) {
+          let escrow;
+          try { escrow = await this.solana.checkEscrow({ terms: w.terms, hashHex, purpose: 'settlement' }); } catch { continue; }
+          if (escrow?.ok === true && ['active', 'claimed'].includes(escrow.status)) {
+            this.store.put(name, { ...this.store.get(name), escrowHash: hashHex });
+            break;
+          }
+        }
+        w = this.store.get(name);
+      }
+      const alert = this.#alert(w);
+      if (!alert || this.now() - (w.shareAlertAt ?? -Infinity) < SHARE_ALERT_REPEAT_SEC) continue;
+      this.store.put(name, { ...w, shareAlertAt: this.now() });
+      this.log(`ALERT shares missing ${id} ${alert.have}/${alert.needed}`);
+    }
+  }
+
   // The service watches trades whose committee it verified, so it knows who may publish which share.
   #summon(m) {
     try {
@@ -302,7 +399,7 @@ export class Service {
       for (const [id, refundAfter] of this.watched) if (refundAfter + PAYOUT_DELAY + DAY < now) this.#archive(id);
       for (const [id, until] of this.unproven) {
         if (proven || this.unproven.size < MAX_UNPROVEN_WATCHES) break;
-        if (until <= now && !this.settlements.has(id)) this.#archive(id);
+        if (until <= now && !this.settlements.has(id) && !(this.store.get(`watch-${id}`)?.txHash && this.watched.get(id) > now)) this.#archive(id);
       }
       if (!proven && this.unproven.size >= MAX_UNPROVEN_WATCHES) {
         if (!this.waitingForWatch.has(tradeId)) {
@@ -466,6 +563,7 @@ export class Service {
           if (this.settlements.get(id).creditsFinal) this.store.delete(`watcharchive-${id}`);
         } catch (e) { this.log('settlement', id.slice(0, 12), e.message); }
       }
+      await this.#checkShares();
     });
   }
 
@@ -528,7 +626,8 @@ export class Service {
         termsHash: sha256Hex(stableJSON(terms)), escrowAddress, claimSignature: settledTx.signature, tracTxHash: txHash };
       const match = terms.offerId === offerId ? this.#offerMatches(offerId, terms) : false;
       const fill = match === true ? { offerId, amount: terms.baseAmount } : null;
-      return { status: 'logged', loggedAt: now, entry, fill, fillPending: match === null, published: false, credits: null };
+      return { status: 'logged', loggedAt: now, transferFinalAt: transfer.finalizedAt ?? now,
+        entry, fill, fillPending: match === null, published: false, credits: null };
     } catch (e) {
       if (e.definitive) return rejected(e.message);
       return { status: 'pending' };
@@ -629,6 +728,7 @@ export class Service {
       message: !meetsVersion(SOFTWARE, this.registry.minSoftware) ? 'update required' : '', pairs: pairStatus(this.registry),
       ...(this.latest ? { latest: this.latest } : {}), dexKey: this.identity.publicKey, registryVersion: this.registry.version, trades: count('logged'),
       fee: this.registry.fee, chat: this.readChat(),
+      alerts: [...this.watched.keys()].map(id => this.store.get(`watch-${id}`)).filter(Boolean).map(w => this.#alert(w)).filter(Boolean),
       feeAccounting: Object.fromEntries(Object.entries(accounting).map(([collector, r]) => [collector,
         { ...r, fees: r.fees.toString(), signerCredits: r.signerCredits.toString() }])),
       settlements: { pending: count('pending'), rejected: count('rejected'), expired: count('expired') },

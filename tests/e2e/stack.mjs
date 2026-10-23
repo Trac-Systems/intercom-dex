@@ -362,6 +362,28 @@ try {
     }, 360000);
     const before = { alice: await usdcOf('alice'), bob: await usdcOf('bob'), aliceReset: await resetOf('alice'), bobReset: await resetOf('bob'), aliceTnk: await tnkOf('alice'), bobTnk: await tnkOf('bob') };
     let r;
+    if (['reset-retry', 'tnk-retry'].includes(name)) {
+      const asset = name === 'reset-retry' ? 'RESET' : 'TNK';
+      const attack = { kind: 'transfer-retry', asset, release: false };
+      await setAttack(attack);
+      r = await trade(name, { maker: 'alice', taker: 'bob', pair: asset + '/USDC', side: 'sell',
+        baseAmount: asset === 'RESET' ? '50000' : '2000000000000000000', price: asset === 'RESET' ? '2000' : '0.75',
+        afterTake: async () => {
+          await until('unconfirmed seller remains sending across retries', async () => {
+            const text = await fs.readFile(path.join(logDir, 'role-alice.log'), 'utf8');
+            return text.split('\n').filter(l => l.startsWith('DEX_E2E_TRANSFER_BYTES ') && l.includes('"dropped":true') && l.includes(`"asset":"${asset}"`)).length >= 2;
+          });
+          const seller = (await api('alice', 'GET', '/status')).trades.find(t => t.phase === 'transferring');
+          assert.ok(seller, 'a receipt is not a final transfer');
+          assert.equal(await resetOf('bob'), before.bobReset); assert.equal(await tnkOf('bob'), before.bobTnk);
+          await roleProc.alice.stop(); await setAttack({ ...attack, release: true }); await startRole('alice');
+        } });
+      const text = await fs.readFile(path.join(logDir, 'role-alice.log'), 'utf8');
+      const bytes = text.split('\n').filter(l => l.startsWith('DEX_E2E_TRANSFER_BYTES ')).map(l => JSON.parse(l.slice('DEX_E2E_TRANSFER_BYTES '.length))).filter(x => x.asset === asset);
+      assert.ok(bytes.some(x => x.dropped) && bytes.some(x => !x.dropped));
+      assert.equal(new Set(bytes.map(x => x.txHash)).size, 1, 'every retry and the restart use one transaction');
+      await setAttack({});
+    }
     if (name === 'fee-change') {
       const oldRegistry = await api('service', 'GET', '/status'), oldCollector = oldRegistry.fee.collector;
       const oldVaultBefore = BigInt(await feeVault(false, oldCollector)), platformBefore = BigInt(await feeVault(true));
@@ -580,6 +602,14 @@ try {
     }
     const after = { alice: await usdcOf('alice'), bob: await usdcOf('bob'), aliceReset: await resetOf('alice'), bobReset: await resetOf('bob'), aliceTnk: await tnkOf('alice'), bobTnk: await tnkOf('bob') };
     const delta = k => (BigInt(after[k]) - BigInt(before[k])).toString();
+    if (['reset-retry', 'tnk-retry'].includes(name)) {
+      const fees = calculateFees(r.taken.quoteAmount, 10, 50);
+      assert.equal(delta('alice'), fees.netAmount.toString()); assert.equal(delta('bob'), (-fees.totalAmount).toString());
+      assert.equal(delta('aliceReset'), name === 'reset-retry' ? '-50000' : '0');
+      assert.equal(delta('bobReset'), name === 'reset-retry' ? '50000' : '0');
+      assert.equal(delta('aliceTnk'), (BigInt(MSB_FEE_SPENT) - (name === 'tnk-retry' ? 2000000000000000000n : 0n)).toString());
+      assert.equal(delta('bobTnk'), name === 'tnk-retry' ? '2000000000000000000' : '0');
+    }
     if (name === 'relay') {
       const bob = await auditBridges.bob.call('relay_audit', {}), alice = await auditBridges.alice.call('relay_audit', {}), relay = await auditBridges.s1.call('relay_audit', {});
       assert.deepEqual(bob.direct, []); assert.ok(!alice.direct.includes(peerKeys.bob));

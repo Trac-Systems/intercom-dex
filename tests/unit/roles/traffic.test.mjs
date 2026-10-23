@@ -123,14 +123,14 @@ test('a signer joins channels only of trades it still runs or serves, and leaves
   assert.equal(Object.hasOwn(records.get('trade-serving'), 'channelsLeft'), false);
 });
 
-test('a signer still waiting for the dealing announces itself again every ten seconds, and only while it waits', async t => {
+test('a signer still waiting for the dealing announces itself again every thirty seconds, and only while it waits', async t => {
   const state = sim.snapshots.get('signer1:awaitDeal'), node = sim.nodes.get('signer1');
   const f = await host(t, 'signer', state, node.identity), ch = tradeChannel(state.tradeId);
   const presents = () => f.sent.filter(x => x.envelope.kind === 'present' && x.ch === ch && x.envelope.body.ref === state.tradeId).length;
-  await f.tick(0); await f.tick(9); assert.equal(presents(), 0);
+  await f.tick(0); await f.tick(29); assert.equal(presents(), 0);
   await f.tick(1); assert.equal(presents(), 1);
-  await f.tick(5); assert.equal(presents(), 1);
-  await f.tick(5); assert.equal(presents(), 2);
+  await f.tick(15); assert.equal(presents(), 1);
+  await f.tick(15); assert.equal(presents(), 2);
   f.tr.state = { ...f.tr.state, phase: 'holding' };
   await f.tick(30); assert.equal(presents(), 2);
 });
@@ -157,4 +157,20 @@ test('a signer passes the buyer dealing on over the signers channel once, and a 
   third.h.bridge.emit('message', 'intercom-dex:signers', seal({ kind: 'deal', body: sent.action.body, ch }, sim.nodes.get('seller').identity.secretKey, { ts: state.now, nonce: hex() }));
   await new Promise(r => setImmediate(r)); await third.tr.queue;
   assert.equal(third.tr.state.phase, 'awaitDeal');
+});
+
+test('a signer forwards authenticated seller transfer evidence once for venue monitoring', async t => {
+  const state = sim.snapshots.get('signer1:holding'), ch = tradeChannel(state.tradeId);
+  const f = await host(t, 'signer', state, sim.nodes.get('signer1').identity);
+  f.h.trac = { verifyTransfer: async () => ({ ok: false, final: true, reason: 'test complete' }) };
+  const body = { tradeId: state.tradeId, txHash: hex() };
+  const envelope = who => seal({ kind: 'transferSent', body, ch }, sim.nodes.get(who).identity.secretKey, { ts: state.now, nonce: hex() });
+  f.h.bridge.emit('message', ch, envelope('buyer'));
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.sent.filter(x => x.ch === 'intercom-dex:signers').length, 0);
+  const message = envelope('seller');
+  f.h.bridge.emit('message', ch, message); await new Promise(r => setImmediate(r)); await f.tr.queue;
+  f.h.bridge.emit('message', ch, message); await new Promise(r => setImmediate(r)); await f.tr.queue;
+  const forwarded = f.sent.filter(x => x.ch === 'intercom-dex:signers' && x.envelope.kind === 'transferSent');
+  assert.equal(forwarded.length, 1); assert.deepEqual(forwarded[0].envelope, message);
 });

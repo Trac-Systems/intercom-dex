@@ -752,3 +752,77 @@ test('service schedules full books at sixty seconds and sends only changed delta
     [{ offerId: s.offer.offerId, amount: '2000000000000000000' }]);
   assert.ok(books().at(-1).envelope.body.seq > first.body.seq);
 });
+
+test('venue alerts for fewer than k valid shares 10 minutes after finality, repeats at 2 h, survives restart and clears', async () => {
+  const s = setup({ immediate: true, refundSec: 20000 }), t = s.trade(), logs = [];
+  s.service.log = (...a) => logs.push(a.join(' '));
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  await s.publish(t, 1, t.shares[0]);
+  await s.publish(t, 2, bytesToHex(le32(randomScalar())));
+  await s.report(t);
+  const finalAt = s.clock.t;
+  s.clock.t = finalAt + 599; await s.service.reconcile(); assert.deepEqual(s.service.status().alerts, []);
+  s.clock.t++; await s.service.reconcile();
+  assert.deepEqual(s.service.status().alerts, [{ tradeId: t.id, have: 1, needed: 3, transferFinalAt: finalAt, refundAfter: t.terms.refundAfter }]);
+  assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 1);
+  assert.ok(logs.includes(`ALERT shares missing ${t.id} 1/3`));
+  const again = setup({ dir: s.dir, f: s.f, clock: s.clock, immediate: true });
+  again.service.log = (...a) => logs.push(a.join(' '));
+  await again.service.start(); again.service.stop();
+  s.clock.t += 7199; await again.service.reconcile(); assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 1);
+  s.clock.t++; await again.service.reconcile(); assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 2);
+  await again.publish(t, 3, t.shares[2]); await again.publish(t, 4, t.shares[3]);
+  assert.deepEqual(again.service.status().alerts, []);
+  s.clock.t = t.terms.refundAfter; await again.service.reconcile();
+  assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 2);
+});
+
+test('known unclaimed transfers require local finality, reject forged hashes, and stop alerting at refundAfter', async () => {
+  const s = setup({ immediate: true }), t = s.trade(), logs = [];
+  s.service.log = (...a) => logs.push(a.join(' '));
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  const hash = hex(), ch = `intercom-dex:t:${t.id}`;
+  s.service.trac.verifyTransfer = async () => ({ ok: false, final: false });
+  await s.emit(SIGNERS, s.envelope(s.f.buyer, 'transferSent', { tradeId: t.id, txHash: hash }, ch));
+  assert.equal(s.service.store.get(`watch-${t.id}`).txHash, undefined);
+  await s.emit(SIGNERS, s.envelope(s.f.seller, 'transferSent', { tradeId: t.id, txHash: hash }, ch));
+  await s.service.reconcile();
+  assert.deepEqual(s.service.status().alerts, []);
+  s.service.trac.verifyTransfer = async request => {
+    assert.equal(request.txHash, hash);
+    return { ok: true, final: true, amount: t.terms.baseAmount, finalizedAt: s.clock.t };
+  };
+  await s.service.reconcile();
+  s.clock.t += 600; await s.service.reconcile();
+  assert.equal(s.service.status().alerts[0].have, 0, 'without the dealing no share is presumed valid');
+  assert.equal(s.service.trades.length, 0, 'an unclaimed trade can alert');
+  s.clock.t = t.terms.refundAfter; await s.service.reconcile();
+  assert.deepEqual(s.service.status().alerts, []);
+  assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 1);
+});
+
+test('a known trade with a missed deal binds shares to the finalized escrow before clearing its alarm', async () => {
+  const s = setup({ immediate: true }), t = s.trade();
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  const name = `watch-${t.id}`;
+  s.service.store.put(name, { ...s.service.store.get(name), txHash: hex(), transferFinalAt: s.clock.t });
+  for (const i of [1, 2, 3]) await s.publish(t, i, t.shares[i - 1]);
+  s.clock.t += 600;
+  s.service.solana.checkEscrow = async () => ({ ok: false, status: 'missing' });
+  await s.service.reconcile(); assert.equal(s.service.status().alerts[0].have, 0);
+  s.service.solana.checkEscrow = async ({ terms, hashHex }) => {
+    assert.equal(hashHex, t.H); assert.deepEqual(terms, t.terms);
+    return { ok: true, status: 'active' };
+  };
+  s.clock.t += 60; await s.service.reconcile();
+  assert.deepEqual(s.service.status().alerts, []);
+});
+
+test('forwarded transfer evidence reaches the venue through the running host route', async () => {
+  const s = setup(), t = s.trade();
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  const txHash = hex();
+  await s.emit(SIGNERS, s.envelope(s.f.seller, 'transferSent', { tradeId: t.id, txHash }, `intercom-dex:t:${t.id}`));
+  await s.service.settlementQueue;
+  assert.equal(s.service.store.get(`watch-${t.id}`).txHash, txHash);
+});

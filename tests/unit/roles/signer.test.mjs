@@ -104,7 +104,7 @@ test('a holding signer repeats its ack only until sendBy, then sends it only to 
   assert.equal(acks(), 3, 'a member that announces itself still gets the ack');
 });
 
-test('signers beat every 10 s, one heartbeat at a time, and resend at once when the peer times out a send', async t => {
+test('signers beat every 30 s, one heartbeat at a time, and resend at once when the peer times out a send', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const { signer, sent } = await setup();
   let fail = 1, hold = null, attempts = 0;
@@ -125,4 +125,38 @@ test('signers beat every 10 s, one heartbeat at a time, and resend at once when 
   release(); hold = null; for (let i = 0; i < 5; i++) await settle();
   assert.equal(beats(), 2);
   signer.stop();
+});
+
+test('signer asks for a missing deal every 30 s, only before sendBy and until the deal arrives', async t => {
+  const timers = [];
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { const timer = { fn, ms }; timers.push(timer); return timer; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { signer, summon, sent, now } = await setup();
+  assert.equal(HEARTBEAT_MS, 30000);
+  let clock = now; signer.host.now = () => clock;
+  await summon();
+  const trade = [...signer.host.trades.values()][0], tick = timers.find(x => x.ms === 1000).fn;
+  const count = () => sent.filter(e => e.kind === 'present').length;
+  const run = async at => { clock = at; tick(); await trade.queue; };
+  const initial = count();
+  await run(now); await run(now + 10); await run(now + 29); assert.equal(count(), initial);
+  await run(now + 30); assert.equal(count(), initial + 1);
+  await run(now + 59); assert.equal(count(), initial + 1);
+  await run(now + 60); assert.equal(count(), initial + 2);
+  trade.state.phase = 'checkingProof';
+  await run(now + 90); assert.equal(count(), initial + 2);
+  trade.state.phase = 'awaitDeal';
+  await run(trade.state.terms.sendBy); assert.equal(count(), initial + 2);
+  await run(trade.state.terms.sendBy + 30); assert.equal(count(), initial + 2);
+});
+
+test('a slow channel join cannot announce a missing deal at or after sendBy', async () => {
+  const { signer, summon, sent, now, f } = await setup();
+  let clock = now, release;
+  signer.host.now = () => clock;
+  signer.bridge.join = () => new Promise(resolve => { release = resolve; });
+  await summon();
+  clock = f.terms.sendBy; release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent.filter(e => e.kind === 'present').length, 0);
 });

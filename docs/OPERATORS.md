@@ -127,11 +127,20 @@ Keep the peer and the role running all the time. Heartbeats go out every 30 seco
 online only when its last heartbeat is at most 90 seconds old. A trade starts only when enough of its drawn
 signers are online.
 
+While waiting for a trade's deal, a signer repeats its presence every 30 seconds. It stops those repeats when the
+deal arrives or at `sendBy`.
+
 Once a signer has acknowledged a trade, it promised to hold its share until that trade's `refundAfter`, which is 48
 hours after the take with the venue's registry. It has to be online when the seller's transfer becomes final (within
 `sendBy + graceSec`) to check it, and it keeps re-sending its share until `refundAfter`. A signer that is offline in
 that window can cost the seller the payment if enough others are offline too, and the venue's records show which
 signers published. Restarting is safe: the signer resumes every trade from its data folder and publishes again.
+
+The venue's local `/status` output includes `alerts`. A known trade appears there when the venue has verified the
+seller's transfer as final for ten minutes but still has fewer than the required number of valid shares, before
+`refundAfter`. The log says `ALERT shares missing <tradeId> have/needed` once, then every two hours while it lasts,
+including across restarts. Check that the named trade's committee is online and retains its data. An alert clears
+when enough valid shares arrive or the refund time passes; it does not change the trade or authorize a payment.
 
 ### What a signer earns
 

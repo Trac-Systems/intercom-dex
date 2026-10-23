@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBuyer, step as buyerStep } from '../../../src/core/trade-buyer.js';
 import { step as sellerStep } from '../../../src/core/trade-seller.js';
-import { step as signerStep } from '../../../src/core/trade-signer.js';
+import { step as signerStep, rescueTrade, RESCUE_MARGIN_SEC } from '../../../src/core/trade-signer.js';
 import { runStep, resumeActions } from '../../../src/core/trade-common.js';
 import { seal, open, createReplayCache } from '../../../src/core/envelope.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { parseBody } from '../../../src/core/schemas.js';
-import { buildTerms, tradeRandomness } from '../../../src/core/terms.js';
+import { buildTerms, tradeRandomness, transferNonce } from '../../../src/core/terms.js';
 import { buildRegistry } from '../../../src/core/registry.js';
 import { fixture, hex, SIG } from './helpers.mjs';
 import { simulation } from './simulation.mjs';
@@ -357,4 +357,26 @@ test('a failed refund is resolved from the escrow: claimed means complete, an un
   for (const o of ['unknown', 'landed']) assert.equal(buyerStep(asked.state, { ...outcome, outcome: o }).state.phase, 'refunding');
   const ended = buyerStep(asked.state, { ...outcome, outcome: 'none' }).state;
   assert.equal(ended.phase, 'aborted'); assert.equal(ended.locked, false);
+});
+
+test('an operator rescue re-checks a transfer that became final after the cutoff, until shortly before the refund', () => {
+  const sim = simulation({ capturePhases: true }), verifying = snap(sim, 'signer1', 'verifyingTransfer');
+  const t = verifying.terms, cutoff = t.sendBy + t.graceSec, until = t.refundAfter - RESCUE_MARGIN_SEC;
+  const event = (now, patch = {}) => ({ type: 'transferVerified', now, tradeId: verifying.tradeId, txHash: verifying.txHash, asset: t.base.id,
+    amount: t.baseAmount, from: t.seller.tracAddr, to: t.buyer.tracAddr, nonce: transferNonce(verifying.tradeId), ...patch });
+  const expired = signerStep(verifying, event(cutoff + 100, { ok: false, final: true, finalizedAt: cutoff + 90, reason: 'finality_deadline' })).state;
+  assert.equal(expired.phase, 'expired');
+  assert.equal(rescueTrade(verifying, cutoff + 200), null, 'only expired trades');
+  assert.equal(rescueTrade(expired, until), null, 'not within the margin before the refund');
+  const rescued = rescueTrade(expired, cutoff + 200);
+  assert.equal(rescued.phase, 'verifyingTransfer'); assert.equal(rescued.rescueUntil, until);
+  const verify = signerStep(rescued, { type: 'resume', now: cutoff + 200 }).actions.find(a => a.type === 'verifyTransfer');
+  assert.equal(verify.finalBefore, until);
+  const phase = e => signerStep(rescued, e)?.state.phase ?? rescued.phase;
+  assert.equal(phase(event(cutoff + 210, { ok: false, final: false })), 'verifyingTransfer', 'keeps waiting');
+  assert.equal(phase(event(cutoff + 210, { ok: true, final: true, finalizedAt: until })), 'verifyingTransfer', 'final too late is not accepted');
+  assert.equal(phase(event(cutoff + 210, { ok: true, final: true, finalizedAt: cutoff + 90, amount: '1' })), 'verifyingTransfer', 'wrong amount is not accepted');
+  const pending = signerStep(rescued, event(cutoff + 210, { ok: true, final: true, finalizedAt: cutoff + 90 })).state;
+  assert.equal(pending.phase, 'persistingTransfer');
+  assert.equal(signerStep(rescued, event(until, { ok: false, final: false })).state.phase, 'expired', 'expires again at the rescue deadline');
 });

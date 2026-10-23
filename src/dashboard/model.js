@@ -104,7 +104,8 @@ export function describeTrade(trade) {
         return line(`Waiting for the buyer to lock the USDC (${confirmed})`, 'the buyer and signers', 'If the USDC is not locked by', t.sendBy,
           'the trade is called off; you send nothing');
       case 'reservingEscrow': case 'transferring':
-        return line(`Sending your ${base} to the buyer`, 'the Trac network', 'If it cannot be sent by', t.sendBy, 'nothing is sent and the trade is called off');
+        return line(`Sending your ${base}…`, 'the Trac network', 'Transfers are retried until', t.sendBy,
+          'The same transaction is retried; confirmation may arrive later.');
       case 'awaitShares':
         return line(`Your ${base} was sent. Waiting for signers to release the key (${s.shares?.length ?? 0} of ${k} key pieces)`, 'signers',
           'If the key is not released by', t.refundAfter, 'the buyer can take the USDC back');
@@ -120,7 +121,9 @@ export function outcome(trade, note = null) {
   const s = trade.state, t = s.terms ?? s.draft, base = t.base.id;
   if (s.phase === 'complete') return { tone: 'good', text: trade.role === 'buyer' ? `Done: you received the ${base}` : 'Done: you received the USDC' };
   if (s.phase === 'refunded') return { tone: 'neutral', text: 'Your USDC came back; the seller did not finish in time' };
-  if (s.phase === 'lost') return { tone: 'bad', text: `The key was not released in time and the buyer took the USDC back; your ${base} had been sent` };
+  if (s.phase === 'lost') return { tone: 'bad', text: s.transferUnknown
+    ? `The buyer took the USDC back; your ${base} transfer is still unconfirmed`
+    : `The key was not released in time and the buyer took the USDC back; your ${base} had been sent` };
   return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Nothing was locked or sent.${note ? ' ' + note.text : ''}` };
 }
 

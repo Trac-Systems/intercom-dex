@@ -70,6 +70,8 @@ trade a lot or run an agent that trades all day, you can add your own Solana RPC
    of it. Nobody can open the lock without enough pieces (the venue's signed list sets how many; at least two), and
    the buyer can't get the USDC back before the refund time.
 4. Once the seller's program sees the USDC locked, it sends the coins to the buyer on Trac.
+   It shows "Sending your RESET…" or "Sending your TNK…" until its own node confirms they arrived. Until the
+   sending deadline it retries an unconfirmed transfer using the same transaction, so retries cannot pay twice.
 5. Each signer checks on its own node that the coins really arrived, and then publishes its piece.
 6. The seller's program puts the pieces together, opens the lock and receives the USDC.
 
@@ -96,7 +98,8 @@ pays the normal network fees: a little SOL on Solana and a little TNK on Trac.
   refund time (the seller sent the coins and the buyer takes the USDC back). The venue can remove signers that do
   this from its list.
 - A seller has to send before the deadline shown for the trade, about 15 minutes after the take. The program sends
-  by itself. If it can't send in time, it sends nothing and the trade is called off.
+  by itself. If no transaction was prepared in time, the trade is called off. A transaction already broadcast can
+  still arrive later; the program keeps checking it and does not call it sent until it is confirmed.
 - Keep the program running until every trade has finished or been refunded. It restarts safely and picks up where
   it stopped, but a seller that stays offline past the refund time can lose the payment for coins it already sent.
 - Use a tagged release. The `main` branch is development and not for trading.

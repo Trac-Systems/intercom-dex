@@ -76,6 +76,26 @@ Bridge.prototype.send = function(channel, envelope) {
   return originalSend.call(this, channel, envelope);
 };
 
+// A successful broadcast receipt whose bytes never reached the chain, followed by a process restart.
+const originalCall = Bridge.prototype.call, originalFetch = globalThis.fetch;
+function droppedTransfer(asset, txHash) {
+  const selected = JSON.parse(readFileSync(process.env.DEX_E2E_ATTACK_FILE, 'utf8'));
+  if (selected.kind !== 'transfer-retry' || selected.asset !== asset) return false;
+  console.log('DEX_E2E_TRANSFER_BYTES ' + JSON.stringify({ asset, txHash, dropped: !selected.release }));
+  return !selected.release;
+}
+Bridge.prototype.call = function(method, params, ...rest) {
+  if (method === 'dex_tnk_broadcast' && droppedTransfer('TNK', params.payload.tro.tx)) return Promise.resolve({ txHash: params.payload.tro.tx });
+  return originalCall.call(this, method, params, ...rest);
+};
+globalThis.fetch = function(url, options) {
+  if (new URL(url).pathname === '/v1/tx/submit') {
+    const { tx } = JSON.parse(options.body);
+    if (droppedTransfer('RESET', tx)) return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { txo: { tx } } })));
+  }
+  return originalFetch(url, options);
+};
+
 // A returning isolated peer bootstraps fallback keys from a cached, verified public registry.
 if (process.env.DEX_E2E_REGISTRY_SEED) {
   const { Trader } = await import('../../src/roles/trader.js');

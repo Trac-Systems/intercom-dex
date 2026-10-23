@@ -17,13 +17,25 @@ export function createSigner({ terms, signerIndex, boxSecret, now, usedTx = {} }
     now, signatures: [], usedTx: { ...usedTx } };
 }
 
+// The transfer must be final before this. A rescued trade (rescueTrade) has until shortly before the refund time.
+const transferDeadline = s => s.rescueUntil ?? s.terms.sendBy + s.terms.graceSec;
+export const RESCUE_MARGIN_SEC = 600;
+
+// An operator rescue for a trade that expired only because the seller's transfer became final late: the signer
+// checks the transfer again, exactly as before, with a deadline RESCUE_MARGIN_SEC before the buyer's refund time.
+export function rescueTrade(state, now) {
+  if (state?.role !== 'signer' || state.phase !== 'expired' || !state.txHash || !state.share || !state.H ||
+      !(now < state.terms.refundAfter - RESCUE_MARGIN_SEC)) return null;
+  return { ...state, phase: 'verifyingTransfer', rescueUntil: state.terms.refundAfter - RESCUE_MARGIN_SEC };
+}
+
 const proofAction = s => ({ type: 'checkProof', tradeId: s.tradeId, statement: lockStatement(s.deal), proof: s.deal.proof });
 const shareRecord = s => ({ type: 'persist', scope: 'signerShare', tradeId: s.tradeId,
   record: { terms: s.terms, signerIndex: s.signerIndex, share: s.share, H: s.H,
     commitments: s.deal.commitments, holdUntil: s.terms.refundAfter } });
 const verifyAction = s => ({ type: 'verifyTransfer', tradeId: s.tradeId, txHash: s.txHash,
   asset: s.terms.base.id, from: s.terms.seller.tracAddr, to: s.terms.buyer.tracAddr,
-  minAmount: s.terms.baseAmount, nonce: transferNonce(s.tradeId), finalBefore: s.terms.sendBy + s.terms.graceSec });
+  minAmount: s.terms.baseAmount, nonce: transferNonce(s.tradeId), finalBefore: transferDeadline(s) });
 const reservationAction = s => ({ type: 'persist', scope: 'verifiedTransfer', tradeId: s.tradeId,
   record: { txHash: s.txHash, reservedFor: s.tradeId, ifUnused: true } });
 const publicationAction = s => ({ type: 'publishShare', channels: ['intercom-dex:t:' + s.tradeId, 'intercom-dex:signers'],
@@ -102,7 +114,7 @@ export function step(state, event) {
     }
     if (e.type === 'transferVerified' && s.phase === 'verifyingTransfer' && e.ok === false && e.tradeId === s.tradeId) {
       // A definitive mismatch, or no final transfer within the window: the share is never released.
-      if (e.final !== true && e.now < s.terms.sendBy + s.terms.graceSec) return null;
+      if (e.final !== true && e.now < transferDeadline(s)) return null;
       s.phase = 'expired';
       return { state: s, actions: [{ type: 'abort', tradeId: s.tradeId, reason: 'Transfer not verified: ' + (e.reason ?? 'not final in time') }] };
     }
@@ -111,7 +123,7 @@ export function step(state, event) {
           e.amount !== s.terms.baseAmount || e.from !== s.terms.seller.tracAddr || e.to !== s.terms.buyer.tracAddr ||
           e.asset !== s.terms.base.id || e.nonce !== transferNonce(s.tradeId) ||
           !Number.isSafeInteger(e.finalizedAt) || e.finalizedAt < 0 || e.finalizedAt > e.now ||
-          e.finalizedAt >= s.terms.sendBy + s.terms.graceSec || (e.usedBy && e.usedBy !== s.tradeId)) return null;
+          e.finalizedAt >= transferDeadline(s) || (e.usedBy && e.usedBy !== s.tradeId)) return null;
       s.finalizedAt = e.finalizedAt;
       s.phase = 'persistingTransfer';
       return { state: s, actions: [reservationAction(s)] };

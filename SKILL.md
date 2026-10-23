@@ -272,8 +272,8 @@ Seller:
 | `awaitDeal`, `checkingProof` | Receiving and checking the buyer's lock certificate. | Wait. |
 | `awaitReady` | Waiting for the escrow and the signers' confirmations. | Wait. |
 | `reservingEscrow` | Reserving that escrow for this trade only. | Wait. |
-| `transferring` | Sending the coins on Trac. | Keep the program running. |
-| `awaitShares` | Coins sent. Waiting for the signers' pieces. | Keep the program running. |
+| `transferring` | Sending the coins on Trac and waiting for final confirmation. | Keep the program running; do not report the coins as sent yet. |
+| `awaitShares` | Coins confirmed sent. Waiting for the signers' pieces. | Keep the program running. |
 | `claiming` | Opening the escrow with the pieces. | Keep the program running. |
 | `complete` | You received the USDC. Finished. | Report it. |
 | `lost` | The buyer refunded before the claim landed. Finished. | Tell the user at once. |
@@ -285,6 +285,10 @@ How to tell a trade finished: a buyer is finished in `complete`, `refunded` or `
 Only the buyer's USDC is ever locked. A seller's coins are not locked anywhere: the seller's program sends them on
 Trac after it has seen the buyer's lock and the signers' confirmations. Never tell a seller that their coins are in
 escrow.
+
+While `transferring`, the program checks every 10 seconds and retries the same signed transaction before `sendBy`.
+It never signs a replacement payment. After `sendBy`, it keeps checking because an earlier broadcast can still
+arrive. A transaction hash or a broadcast receipt alone does not mean the coins arrived.
 
 Usual timing on mainnet: from the take to `awaitTerms` about 30 to 60 seconds (`awaitRandomness` waits for a
 finalized Solana block), the lock about 10 seconds, and from the lock to `complete` about 30 to 60 seconds. Don't

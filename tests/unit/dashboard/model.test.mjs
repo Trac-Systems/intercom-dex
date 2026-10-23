@@ -215,3 +215,14 @@ test('alerts: a take of ours that ended without a trade is an alert unless the n
   assert.equal(items.length, 1);
   assert.match(items[0].text, /Called off: the other side's view of the Solana chain did not match ours\. Nothing was locked or sent\. No other offer at this price could take over\./);
 });
+
+test('seller wording distinguishes an unconfirmed transfer from final coins sent, including after refund', () => {
+  const fx = traderFixture(), trade = fx.role.host.trades.get('t-sell');
+  for (const base of ['RESET', 'TNK']) {
+    const state = { ...trade.state, terms: { ...trade.state.terms, base: { ...trade.state.terms.base, id: base } }, phase: 'transferring', transferUnknown: true };
+    assert.equal(describeTrade({ ...trade, state }).now, `Sending your ${base}…`);
+    assert.match(describeTrade({ ...trade, state: { ...state, phase: 'awaitShares', transferUnknown: false, transferFinal: true } }).now, /was sent/);
+    const lost = outcome({ ...trade, state: { ...state, phase: 'lost' } });
+    assert.match(lost.text, /still unconfirmed/); assert.doesNotMatch(lost.text, /had been sent/);
+  }
+});

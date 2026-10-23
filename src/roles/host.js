@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import { seal, open, createReplayCache } from '../core/envelope.js';
 import { step as buyerStep, ackRejectionReason } from '../core/trade-buyer.js';
 import { verifiedMessage } from '../core/trade-common.js';
-import { step as sellerStep } from '../core/trade-seller.js';
+import { stepFinalized as sellerStep } from '../core/trade-seller.js';
+import { sendFinalTransfer } from '../trac/finality.js';
 import { step as signerStep } from '../core/trade-signer.js';
 import { RANDOMNESS, STEP_BUDGET_MS } from '../core/terms.js';
 import { sha256Hex, hexToBytes } from '../core/canonical.js';
@@ -25,8 +26,8 @@ const ACCEPTS = {
 };
 const DONE = { buyer: ['complete', 'refunded'], seller: ['complete', 'aborted', 'lost'], signer: ['published', 'expired', 'aborted'] };
 export const tradeChannel = ref => `intercom-dex:t:${ref}`;
-// Buyer messages a committee signer passes on to the other signers over the signers channel.
-export const FORWARDED = ['deal', 'working'];
+// Signed trade evidence a committee signer passes on over the signers channel.
+export const FORWARDED = ['deal', 'working', 'transferSent'];
 const MAX_PER_SENDER = 400;
 // A published signer repeats its share on its own at 10, 20, 40 ... 640 seconds and then only answers requests: every
 // repeat costs a fresh work stamp, and a seller that still misses shares asks for them (shareRequest) every 30 s.
@@ -207,7 +208,8 @@ export class TradeHost {
           throw error;
         }
       }
-      if (announce && !trade.presentSent.includes(ch)) {
+      const waitingForDeal = trade.role === 'signer' && ['awaitTermsSignatures', 'awaitDeal'].includes(trade.state.phase);
+      if (announce && !(waitingForDeal && this.now() >= trade.state.terms.sendBy) && !trade.presentSent.includes(ch)) {
         trade.presentSent.push(ch);
         await this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false });
       }
@@ -287,6 +289,7 @@ export class TradeHost {
       for (const trade of this.trades.values()) {
         if (trade.role === 'signer' && trade.state.tradeId && message.ch === tradeChannel(trade.state.tradeId)) this.#accept(trade, message.ch, message);
       }
+      for (const hook of this.hooks.unrouted) await hook(channel, message);
       return;
     }
     if (channel === 'intercom-dex:signers' && ['sharePublish', 'shareRequest'].includes(message?.kind)) {
@@ -563,8 +566,9 @@ export class TradeHost {
           r => ({ type: 'escrowChecked', purpose: action.purpose, ...r }));
       case 'sendTransfer':
         // The adapter's own result says whether a transfer may have gone out (unknown + txHash) or surely did not.
-        return this.#background(trade, 'transfer', () => this.trac.sendTransfer({ terms: s.terms, tradeId, resume: action.resume === true }),
-          r => ({ type: 'transferSent', ok: r.ok === true, unknown: r.unknown === true, txHash: r.txHash, sentAt: r.sentAt, reason: r.reason }), { retries: 1 });
+        return this.#background(trade, 'transfer', () => sendFinalTransfer(this.trac, { terms: s.terms, tradeId, resume: action.resume === true }),
+          r => ({ type: 'transferSent', ok: r.ok === true, final: r.final === true, finalizedAt: r.finalizedAt,
+            unknown: r.unknown === true, txHash: r.txHash, sentAt: r.sentAt, reason: r.reason }), { retries: 1 });
       case 'verifyTransfer':
         return this.#background(trade, 'verify', () => this.#pollTransfer(action), r => ({ type: 'transferVerified', ...r }), { retries: 1 });
       case 'claim':
@@ -624,11 +628,11 @@ export class TradeHost {
       }
       // Messages on sidechannels are not stored anywhere: while a trade waits, repeat what this side already said.
       // A signer's ack only matters until sendBy; after it, the ack goes only to members that announce themselves.
-      // A signer still missing the dealing asks again every 10 s (joining announced it once): every trader answers
+      // A signer still missing the dealing asks again every 30 s until sendBy (joining announced it once): every trader answers
       // 'present' by repeating what it said on that channel.
-      if (trade.role === 'signer' && s.phase === 'awaitDeal') {
+      if (trade.role === 'signer' && s.phase === 'awaitDeal' && now < s.terms.sendBy) {
         trade.presentAt ??= now;
-        if (now - trade.presentAt >= 10) {
+        if (now - trade.presentAt >= 30) {
           trade.presentAt = now;
           for (const ch of this.#channels(trade)) this.#send(trade, ch, 'present', { ref: ch.slice('intercom-dex:t:'.length) }, { keep: false }).catch(() => {});
         }

@@ -168,7 +168,11 @@ maker or the taker can be either side; the sequence is the same.
     refund key, mint, amount, refund time, fee bps, fee collectors and the derived vault. It requires k acks,
     reserves the escrow for this trade in its own store (one escrow never pays for two trades), and sends the base
     asset with the Trac nonce `sha256("intercom-dex/v1/transfer" ‖ tradeId)` before `sendBy`. It posts
-    `transferSent`.
+    `transferSent` with the journaled hash so signers can begin checking. The seller stays in `transferring`
+    ("Sending your RESET…" or "Sending your TNK…") until its own node verifies the exact transfer as final.
+    While it is unconfirmed, every 10 seconds it checks again and, only before `sendBy`, retries the same signed
+    transaction. It never changes the transaction's validity value, writer, nonce or bytes, or signs a replacement.
+    After `sendBy` it only checks finality and settlement; an earlier broadcast may still arrive.
 11. **Verify and publish.** Each signer looks the transaction up in its own node's signed, final view. For TNK it
     reads MSB's signed state; for RESET it reads the MSB transaction and the RESET contract's applied result from
     its own subnet reader. It checks sender, recipient, exact amount, nonce, the pinned RESET contract, that the
@@ -269,7 +273,8 @@ waits for the escrow until `sendBy` even after its budget ran out, unless the bu
 a lock may still land. Step budgets never end a trade after a lock attempt or a transfer; only the absolute
 deadlines apply then.
 
-Online checks are a courtesy and never replace acks. Signers send `heartbeat` every 30 seconds. A trader counts a
+Online checks are a courtesy and never replace acks. Signers send `heartbeat` every 30 seconds. While awaiting a
+deal, a signer repeats `present` every 30 seconds, stopping at `sendBy` or when the deal arrives. A trader counts a
 signer online when its last heartbeat arrived at most 90 seconds ago (`SIGNER_ONLINE_SEC`) and its software meets
 the registry minimum. Takes and admissions need n eligible signers and k+1 eligible signers online; both traders
 need k+1 members of the selected committee online before they sign the terms.
@@ -343,6 +348,17 @@ from summons alone share a capacity of 20000. When it is full, a watch past `sen
 settlement report is archived (its evidence is kept and restored if a settlement is later proven); if none qualifies,
 the new watch waits. A logged settlement always gets its watch. Share messages for a trade without a watch are kept
 only from signers listed in a registry, at most 16 distinct ones per sender and trade.
+
+Signers also forward the seller's signed `transferSent` envelope on the signers channel, retaining its original
+trade channel and signature, as they do for the buyer's deal. For known trades the venue checks that transfer on
+its own node. Ten minutes after it first observes a matching final transfer, if it has fewer than k valid shares
+and `refundAfter` has not arrived, it logs `ALERT shares missing <tradeId> have/needed`. It repeats the line every
+two hours while the condition lasts; the repeat time is saved across restarts. The venue's local status/control
+output lists these trades under `alerts`, with `tradeId`, `have`, `needed`, `transferFinalAt` and `refundAfter`.
+Only distinct committee shares that verify against the checked deal count. Without a saved deal, the venue uses
+the logged settlement's hash or checks a published hash against the finalized escrow. Shares must have matching
+commitments, and k shares must reconstruct that hash.
+An alert clears when k valid shares arrive or at `refundAfter`. The public signed `status` envelope is unchanged.
 
 The venue publishes, all signed: a `book` per open pair with at most 50 aggregated levels per side, refreshed as a
 full snapshot at least every 60 seconds and as cumulative `bookDelta` messages against it in between (checked every

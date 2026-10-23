@@ -1,5 +1,5 @@
 import { RegistryRelays } from '../net/relays.js';
-import { createSigner } from '../core/trade-signer.js';
+import { createSigner, rescueTrade } from '../core/trade-signer.js';
 import { TradeHost, isFinished } from './host.js';
 import { RegistryView, publicReceiver, nowSec, verifySummon } from './common.js';
 
@@ -11,9 +11,8 @@ const MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 // Unfinished trades a signer holds at once, in total and per trader key (buyer or seller). Summons beyond them are
 // refused; buyers repeat summons, so a refused trade is taken once a slot frees.
 export const MAX_HELD_TRADES = 32, MAX_HELD_PER_TRADER = 8;
-// Traders count a signer online for 90 s after its last heartbeat. Every 10 s leaves room for several lost ones (a
-// stamp waiting behind trade messages, or a send the peer times out) before a signer looks offline.
-export const HEARTBEAT_MS = 10_000;
+// Released traders and venues keep a heartbeat fresh for 90 s.
+export const HEARTBEAT_MS = 30_000;
 
 // A committee signer: joins trades it is summoned to (only when it is really in the signed terms' committee and the
 // registry it trusts lists it), holds its encrypted share, verifies the seller's transfer on its own node, publishes.
@@ -27,6 +26,7 @@ export class Signer {
   }
 
   async start() {
+    this.#rescue(process.env.DEX_RESCUE_TRADES);
     await this.relays.update(this.registry.usable);
     for (const ch of [MAIN, SIGNERS]) await this.bridge.join(ch);
     this.host.hooks.unrouted.push((ch, m) => this.#public(ch, m));
@@ -35,6 +35,19 @@ export class Signer {
   }
 
   stop() { this.host.stop(); clearInterval(this.heartbeat); }
+
+  // DEX_RESCUE_TRADES: comma-separated trade ids the operator rescues (see rescueTrade). Applied once per record.
+  #rescue(list) {
+    const ids = new Set(String(list ?? '').split(',').map(x => x.trim()).filter(x => /^[0-9a-f]{64}$/.test(x)));
+    if (!ids.size) return;
+    for (const name of this.store.list('trade-')) {
+      const record = this.store.get(name);
+      if (!record || !ids.has(record.state?.tradeId)) continue;
+      const state = rescueTrade(record.state, nowSec());
+      this.log('rescue', record.state.tradeId.slice(0, 12), state ? 'checking the transfer again until ' + state.rescueUntil : 'not eligible (' + record.state.phase + ')');
+      if (state) this.store.put(name, { ...record, state });
+    }
+  }
 
   // One heartbeat at a time; a failed one (the peer timed out the send) is sent again at once.
   #beat() {

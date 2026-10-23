@@ -542,3 +542,49 @@ test('a withdrawal that is not final is broadcast again with the same bytes afte
     assert.deepEqual(await adapter.withdrawalStatus(request), { ok: true, unknown: false, txHash: late.txHash, reason: null });
   } finally { adapter.close(); Date.now = clock; }
 });
+
+for (const asset of ['TNK', 'RESET']) test(`${asset} trade waits for finality, retries identical bytes across restart and txv changes, and stops broadcasting at sendBy`, async t => {
+  const { sendFinalTransfer } = await import('../../../src/trac/adapter.js');
+  const f = fixture(); f.terms.base = BASES[asset]; f.terms.pair = asset + '/USDC';
+  const broadcasts = [], signed = asset === 'TNK'
+    ? { payload: await buildTnkTransfer({ ...f.context, from: f.wallet.address, to: f.terms.buyer.tracAddr, amount: '42', tradeId: f.tradeId, sign: f.wallet.sign }), submission: null }
+    : await buildResetTransfer({ ...f.resetContext, writer: '66'.repeat(32), from: f.wallet.publicKey, to: f.toKey, amount: '42', tradeId: f.tradeId, sign: f.wallet.sign });
+  const txHash = (signed.payload.tro ?? signed.payload.txo).tx, sentAt = now();
+  const store = openIntentStore(f.intentFolder);
+  store.save({ ...signed, tradeId: f.tradeId, asset, from: f.wallet.address, to: f.terms.buyer.tracAddr, amount: '42',
+    sendBy: f.terms.sendBy, txHash, createdAt: sentAt, sentAt }); store.close();
+  let milliseconds = Date.now(), proof = { ok: false, final: false, reason: 'unknown_or_not_final' };
+  t.mock.method(Date, 'now', () => milliseconds);
+  f.bridge.call = async (type, params) => {
+    if (type === 'dex_verify') return proof;
+    if (type === 'dex_tnk_broadcast') { broadcasts.push(structuredClone(params.payload)); return { txHash }; }
+    throw Error('Must not prepare or refresh txv');
+  };
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(new URL(url).pathname, '/v1/tx/submit');
+    broadcasts.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ ok: true, result: { txo: { tx: txHash } } }));
+  });
+  const opts = { ...f, usedTxFolder: folder(), resetGatewayUrl: 'http://127.0.0.1:47103' };
+  let adapter = createTracAdapter(opts);
+  try {
+    for (let i = 0; i < 3; i++) {
+      const r = await sendFinalTransfer(adapter, f);
+      assert.equal(r.ok, false); assert.equal(r.final, false); assert.equal(r.unknown, true); assert.equal(r.txHash, txHash);
+      adapter.close(); f.context.txv = '99'.repeat(32); adapter = createTracAdapter(opts);
+      milliseconds += 10000;
+    }
+    assert.equal(broadcasts.length, 3);
+    assert.ok(broadcasts.every(x => JSON.stringify(x) === JSON.stringify(broadcasts[0])));
+    milliseconds = f.terms.sendBy * 1000;
+    assert.equal((await sendFinalTransfer(adapter, f)).final, false);
+    assert.equal(broadcasts.length, 3, 'no broadcast at the deadline');
+    proof = { ok: true, final: true, amount: '43' };
+    assert.equal((await sendFinalTransfer(adapter, f)).ok, false, 'wrong amount is never sent');
+    proof = { ok: true, final: true, amount: '42' };
+    const final = await sendFinalTransfer(adapter, f);
+    assert.equal(final.ok, true); assert.equal(final.final, true); assert.equal(final.txHash, txHash);
+    assert.equal(broadcasts.length, 3);
+    assert.equal(fs.readFileSync(path.join(f.intentFolder, 'intents.jsonl'), 'utf8').trim().split('\n').length, 1);
+  } finally { adapter.close(); }
+});

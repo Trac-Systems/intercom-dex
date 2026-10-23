@@ -20,6 +20,8 @@ function publicKey(address) {
   return Buffer.from(key).toString('hex');
 }
 
+export { sendFinalTransfer } from './finality.js';
+
 function observations(folder) {
   const fd = fs.openSync(path.join(folder, 'finality.jsonl'), 'a+', 0o600);
   const rows = new Map();

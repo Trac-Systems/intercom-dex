@@ -8,6 +8,54 @@ import { abortTransition, createTrader, negotiationStep, resumeActions, runStep,
 
 export function createSeller(config) { return createTrader('seller', config); }
 
+// Runtime seller flow. Retain the original reducer for callers replaying older event journals.
+export function stepFinalized(state, event) {
+  if (!event || !Number.isSafeInteger(event.now) || event.now < state.now ||
+      (event.type !== 'message' && event.tradeId !== undefined && event.tradeId !== state.tradeId)) return { state, actions: [] };
+  if (event.type === 'resume' && state.phase === 'awaitShares' && state.transferFinal !== true) {
+    state = { ...state, phase: 'transferring', transferUnknown: true };
+  }
+  if (state.phase !== 'transferring') return step(state, event);
+  if (event.type === 'resume' && state.settlementPending) state = { ...state, settlementPending: false };
+  if (event.type === 'transferSent' && hexKey.safeParse(event.txHash).success) {
+    return runStep(state, event, (s, e) => {
+      if (s.txHash && s.txHash !== e.txHash) return null;
+      if (e.ok !== true && !(e.ok === false && e.unknown === true)) return null;
+      if (e.ok === true && e.final === true) {
+        if (!Number.isSafeInteger(e.finalizedAt) || e.finalizedAt < 0 || e.finalizedAt > e.now) return null;
+        const result = step(s, e);
+        if (result.state.phase !== 'awaitShares') return null;
+        result.state.transferFinal = true;
+        result.state.finalizedAt = e.finalizedAt;
+        return result;
+      }
+      const announce = !s.txHash;
+      s.txHash = e.txHash;
+      s.transferUnknown = true;
+      s.transferRetryAt = e.now + 10;
+      return { state: s, actions: announce ? [sendAction(s, 'transferSent', { tradeId: s.tradeId, txHash: s.txHash })] : [] };
+    });
+  }
+  // A submission with unknown outcome still needs settlement reconciliation after the refund time.
+  if (event.type === 'escrowChecked' && state.settlementPending) {
+    return runStep(state, event, (s, e) => {
+      if (e.hashHex !== s.H || e.purpose !== 'settlement' || typeof e.ok !== 'boolean') return null;
+      s.settlementPending = false;
+      if (e.ok === true && e.status === 'claimed') s.phase = 'complete';
+      if (e.ok === true && e.status === 'refunded') s.phase = 'lost';
+      return { state: s, actions: [] };
+    });
+  }
+  const result = step(state, event), s = result.state;
+  if (s.phase === 'transferring' && event.type === 'tick' && event.now >= s.terms.refundAfter &&
+      !s.settlementPending && event.now >= (s.nextSettlementCheck ?? 0)) {
+    result.state = { ...s, settlementPending: true, nextSettlementCheck: event.now + 60 };
+    result.actions.push(settlementAction(s));
+  }
+  if (s.phase === 'transferring' && event.type === 'error' && event.purpose === 'settlement') result.state = { ...s, settlementPending: false };
+  return result;
+}
+
 const proofAction = s => ({ type: 'checkProof', tradeId: s.tradeId, statement: lockStatement(s.deal), proof: s.deal.proof });
 const checkAction = s => ({ type: 'checkEscrow', tradeId: s.tradeId, terms: s.terms, hashHex: s.H });
 const reservationAction = s => ({ type: 'reserveEscrow', tradeId: s.tradeId, hashHex: s.H });
