@@ -92,6 +92,8 @@ export class WalletManager {
     const balances = await this.balances(), asset = terms.role === 'buyer' ? 'USDC' : terms.base.id;
     const amount = terms.role === 'buyer' ? calculateFees(BigInt(terms.quoteAmount), terms.fees.platformFeeBps, terms.fees.tradeFeeBps).totalAmount : BigInt(terms.baseAmount);
     if (amount > BigInt(balances[asset].free)) throw new Error('Insufficient free balance for this offer or trade');
+    // The venue lists no buy offer from a wallet below MIN_SOL, and a buyer's USDC lock needs it.
+    if (terms.role === 'buyer' && BigInt(balances.SOL.wallet) < BigInt(MIN_SOL)) throw new Error(`Keep at least ${Number(MIN_SOL) / 1e9} SOL in the wallet for Solana fees and the USDC lock`);
   }
 
   // Display reads share one balance result for 10 s while offers, trades and every withdrawal record are unchanged;

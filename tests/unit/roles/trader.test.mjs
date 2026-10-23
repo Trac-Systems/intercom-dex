@@ -94,6 +94,24 @@ test('maker inventory is held by running trades, kept when filled, released when
   assert.deepEqual([mine.reserved, mine.filled, mine.available], ['300', '200', '500']);
 });
 
+test("an own offer is reported not listed when a venue book heard LISTED_AFTER_SEC after it leaves it out", async () => {
+  const { registry } = fixture(), alice = party();
+  const { t } = await trader(alice, { registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' });
+  const posted = t.offers.get(offer.offerId).firstSeen, view = t.bookView;
+  assert.equal(t.status().mine[0].listed, null, 'no venue book yet');
+  view.inventory.set('TNK/USDC', { registryVersion: offer.registryVersion });
+  view.listed.set('TNK/USDC', new Set()); view.listedAt.set('TNK/USDC', posted + 5);
+  assert.equal(t.status().mine[0].listed, null, 'too soon after announcing');
+  view.listedAt.set('TNK/USDC', posted + 10);
+  assert.equal(t.status().mine[0].listed, false);
+  view.listed.set('TNK/USDC', new Set([offer.offerId]));
+  assert.equal(t.status().mine[0].listed, true);
+  t.host.trades.set('a', { key: 'a', role: 'seller', state: { offerId: offer.offerId, mode: 'maker', phase: 'awaitDeal', draft: { baseAmount: '300' } } });
+  view.listed.set('TNK/USDC', new Set());
+  assert.equal(t.status().mine[0].listed, null, 'a trade in progress holds part of it');
+});
+
 test('a cancel stands and reports success when its announce fails; the announce is repeated until it goes out', async t => {
   const { registry } = fixture(), alice = party();
   const { t: role, bridge } = await trader(alice, { registry });

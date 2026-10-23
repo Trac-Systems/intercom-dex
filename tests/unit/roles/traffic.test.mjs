@@ -174,3 +174,58 @@ test('a signer forwards authenticated seller transfer evidence once for venue mo
   const forwarded = f.sent.filter(x => x.ch === 'intercom-dex:signers' && x.envelope.kind === 'transferSent');
   assert.equal(forwarded.length, 1); assert.deepEqual(forwarded[0].envelope, message);
 });
+
+test('a trader joins no channel of a finished trade, leaves them when a trade finishes, and keeps an open offer channel', async t => {
+  const timers = [], joins = [], leaves = [], records = new Map();
+  const done = structuredClone(sim.snapshots.get('buyer:complete')), live = structuredClone(sim.snapshots.get('seller:claiming'));
+  const clock = { now: live.now };
+  t.mock.method(globalThis, 'setInterval', fn => { timers.push(fn); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const stored = (key, role, state) => records.set(`trade-${key}`, { key, role, state, lifetimeSec: 172800 + 3600, outbox: {}, raw: [], buffer: [] });
+  done.tradeId = hex(); done.offerId = hex();   // another trade than the running one
+  stored('done', 'buyer', done);
+  stored('live', 'seller', live);
+  const bridge = new EventEmitter(); bridge.join = async ch => { joins.push(ch); }; bridge.leave = async ch => { leaves.push(ch); };
+  bridge.send = async () => {};
+  const store = { list: p => [...records.keys()].filter(k => k.startsWith(p)), get: k => records.get(k), put: (k, v) => records.set(k, structuredClone(v)) };
+  const offerChannel = tradeChannel(live.offerId);
+  const node = sim.nodes.get('seller');
+  const h = new TradeHost({ bridge, store, identity: { secretKey: node.identity.secretKey, publicKey: encodeKey(node.identity.publicKey) },
+    serviceKey: encodeKey(sim.f.service.publicKey), now: () => clock.now, keepChannel: ch => ch === offerChannel });
+  await h.start(); t.after(() => h.stop());
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  assert.ok(!joins.includes(tradeChannel(done.tradeId)), 'a finished trade joins nothing at start');
+  assert.ok(joins.includes(tradeChannel(live.tradeId)));
+  h.trades.get('live').state.phase = 'complete';
+  timers[0](); await new Promise(r => setImmediate(r));
+  assert.deepEqual(leaves, [tradeChannel(live.tradeId)], 'the trade channel is left; the open offer channel is kept');
+  timers[0](); await new Promise(r => setImmediate(r)); assert.equal(leaves.length, 1);
+});
+
+test("a published signer stops repeating and leaves the trade channel on the seller's claimed, and still answers the venue", async t => {
+  const node = sim.nodes.get('signer1'), pub = sim.log.find(x => x.name === 'signer1' && x.action.type === 'publishShare').action;
+  const published = sim.state('signer1'), ch = tradeChannel(published.tradeId), SIGNERS = 'intercom-dex:signers';
+  const timers = [], sent = [], leaves = [], records = new Map(), clock = { now: published.now };
+  t.mock.method(globalThis, 'setInterval', fn => { timers.push(fn); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const outbox = Object.fromEntries(pub.channels.map(c => [c, [seal({ kind: 'sharePublish', ch: c, body: pub.body }, node.identity.secretKey, { ts: clock.now, nonce: hex() })]]));
+  records.set('trade-trade', { key: 'trade', role: 'signer', state: structuredClone(published), lifetimeSec: 172800 + 3600, outbox, raw: [], buffer: [],
+    publicationAt: clock.now, publicationDelay: 10 });
+  const bridge = new EventEmitter(); bridge.join = async () => {}; bridge.leave = async c => { leaves.push(c); };
+  bridge.send = async (c, envelope) => sent.push({ ch: c, envelope });
+  const store = { list: p => [...records.keys()].filter(k => k.startsWith(p)), get: k => records.get(k), put: (k, v) => records.set(k, structuredClone(v)) };
+  const h = new TradeHost({ bridge, store, identity: { secretKey: node.identity.secretKey, publicKey: encodeKey(node.identity.publicKey) },
+    serviceKey: encodeKey(sim.f.service.publicKey), now: () => clock.now });
+  await h.start(); t.after(() => h.stop());
+  const tr = h.trades.get('trade'), settle = async () => { for (let i = 0; i < 5; i++) { await tr.queue; await new Promise(r => setImmediate(r)); } };
+  await settle();
+  bridge.emit('message', ch, seal({ kind: 'claimed', ch, body: { tradeId: published.tradeId, claimSignature: 'x'.repeat(88) } }, sim.f.seller.secretKey, { ts: clock.now, nonce: hex() }));
+  await settle();
+  assert.equal(records.get('trade-trade').sellerClaimed, true, 'kept across a restart');
+  sent.length = 0; clock.now += 20; timers[0](); await settle();
+  assert.deepEqual(leaves, [ch]);
+  assert.equal(sent.filter(x => x.envelope.kind === 'sharePublish').length, 0, 'no more repeats');
+  bridge.emit('message', SIGNERS, seal({ kind: 'shareRequest', ch: SIGNERS, body: { tradeId: published.tradeId } }, sim.f.service.secretKey, { ts: clock.now, nonce: hex() }));
+  await settle();
+  assert.ok(sent.some(x => x.envelope.kind === 'sharePublish' && x.ch === SIGNERS), "the venue's request is answered on the signers channel");
+});

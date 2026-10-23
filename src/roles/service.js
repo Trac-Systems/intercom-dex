@@ -31,6 +31,8 @@ export const IN_FLIGHT_SLACK_SEC = 600;
 // How often the venue asks the committee for a logged trade's missing shares (ten minutes apart).
 export const SHARE_REQUESTS = 3;
 export const SHARE_ALERT_AFTER_SEC = 600, SHARE_ALERT_REPEAT_SEC = 7200;
+// Checking a share is curve arithmetic and every reconcile looks at the same stored shares again, so results are kept.
+export const SHARE_CHECKS = 100000;
 // Signers hold at most 8 open trades per trader (signer.js MAX_HELD_PER_TRADER) and refuse further ones. A seller
 // with BUSY_TRADES dealt trades still waiting for its transfer is left out of the book until one of them ends, so
 // buyers take the next offer instead of a trade the signers would refuse.
@@ -109,6 +111,7 @@ export class Service {
     this.heartbeats = new Map();
     this.funds = new MakerFunds({ solana, trac, now: () => this.now(), log: (...a) => this.log(...a) });
     this.unfunded = {}; this.hidden = new Set();
+    this.shareChecks = new Map(); // `${id}:${share}:${commitments}` -> verifyShare result
     this.locked = new Map();       // tradeId -> { seller, deadline } for watched trades whose buyer sent the deal
     this.delivered = new Map();    // tradeId -> time a listed signer first published a share for it
     this.busy = new Set();         // sellers currently left out of the book as busy
@@ -346,6 +349,17 @@ export class Service {
     });
   }
 
+  #verifyShare(id, share, commitments) {
+    const key = `${id}:${share}:${stableJSON(commitments)}`;
+    let ok = this.shareChecks.get(key);
+    if (ok === undefined) {
+      ok = verifyShare(id, share, commitments);
+      if (this.shareChecks.size >= SHARE_CHECKS) this.shareChecks.delete(this.shareChecks.keys().next().value);
+      this.shareChecks.set(key, ok);
+    }
+    return ok;
+  }
+
   #shareCount(w) {
     const r = this.settlements.get(w.tradeId), H = r?.status === 'logged' ? r.report.hashHex : w.deal?.H ?? w.escrowHash;
     if (!H) return 0;
@@ -354,7 +368,7 @@ export class Service {
       if (x.H !== H || x.commitments?.length !== w.terms.k || x.at > w.terms.refundAfter ||
           !w.terms.committee[Number(index) - 1] || (w.deal && stableJSON(x.commitments) !== stableJSON(w.deal.commitments))) continue;
       try {
-        if (!verifyShare(Number(index), fromLe32(hexToBytes(x.share, 32)), x.commitments)) continue;
+        if (!this.#verifyShare(Number(index), fromLe32(hexToBytes(x.share, 32)), x.commitments)) continue;
         const key = stableJSON(x.commitments);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push({ id: Number(index), share: fromLe32(hexToBytes(x.share, 32)) });
@@ -723,7 +737,7 @@ export class Service {
     // publishers; the largest qualifying group is taken.
     let paid = [];
     for (const list of groups.values()) {
-      const valid = list.filter(p => verifyShare(p.id, p.share, p.commitments));
+      const valid = list.filter(p => this.#verifyShare(p.id, p.share, p.commitments));
       if (valid.length < terms.k || valid.length <= paid.length) continue;
       let secret;
       try { secret = reconstruct(valid.slice(0, terms.k), terms.k); } catch { continue; }

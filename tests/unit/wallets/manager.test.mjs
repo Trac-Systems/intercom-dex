@@ -180,3 +180,11 @@ test('wallet details stay available when balances cannot be read, and display re
   assert.deepEqual(info.addresses, f.addresses); assert.equal(info.balances, null); assert.match(info.balanceError, /Balances unavailable right now: offline/);
   await assert.rejects(manager.requireFunds({ role: 'seller', base: { id: 'RESET' }, baseAmount: '1' }), /offline/);
 });
+
+test('a buy offer or take needs at least MIN_SOL in the wallet, a sell does not', async () => {
+  const f = setup(), buy = { role: 'buyer', base: { id: 'RESET' }, baseAmount: '1', quoteAmount: '1000', fees: { platformFeeBps: 10, tradeFeeBps: 10 } };
+  await f.create().requireFunds(buy);
+  f.own.SOL = '2601400';
+  await assert.rejects(f.create().requireFunds(buy), /Keep at least 0\.01 SOL in the wallet/);
+  await f.create().requireFunds({ role: 'seller', base: { id: 'RESET' }, baseAmount: '1' });
+});

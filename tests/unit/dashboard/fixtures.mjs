@@ -83,7 +83,7 @@ export function traderFixture({ now = nowSec() } = {}) {
       const seen = this.offers.get(id);
       if (!seen || seen.offer.maker.dexKey === this.me.dexKey) return null;
       const book = this.book.get(seen.offer.pair);
-      return availableOffer(seen, book, this.bookView?.inventory.get(seen.offer.pair) ?? book, nowSec());
+      return availableOffer(seen, book, this.bookView?.inventory.get(seen.offer.pair) ?? book, nowSec(), this.bookView?.heard?.get(seen.offer.pair));
     },
     calls,
     async makeOffer(input) { calls.push(['offer', input]); return input; },

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBook, ownTakes } from '../../../src/dashboard/market.js';
-import { availableOffer, OFFER_FRESH_SEC } from '../../../src/market/book.js';
+import { availableOffer, OFFER_FRESH_SEC, VENUE_SILENT_SEC } from '../../../src/market/book.js';
 import { amount, decimalAmount } from '../../../src/dashboard/format.js';
 import { PAIRS } from '../core/helpers.mjs';
 
@@ -65,6 +65,18 @@ test('deltas retain last full inventory, cap an offer and its level, and remove 
   assert.equal(out.asks[0].amount.units, '50000000'); assert.equal(out.asks[0].take.amount.units, '50000000');
   assert.equal(availableOffer(a, book, inventory, now).baseAmount, '50000000');
   assert.deepEqual(build([a, b], { book: snapshot([]), inventory }).asks, []);
+});
+
+test("another maker's offer shows only after a venue book heard after it, unless the venue went silent", () => {
+  // Seen at 990; the venue's last book arrived at 980 and does not list it yet (an unfunded maker's offer never gets listed).
+  const fresh = offer(1, '1', 'buy', '100000000', 990);
+  assert.deepEqual(build([fresh], { heardAt: 980 }).bids, []);
+  assert.equal(availableOffer(fresh, null, null, now, 980), null);
+  // A venue book heard at or after the offer decides as before; without any venue book the offer shows.
+  assert.equal(build([fresh], { heardAt: 995 }).bids[0].price, '1');
+  assert.equal(build([fresh]).bids[0].price, '1');
+  // A venue silent for VENUE_SILENT_SEC no longer holds offers back.
+  assert.equal(build([fresh], { heardAt: now - VENUE_SILENT_SEC }).bids[0].price, '1');
 });
 
 test('wire depth caps do not erase deep offers or truncate the dashboard at 50 levels', () => {

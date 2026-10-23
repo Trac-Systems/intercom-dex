@@ -99,7 +99,8 @@ export default class BlindRelay extends Feature {
         return control ? this._controlConnection(remote, opts) : this.originalConnect.call(dht, remote, opts);
       }
       const info = swarm.peers.get(hex(remote));
-      const state = this.retryState.get(info) || { failures: 0, nextRelay: 0 };
+      // Each destination starts at a random relay, so peers do not all crowd the first one in the shared list.
+      const state = this.retryState.get(info) || { failures: 0, nextRelay: Math.floor(Math.random() * Math.max(1, this.options.relays.length)) };
       if (info) this.retryState.set(info, state);
       const relay = opts.relayThrough && this.options.relays.length
         ? b4a.from(this.options.relays[state.nextRelay++ % this.options.relays.length], 'hex')
@@ -236,8 +237,9 @@ export default class BlindRelay extends Feature {
         || usage >= this.options.maxSessionsPerPeer
         || (!existing && this.server._pairing.size >= this.options.maxPending)
         || (existing && active >= this.options.maxSessions)) {
+        // Ignore only this request: the asking side's attempt times out and moves on to its next relay. Destroying
+        // the session dropped every link the peer already had on this relay, and they all came back at once.
         this.counters.pairs_rejected++;
-        session.destroy(failure('pair limit'));
         return;
       }
       state.activity = Date.now();

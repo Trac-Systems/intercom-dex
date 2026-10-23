@@ -75,3 +75,19 @@ test('a rejected control channel is closed before creating a replacement socket'
   assert.equal(connections.length, 2); assert.equal(connections[0].destroyed, true);
   old.destroy(); assert.equal(replacement.destroyed, false); replacement.destroy();
 });
+
+test('a relay ignores a pairing over the per-peer limit and keeps the peer session with its links', () => {
+  const { feature } = fixture();
+  feature.options.maxSessionsPerPeer = 2; feature.started = true;
+  const passed = [], session = new EventEmitter();
+  Object.assign(session, { closed: false, _destroyed: false, _pairing: new Set(), _links: new Map(), destroyed: false,
+    _pair: { onmessage: message => { passed.push(message); session._pairing.add(message.token.toString('hex')); } },
+    _unpair: { onmessage: () => {} }, destroy() { this.destroyed = true; } });
+  feature.server = { accept: () => session, _pairing: new Map(), stats: { pairings: { active: 0 } } };
+  const connection = new EventEmitter(); connection.remotePublicKey = key(9);
+  feature._accept(connection, key(9));
+  for (const n of [1, 2, 3]) session._pair.onmessage({ token: key(10 + n), isInitiator: true });
+  assert.equal(passed.length, 2, 'the third pairing is not passed on');
+  assert.equal(session.destroyed, false, 'the session and its existing pairings stay');
+  assert.equal(feature.counters.pairs_rejected, 1);
+});

@@ -2,15 +2,21 @@ import { priceUnits } from './assets.js';
 
 export const OFFER_FRESH_SEC = 300;
 export const STALE_OFFER_MESSAGE = 'This offer is no longer announced by its maker.';
+// A venue book newer than an offer is needed before the offer shows, unless the venue has been silent this long.
+export const VENUE_SILENT_SEC = 90;
 
 export const freshOffer = (seen, now) => !!seen && Number.isSafeInteger(seen.lastSeen) &&
   now - seen.lastSeen < OFFER_FRESH_SEC && seen.offer.expiresAt > now;
 
 // Full snapshots identify up to 200 offers. Deltas only identify levels; retain the last full inventory and
 // cap an individual offer by its level. Absence beyond either wire depth limit does not prove removal.
-export function availableOffer(seen, book, inventory, now) {
+// `heardAt` is when this app last received the venue's book for the pair (its own clock). Another maker's offer waits
+// for a venue book heard after the offer: the venue leaves out offers whose maker cannot fund a trade, and those
+// would otherwise show between two books each time the maker announces them again.
+export function availableOffer(seen, book, inventory, now, heardAt = null) {
   if (!freshOffer(seen, now)) return null;
   const o = seen.offer, firstSeen = seen.firstSeen ?? seen.lastSeen;
+  if (heardAt != null && heardAt < firstSeen && now - heardAt < VENUE_SILENT_SEC) return null;
   let left = BigInt(o.baseAmount);
   if (inventory?.registryVersion === o.registryVersion && inventory.remaining) {
     const row = inventory.remaining.find(r => r.offerId === o.offerId);

@@ -68,7 +68,9 @@ Call it first, then about once a minute while trades run. Fields:
   `baseAmount`, `price`, `maker`, `peerKey`, `expiresAt`, `registryVersion`, `software`), plus `lastSeen`: when
   this program last heard the maker announce it, in Unix seconds. Makers announce every 45 seconds while their
   program runs. `baseAmount` is what is left of the offer as far as this program knows.
-- `mine`: your own open offers with `available`, `reserved` and `filled` in base units.
+- `mine`: your own open offers with `available`, `reserved` and `filled` in base units. `listed` is `false` when the
+  venue's book leaves the offer out because the wallet cannot fund the smallest trade (buyers: the USDC plus at least
+  0.01 SOL; sellers: the coins plus TNK for the transfer fee), `true` when listed, `null` while unknown.
 - `trades`: one entry per trade with `key`, `role` (`buyer` or `seller`), `phase`, `reason`, `tradeId`, `H`,
   `committee`, `pair`, `baseAmount` and `quoteAmount`.
 - `book`, `tickers`: the venue's market data per pair.

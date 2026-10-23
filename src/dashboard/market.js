@@ -38,7 +38,7 @@ export const takeOrder = now => (a, b) => quiet(a, now) - quiet(b, now) ||
   a.at - b.at || (a.offerId < b.offerId ? -1 : a.offerId > b.offerId ? 1 : 0);
 
 // Build full depth from signed announcements; the wire book itself has only the best 50 levels per side.
-export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, taken = { skip: new Set(), running: new Map() } }) {
+export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, heardAt = null, taken = { skip: new Set(), running: new Map() } }) {
   const base = pair.base.id, groups = new Map();
   const better = takeOrder(now);
   const add = (o, firstSeen, own, lastSeen = firstSeen) => {
@@ -56,7 +56,7 @@ export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = b
   for (const seen of offers) {
     if (seen.offer.pair !== pair.pair || seen.offer.maker.dexKey === dexKey) continue;
     if (taken.skip.has(seen.offer.offerId)) continue;
-    const o = availableOffer(seen, book, inventory, now), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
+    const o = availableOffer(seen, book, inventory, now, heardAt), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
     if (left > 0n) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false, seen.lastSeen ?? seen.firstSeen);
   }
   for (const o of mine) add({ ...o, baseAmount: o.available }, now, true);

@@ -395,7 +395,9 @@ wallet it cannot read hides nothing), and keeps its book across restarts.
   `relayKey` entries (active, not removed) and `serviceRelayKey` replace the dynamic relay list with every new
   version; static `relayKeys` in the peer config are added. Venue and signer peers serve as relays by default
   (`serveRelay`); trader peers never do. A new isolated peer needs a static relay key or a cached registry to find
-  its first relay.
+  its first relay. A peer tries a direct connection for 8 seconds, then the relays for 20 seconds each, starting at a
+  random one. A relay serves at most 1024 client connections and 512 relayed pairs, and 64 per peer; a pairing over
+  a limit is ignored, so only that attempt fails.
 
 ## 13. Guarantees and assumptions
 

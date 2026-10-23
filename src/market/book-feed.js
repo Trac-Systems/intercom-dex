@@ -40,14 +40,19 @@ export class BookFeed {
 }
 
 export class BookView {
-  constructor() { this.books = new Map(); this.bases = new Map(); this.inventory = new Map(); }
-  full(body) {
+  // heard: pair -> when this app last received a book or delta for it, on its own clock; listedAt: the same for the
+  // last full book with its offer list, and listed: that list's offer ids.
+  constructor() { this.books = new Map(); this.bases = new Map(); this.inventory = new Map(); this.heard = new Map(); this.listedAt = new Map(); this.listed = new Map(); }
+  full(body, at = null) {
     const b = parseBody('book', body), old = this.bases.get(b.pair);
     if (old && b.seq <= old.seq) return false;
     if (b.remaining) this.inventory.set(b.pair, b);
-    this.bases.set(b.pair, b); this.books.set(b.pair, b); return true;
+    this.bases.set(b.pair, b); this.books.set(b.pair, b);
+    if (at != null) this.heard.set(b.pair, at);
+    if (at != null && b.remaining) { this.listedAt.set(b.pair, at); this.listed.set(b.pair, new Set(b.remaining.map(r => r.offerId))); }
+    return true;
   }
-  delta(body, ts) {
+  delta(body, ts, at = null) {
     const d = parseBody('bookDelta', body), base = this.bases.get(d.pair), old = this.books.get(d.pair);
     if (!base || d.seq !== base.seq || !Number.isSafeInteger(ts) || ts <= old.ts) return false;
     const levels = new Map(base.levels.map(l => [key(l), l]));
@@ -55,6 +60,8 @@ export class BookView {
     for (const l of d.upserts) levels.set(key(l), l);
     const { remaining, ...snapshot } = base;
     const next = parseBody('book', { ...snapshot, ts, levels: sort([...levels.values()]) });
-    this.books.set(d.pair, next); return true;
+    this.books.set(d.pair, next);
+    if (at != null) this.heard.set(d.pair, at);
+    return true;
   }
 }

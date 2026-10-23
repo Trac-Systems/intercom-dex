@@ -19,6 +19,8 @@ import { createLocksClient } from '../locks/client.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
+// An own offer missing from a venue book heard this long after announcing it is reported as not listed.
+export const LISTED_AFTER_SEC = 10;
 // Signers send a heartbeat every 30 s: until this long after start, a missing heartbeat says nothing, so running trades
 // do not abort for signers this app has not heard from yet.
 export const SIGNER_WARMUP_MS = 35_000;
@@ -52,7 +54,9 @@ export class Trader {
     this.declined = new Map();   // sender -> time of its last decline, for the last minute
     this.host = new TradeHost({ bridge, identity, store, solana, trac, proof, profile, log, certificatePool: this.certificates,
       onlineSigners: registry => this.#warming() ? null : this.onlineSigners(registry),
-      eligibleOnline: (amount, pair, registry) => this.#warming() ? null : this.eligibleOnline(amount, pair, registry) });
+      eligibleOnline: (amount, pair, registry) => this.#warming() ? null : this.eligibleOnline(amount, pair, registry),
+      // An own open offer's channel stays joined after a trade on it ended: the next taker comes through it.
+      keepChannel: ch => this.mine?.has(ch.slice(tradeChannel('').length)) ?? false });
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.receive = publicReceiver();
@@ -190,8 +194,8 @@ export class Trader {
         if (this.registry.offer(m)) this.log('registry', this.registry.current.version);
         await this.relays.update(this.registry.usable);
       }
-      if (m.kind === 'book' && this.#marketMessage(m.body)) this.bookView.full(m.body);
-      if (m.kind === 'bookDelta') this.bookView.delta(m.body, m.ts);
+      if (m.kind === 'book' && this.#marketMessage(m.body)) this.bookView.full(m.body, nowSec());
+      if (m.kind === 'bookDelta') this.bookView.delta(m.body, m.ts, nowSec());
       if (m.kind === 'ticker' && this.#marketMessage(m.body)) this.tickers.set(m.body.pair, m.body);
       if (m.kind === 'status') this.serviceStatus = m.body;
       if (m.kind === 'tradeLog' && this.#marketMessage(m.body, false) && this.store.get(`report-${m.body.tradeId}`)) this.store.put(`report-${m.body.tradeId}`, { delivered: true });
@@ -265,6 +269,16 @@ export class Trader {
     // The durable reservation is installed. Network sends run on this trade's queue, outside admission and the wallet lock.
     this.host.deliver(key, { type: 'tick' });
     this.host.inject(key, m);
+  }
+
+  // Whether the venue's last full book lists this own offer: false when a book heard LISTED_AFTER_SEC after the offer
+  // was announced leaves it out (the venue does that while the wallet cannot fund the smallest trade), null when
+  // that is not known yet, the list is cut at 200 offers, or trades in progress hold part of the offer.
+  #listed(o, inv) {
+    const at = this.bookView.listedAt.get(o.pair), ids = this.bookView.listed.get(o.pair), posted = this.offers.get(o.offerId)?.firstSeen;
+    if (at == null || posted == null || at < posted + LISTED_AFTER_SEC || ids.size >= 200 || inv.reserved > 0n || inv.available <= 0n) return null;
+    if (this.bookView.inventory.get(o.pair)?.registryVersion !== o.registryVersion) return null;
+    return ids.has(o.offerId);
   }
 
   makeOffer(input) {
@@ -360,7 +374,7 @@ export class Trader {
     if (!freshOffer(seen, now)) { this.offers.delete(offerId); return null; }
     if (seen.offer.maker.dexKey === this.me.dexKey) return null;
     const pair = seen.offer.pair;
-    return availableOffer(seen, this.book.get(pair), this.bookView.inventory.get(pair) ?? this.book.get(pair), now);
+    return availableOffer(seen, this.book.get(pair), this.bookView.inventory.get(pair) ?? this.book.get(pair), now, this.bookView.heard.get(pair));
   }
 
   // Taker side. `price` is the price the caller saw; the take only starts when the offer has exactly that price.
@@ -486,7 +500,7 @@ export class Trader {
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
       offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
-        return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString() }; }),
+        return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv) }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
         tradeId: t.state.tradeId, H: t.state.H ?? null, committee: t.state.terms?.committee.map(c => c.dexKey) ?? [],
         pair: t.state.draft?.pair, baseAmount: t.state.draft?.baseAmount, quoteAmount: t.state.draft?.quoteAmount })),

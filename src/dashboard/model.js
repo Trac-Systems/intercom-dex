@@ -210,7 +210,7 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
     offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {
       const base = o.pair.split('/')[0];
       return { offerId: o.offerId, pair: o.pair, side: o.side, price: o.price, size: amount(o.baseAmount, base), filled: amount(o.filled, base),
-        reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt };
+        reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt, listed: o.listed ?? null };
     }),
     running: running.map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
     history: finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t, noteOf(t)) })),
@@ -293,7 +293,8 @@ function serviceView({ role, now, health, midnight }) {
 
 function traderBook(role, pair, now, mine = role.status().mine) {
   return buildBook({ pair, offers: role.offers.values(), mine, dexKey: role.me.dexKey, book: role.book.get(pair.pair),
-    inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now, taken: ownTakes(role.host.trades.values()) });
+    inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now, heardAt: role.bookView?.heard.get(pair.pair),
+    taken: ownTakes(role.host.trades.values()) });
 }
 
 const LISTS = Object.freeze({ trader: ['offers', 'running', 'history', 'attention'], signer: ['pieces', 'recent'], service: ['signers'] });

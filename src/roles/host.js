@@ -71,8 +71,9 @@ const FINISHED = new Set(['complete', 'aborted', 'refunded', 'lost']);
 // messages to members who announce themselves late, and carries out the state machines' actions.
 export class TradeHost {
   constructor({ bridge, identity, store, solana, trac, proof, profile, certificatePool, onlineSigners, eligibleOnline,
-    serviceKey, log = () => {}, now = () => Math.floor(Date.now() / 1000), tickMs = 1000 }) {
-    Object.assign(this, { bridge, identity, store, solana, trac, proof, profile, certificatePool, onlineSigners, eligibleOnline, serviceKey, log, now, tickMs });
+    serviceKey, log = () => {}, now = () => Math.floor(Date.now() / 1000), tickMs = 1000, keepChannel = () => false }) {
+    // keepChannel(ch): a channel the owner of this host still needs after its trades there ended (a maker's open offer).
+    Object.assign(this, { bridge, identity, store, solana, trac, proof, profile, certificatePool, onlineSigners, eligibleOnline, serviceKey, log, now, tickMs, keepChannel });
     this.trades = new Map();
     this.byChannel = new Map();
     this.joined = new Set();
@@ -160,15 +161,20 @@ export class TradeHost {
     if (resume) { trade.state.stepElapsedMs = 0; trade.state.connectedAtMs = null; }
     this.trades.set(trade.key, trade);
     this.#save(trade);
-    // A signer's finished trade that it no longer serves needs no channel: a restart that joined every stored trade's
-    // channel at once (hundreds of topics) held the heartbeats back for minutes.
-    if (this.#idleSigner(trade)) {
+    // A finished trade (a signer's once it no longer serves) needs no channel: a restart that joined every stored trade's
+    // channel at once (hundreds of topics) held the heartbeats back for minutes, and traders kept them for the whole uptime.
+    if (this.#idle(trade)) {
       trade.channelsLeft = true;
       if (resume) this.log('resumed', trade.key, trade.role, trade.state.phase);
       return;
     }
     // A published signer past its repeat schedule only answers share requests: a restart re-publishes nothing for it
     // (re-publishing every recent trade at once queued hundreds of work stamps ahead of the heartbeats).
+    if (this.#serving(trade) && trade.sellerClaimed) {
+      trade.channelsLeft = true;
+      if (resume) this.log('resumed', trade.key, trade.role, trade.state.phase);
+      return;
+    }
     const quiet = this.#serving(trade) && ((trade.publicationDelay ?? 10) > PUBLICATION_LAST_DELAY_SEC ||
       this.now() - (trade.publicationAt ?? 0) >= 2 * PUBLICATION_LAST_DELAY_SEC);
     this.#joinChannels(trade, { announce: !quiet }).then(() => quiet ? null : this.#presence(trade)).catch(e => this.log('join', e.message));
@@ -357,6 +363,9 @@ export class TradeHost {
       }
     }
     if (recovery) { this.#resend(trade, channel, m.from, m.kind === 'shareRequest' ? 30 : 3); return true; }
+    // The seller's signed 'claimed' means it holds the USDC and needs no more shares: a published signer stops repeating
+    // its share and leaves the trade channel. The venue's share requests keep arriving over the signers channel.
+    if (trade.role === 'signer' && m.kind === 'claimed' && !trade.sellerClaimed) { trade.sellerClaimed = true; this.#save(trade); }
     if (m.kind === 'termsSig') trade.raw.push(m);   // kept for the signer summons; nothing else is retained
     const waiting = trade.buffer.filter(x => x.from === m.from);
     if (waiting.length >= BUFFER_PER_SENDER || waiting.reduce((sum, x) => sum + byteSize(x), 0) + byteSize(m) > BUFFER_BYTES_PER_SENDER) return reject('buffer limit reached');
@@ -377,13 +386,17 @@ export class TradeHost {
     return trade.role === 'signer' && isFinished(trade) && !this.#serving(trade);
   }
 
+  #idle(trade) {
+    return trade.role === 'signer' ? this.#idleSigner(trade) : isFinished(trade);
+  }
+
   // Leave a channel once no trade of this host needs it; joined topics otherwise piled up for the whole uptime.
   #leaveChannels(trade) {
     trade.channelsLeft = true;
     for (const ch of this.#channels(trade)) {
       const keys = this.byChannel.get(ch);
       keys?.delete(trade.key);
-      if (keys?.size) continue;
+      if (keys?.size || this.keepChannel(ch)) continue;
       this.byChannel.delete(ch);
       if (!this.joined.delete(ch)) continue;
       Promise.resolve().then(() => this.bridge.leave(ch)).catch(e => this.log('leave', ch.slice(-8), e.message));
@@ -611,6 +624,7 @@ export class TradeHost {
     for (const trade of this.trades.values()) {
       const s = trade.state;
       if (this.#serving(trade)) {
+        if (trade.sellerClaimed) { if (!trade.channelsLeft) this.#leaveChannels(trade); continue; }
         const delay = trade.publicationDelay ?? 10;
         if (delay <= PUBLICATION_LAST_DELAY_SEC && now - (trade.publicationAt ?? 0) >= delay) {
           trade.publicationAt = now; trade.publicationDelay = delay * 2;
@@ -618,7 +632,7 @@ export class TradeHost {
         }
         continue;
       }
-      if (this.#idleSigner(trade) && !trade.channelsLeft) this.#leaveChannels(trade);
+      if (this.#idle(trade) && !trade.channelsLeft) this.#leaveChannels(trade);
       if (isFinished(trade)) continue;
       this.#presence(trade);
       if (trade.role === 'seller' && s.phase === 'awaitShares' && s.shares.length < s.terms.k && now < s.terms.refundAfter &&

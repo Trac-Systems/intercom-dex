@@ -1,12 +1,13 @@
+// A busy maker talks to several takers and the committee at once over each relay, so per-peer room is generous.
 export const DEFAULTS = Object.freeze({
-  maxSessions: 128,
-  maxSessionsPerPeer: 8,
-  maxClients: 256,
-  maxPending: 256,
+  maxSessions: 512,
+  maxSessionsPerPeer: 64,
+  maxClients: 1024,
+  maxPending: 1024,
   rateBytesPerSecond: 8 * 1024 * 1024,
   rateBurstBytes: 16 * 1024 * 1024,
   idleTimeoutMs: 120_000,
-  directTimeoutMs: 15_000,
+  directTimeoutMs: 8_000,
   relayTimeoutMs: 20_000,
   sweepIntervalMs: 250,
 });

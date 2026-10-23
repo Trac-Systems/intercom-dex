@@ -777,6 +777,21 @@ test('venue alerts for fewer than k valid shares 10 minutes after finality, repe
   assert.equal(logs.filter(x => x.startsWith('ALERT')).length, 2);
 });
 
+test('reconciles check each stored share once, not again every round', async () => {
+  const s = setup({ immediate: true, refundSec: 20000 }), t = s.trade();
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  await s.publish(t, 1, t.shares[0]);
+  await s.publish(t, 2, bytesToHex(le32(randomScalar())));
+  await s.report(t);
+  s.clock.t += 600; await s.service.reconcile();
+  assert.equal(s.service.status().alerts[0].have, 1, 'the forged share stays rejected');
+  const checked = s.service.shareChecks.size;
+  assert.equal(checked, 2);
+  for (let i = 0; i < 5; i++) { s.clock.t += 15; await s.service.reconcile(); }
+  assert.equal(s.service.shareChecks.size, checked);
+  assert.equal(s.service.status().alerts[0].have, 1);
+});
+
 test('known unclaimed transfers require local finality, reject forged hashes, and stop alerting at refundAfter', async () => {
   const s = setup({ immediate: true }), t = s.trade(), logs = [];
   s.service.log = (...a) => logs.push(a.join(' '));
