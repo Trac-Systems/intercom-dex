@@ -194,10 +194,10 @@ test('maker signs accept.slot before either reveal, and reveal cannot carry a re
   assert.equal(sim.state('seller').acceptSlot, 132);
 });
 
-test('taker only accepts a slot whose randomness block is still ahead (-36 .. +150) and ignores malformed accept messages', () => {
+test('taker only accepts a slot whose randomness block is still ahead (-50 .. +150) and ignores malformed accept messages', () => {
   const f = fixture(), config = { mode: 'taker', offerId: f.offerId, terms: f.terms, registry: f.registry, nonce: hex(), entropy: hex(), now: 100 };
   const initial = createBuyer(config), s = buyerStep(initial, { type: 'tick', now: 100 }).state;
-  for (const [slot, expected] of [[963, 'aborted'], [964, 'awaitReveal'], [1000, 'awaitReveal'], [1150, 'awaitReveal'], [1151, 'aborted']]) {
+  for (const [slot, expected] of [[949, 'aborted'], [950, 'awaitReveal'], [1000, 'awaitReveal'], [1150, 'awaitReveal'], [1151, 'aborted']]) {
     const m = signed(f.seller, 'accept', { offerId: f.offerId, takeCommitment: sha256Hex(hexToBytes(s.nonce, 32)), commitment: hex(), slot });
     const r = buyerStep(s, { type: 'message', now: 101, finalizedAgeMs: 0, observedSlot: 1000, tipSlot: 1002, tipAgeMs: 0, message: m });
     assert.equal(r.state.phase, expected);

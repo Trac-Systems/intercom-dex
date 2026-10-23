@@ -140,8 +140,9 @@ maker or the taker can be either side; the sequence is the same.
    most one per sender per minute and 30 per minute in total (`DECLINES_PER_MINUTE`). They are stamped last
    (section 12).
 3. **Accept.** The maker sends `accept` with `commitment = sha256(n_m)` and `slot = A`, the latest finalized Solana
-   slot it saw, followed by its `reveal` of `n_m`. The taker accepts only when `A` is within -36 to +150 slots of
-   its own finalized view, which is at most 15 seconds old (the lower bound is `ACCEPT_SLOT_BEHIND`; -12 before 0.1.20). Then the taker reveals `n_t`.
+   slot it saw, followed by its `reveal` of `n_m`. The taker accepts only when `A` is within -50 to +150 slots of
+   its own finalized view, which is at most 15 seconds old (the lower bound is `ACCEPT_SLOT_BEHIND`; -36 from 0.1.20,
+   -12 before). Then the taker reveals `n_t`.
 4. **Reveal cutoff.** Each side refuses the other's reveal, and the taker refuses the accept, once its view of the
    chain tip (the highest processed slot any of its RPC endpoints reports, at most 6 seconds old, dated when the
    request started) reaches `A + 56`.
@@ -366,8 +367,9 @@ full snapshot at least every 60 seconds and as cumulative `bookDelta` messages a
 each logged trade, with the terms hash, escrow address, claim signature and Trac transaction hash, so anyone can
 check volumes on both chains; and its `status`. Book levels are display data; a take always needs the maker's
 signed offer, and the maker reserves its own inventory. Makers re-announce open offers every 45 seconds (120 seconds
-before 0.1.14), and book observations expire after 300 seconds. A take at a price level goes first to a maker heard
-recently (within 70 seconds for offers made by 0.1.14 or later, 150 seconds for older ones), oldest offer first. Full books also publish compact `remaining` rows (at most 200 unique
+before 0.1.14). An offer not heard for 70 seconds (150 seconds for offers made before 0.1.14) is left out of the venue's
+book and apps neither show nor take it: its maker went offline, or a running trade holds all of it. Apps keep it for
+300 seconds, so it shows again as soon as it is heard. A take at a price level goes to the oldest offer. Full books also publish compact `remaining` rows (at most 200 unique
 offer IDs and base-unit integer amount strings); deltas carry only level changes. Offer bodies come from the
 makers' announcements. The market feed's individual `left` is null until known from a full book; offers missing
 from a newer full book's `remaining` for their pair are removed. The venue leaves an offer out of its books while

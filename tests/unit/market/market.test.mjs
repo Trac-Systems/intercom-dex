@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { quoteAmount, tradePrice, priceUnits, formatPrice } from '../../../src/market/assets.js';
-import { OfferBook } from '../../../src/market/book.js';
+import { OfferBook, availableOffer, LIVE_SEC, LIVE_SEC_FAST } from '../../../src/market/book.js';
 import { PAIRS } from '../core/helpers.mjs';
 import { ticker } from '../../../src/market/ticker.js';
 
@@ -29,6 +29,23 @@ test('book orders, fills, cancels and expires', () => {
   assert.ok(!b.cancel('1'.repeat(64), 'b'.repeat(64)));
   assert.ok(b.cancel('1'.repeat(64), maker.dexKey));
   assert.deepEqual(b.snapshot('RESET/USDC', 20).map(x => x.price), ['0.4']);
+});
+
+test('offers whose maker went quiet are left out of the book and cannot be taken', () => {
+  const b = new OfferBook(), maker = { dexKey: 'a'.repeat(64) };
+  const o = (id, software) => ({ offerId: id.repeat(64), pair: 'RESET/USDC', registryVersion: 1, side: 'sell', baseAmount: '100', price: '0.5', maker, software, expiresAt: 10000 });
+  b.add(o('1', '0.1.26'), 0); b.add(o('2', '0.1.13'), 0); b.add(o('3', 'not-a-version'), 0);
+  const ids = now => b.snapshot('RESET/USDC', now).map(x => x.offerId[0]);
+  assert.deepEqual(ids(LIVE_SEC_FAST), ['1', '2', '3']);
+  assert.deepEqual(ids(LIVE_SEC_FAST + 1), ['2', '3'], 'a 45 s maker silent for one missed announcement is left out');
+  assert.deepEqual(ids(LIVE_SEC + 1), [], 'older makers announce every 120 s and get a longer window');
+  b.add(o('1', '0.1.26'), LIVE_SEC + 1);
+  assert.deepEqual(ids(LIVE_SEC + 1), ['1'], 'heard again, it shows again');
+  assert.equal(b.offers.get('1'.repeat(64)).firstSeen, 0);
+
+  const seen = lastSeen => ({ offer: o('1', '0.1.26'), firstSeen: 0, lastSeen });
+  assert.equal(availableOffer(seen(0), null, null, LIVE_SEC_FAST).baseAmount, '100');
+  assert.equal(availableOffer(seen(0), null, null, LIVE_SEC_FAST + 1), null, 'a take of a quiet maker is refused at once');
 });
 
 test('ticker over 24 hours', () => {

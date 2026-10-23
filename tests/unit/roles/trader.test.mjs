@@ -518,7 +518,7 @@ test('trader pushes cached relay keys on restart and replaces them after a signe
   assert.deepEqual(restarted.bridge.relays, [reg.serviceRelayKey]);
 });
 
-test('verified announcements refresh lastSeen; status and takes expire at 300 seconds and reannouncement restores them', async ctx => {
+test('verified announcements refresh lastSeen; status and takes end 70 s after the maker goes quiet and reannouncement restores them', async ctx => {
   let ms = Date.now(); ctx.mock.method(Date, 'now', () => ms);
   const { registry } = fixture(), alice = party(), bob = party();
   const { t: maker } = await trader(alice, { registry }), { t: taker, bridge } = await trader(bob, { registry });
@@ -526,18 +526,19 @@ test('verified announcements refresh lastSeen; status and takes expire at 300 se
   await post(bridge, alice, 'offer', offer);
   const first = taker.offers.get(offer.offerId).firstSeen;
   assert.equal(taker.offers.get(offer.offerId).lastSeen, first);
-  ms += 290000; await post(bridge, alice, 'offer', offer);
+  ms += 60000; await post(bridge, alice, 'offer', offer);
   assert.equal(taker.offers.get(offer.offerId).firstSeen, first);
-  assert.equal(taker.offers.get(offer.offerId).lastSeen, first + 290);
+  assert.equal(taker.offers.get(offer.offerId).lastSeen, first + 60);
   const ch = OFFERS, forged = seal({ kind: 'offer', ch, body: offer }, alice.identity.secretKey, { ts: nowSec(), nonce: random32() });
   forged.sig = '00'.repeat(64);
-  ms += 299000; bridge.emit('message', ch, forged); await new Promise(r => setImmediate(r));
+  ms += 70000; bridge.emit('message', ch, forged); await new Promise(r => setImmediate(r));
   assert.equal(taker.status().offers.length, 1);
-  assert.equal(taker.status().offers[0].lastSeen, first + 290, 'status says when the maker was last heard; a forged copy does not refresh it');
+  assert.equal(taker.status().offers[0].lastSeen, first + 60, 'status says when the maker was last heard; a forged copy does not refresh it');
   ms += 1000;
   const sent = bridge.sent.length;
   await assert.rejects(taker.takeOffer(offer.offerId, undefined, '1'), /This offer is no longer announced by its maker\./);
-  assert.equal(taker.offers.has(offer.offerId), false); assert.equal(taker.status().offers.length, 0);
+  assert.equal(taker.status().offers.length, 0);
+  assert.equal(taker.offers.get(offer.offerId).firstSeen, first, 'kept until 300 s, so it shows again at once when heard');
   assert.equal(taker.host.trades.size, 0); assert.equal(bridge.sent.length, sent);
   await post(bridge, alice, 'offer', offer); assert.equal(taker.status().offers.length, 1);
   await assert.rejects(maker.takeOffer(offer.offerId, undefined, '1'), /Own offer/);

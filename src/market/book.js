@@ -1,4 +1,5 @@
 import { priceUnits } from './assets.js';
+import { meetsVersion } from '../core/software.js';
 
 export const OFFER_FRESH_SEC = 300;
 export const STALE_OFFER_MESSAGE = 'This offer is no longer announced by its maker.';
@@ -8,13 +9,29 @@ export const VENUE_SILENT_SEC = 90;
 export const freshOffer = (seen, now) => !!seen && Number.isSafeInteger(seen.lastSeen) &&
   now - seen.lastSeen < OFFER_FRESH_SEC && seen.offer.expiresAt > now;
 
+// Makers re-announce their offers every 45 s since 0.1.14 (every 120 s before). An offer not heard for longer than
+// LIVE_SEC_FAST (LIVE_SEC for older makers) is not shown or taken: its maker went offline, or a running trade holds all
+// of it. It stays stored until OFFER_FRESH_SEC with its first-seen time, so an offer heard again shows again at once.
+export const LIVE_SEC = 150, LIVE_SEC_FAST = 70, FAST_ANNOUNCE = '0.1.14';
+const liveWindows = new Map();
+export function liveSec(software) {
+  let sec = liveWindows.get(software);
+  if (sec === undefined) {
+    try { sec = meetsVersion(software, FAST_ANNOUNCE) ? LIVE_SEC_FAST : LIVE_SEC; } catch { sec = LIVE_SEC; }
+    if (liveWindows.size >= 1000) liveWindows.clear();
+    liveWindows.set(software, sec);
+  }
+  return sec;
+}
+export const liveOffer = (offer, lastSeen, now) => now - lastSeen <= liveSec(offer.software);
+
 // Full snapshots identify up to 200 offers. Deltas only identify levels; retain the last full inventory and
 // cap an individual offer by its level. Absence beyond either wire depth limit does not prove removal.
 // `heardAt` is when this app last received the venue's book for the pair (its own clock). Another maker's offer waits
 // for a venue book heard after the offer: the venue leaves out offers whose maker cannot fund a trade, and those
 // would otherwise show between two books each time the maker announces them again.
 export function availableOffer(seen, book, inventory, now, heardAt = null) {
-  if (!freshOffer(seen, now)) return null;
+  if (!freshOffer(seen, now) || !liveOffer(seen.offer, seen.lastSeen, now)) return null;
   const o = seen.offer, firstSeen = seen.firstSeen ?? seen.lastSeen;
   if (heardAt != null && heardAt < firstSeen && now - heardAt < VENUE_SILENT_SEC) return null;
   let left = BigInt(o.baseAmount);
@@ -79,9 +96,9 @@ export class OfferBook {
   // Sells ascending, buys descending; ties by expiry then id. Expired offers are dropped.
   snapshot(pair, now) {
     for (const [id, o] of this.offers) if (o.expiresAt <= now || now - o.lastSeen >= OFFER_FRESH_SEC) this.offers.delete(id);
-    // Retain the oldest 20 live offers per maker, across all pairs.
+    // Retain the oldest 20 live offers per maker, across all pairs. Offers whose maker went quiet are left out.
     const counts = new Map();
-    const rows = [...this.offers.values()].sort((a, b) => a.firstSeen - b.firstSeen || a.offerId.localeCompare(b.offerId)).filter(o => {
+    const rows = [...this.offers.values()].filter(o => liveOffer(o, o.lastSeen, now)).sort((a, b) => a.firstSeen - b.firstSeen || a.offerId.localeCompare(b.offerId)).filter(o => {
       const n = (counts.get(o.maker.dexKey) ?? 0) + 1; counts.set(o.maker.dexKey, n);
       return n <= 20 && o.pair === pair;
     });

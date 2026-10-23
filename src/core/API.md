@@ -431,8 +431,8 @@ leave the original state and clock unchanged, with no actions; the runner must
 deliver a fresh retransmission. Other message kinds do not require these fields.
 The maker signs its tip observation (`tipSlot`, below) in `accept.slot` before sending its reveal; finalization
 trails the tip by about 32 slots on mainnet, and a finalized accept slot would leave the reveal only seconds.
-The taker accepts only `observedSlot - 36 <= accept.slot <= observedSlot + 150` (`ACCEPT_SLOT_BEHIND`, about 15 s;
-versions before 0.1.20 used 12), and refuses an accept whose reveal cutoff its tip already passed.
+The taker accepts only `observedSlot - 50 <= accept.slot <= observedSlot + 150` (`ACCEPT_SLOT_BEHIND`, about 20 s;
+36 from 0.1.20, 12 before), and refuses an accept whose reveal cutoff its tip already passed.
 Both traders store this fixed value as `state.acceptSlot`. The runner also supplies `tipSlot` and `tipAgeMs`, a highest-processed-slot
 view with `0 <= tipAgeMs < 6000`. Ages use a monotonic clock and include request
 time, preserving R7's freshness rules. Both maker and taker
@@ -881,8 +881,9 @@ balances after either no lock or a refund.
   full snapshot remains in `BookView.bases`. Display levels never admit or
   reject a trade; takers require the maker's signed offer and the maker reserves
   its own inventory.
-- Offer announcements are every 45 seconds (120 before 0.1.14); book observations expire after 300
-  seconds. Dashboard takes at a price level prefer makers heard within 70 s (0.1.14+ offers) or 150 s (older). Display includes the oldest 20 live offers per maker across pairs.
+- Offer announcements are every 45 seconds (120 before 0.1.14). Venue books, dashboards, status and takes leave out
+  an offer not heard for 70 s (150 s for offers made before 0.1.14); observations are kept for 300 seconds. Dashboard
+  takes at a price level go to the oldest offer. Display includes the oldest 20 live offers per maker across pairs.
   `MAX_TRADES_PER_OFFER=3`, `MAX_NEGOTIATIONS_PER_TAKER=3`; busy admissions get a `decline`
   with reason `busy`, like other capacity declines.
 - Registry signer entries optionally include `relayKey`; the registry optionally

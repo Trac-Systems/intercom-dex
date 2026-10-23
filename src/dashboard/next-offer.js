@@ -30,10 +30,9 @@ export function createNextOffer({ role, log = () => {}, defer = fn => setTimeout
       const o = same ? role.availableOffer(id) : null;
       if (!o) continue;
       let min; try { min = BigInt(registryPair(role.registry.snapshot(o.registryVersion), o.pair).minBaseAmount); } catch { continue; }
-      if (BigInt(o.baseAmount) >= min) rows.push({ o, left: BigInt(o.baseAmount), at: seen.firstSeen ?? seen.lastSeen,
-        lastSeen: seen.lastSeen ?? seen.firstSeen, offerId: id, software: o.software });
+      if (BigInt(o.baseAmount) >= min) rows.push({ o, left: BigInt(o.baseAmount), at: seen.firstSeen ?? seen.lastSeen, offerId: id });
     }
-    rows.sort(takeOrder(nowSec()));
+    rows.sort(takeOrder());
     return rows[0] ?? null;
   }
 
