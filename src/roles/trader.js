@@ -18,6 +18,9 @@ import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
+// Signers send a heartbeat every 30 s: until this long after start, a missing heartbeat says nothing, so running trades
+// do not abort for signers this app has not heard from yet.
+export const SIGNER_WARMUP_MS = 35_000;
 // Own open offers are announced again this often; takers on 0.1.14+ count a maker silent for 70 s as probably offline.
 export const REANNOUNCE_MS = 45_000;
 // While the dashboard shows a market, the makers of its best offer on each side (on 0.1.14+, heard within 70 s) are kept
@@ -43,11 +46,12 @@ export class Trader {
     if (typeof proof?.zkey !== 'string' || !isAbsolute(proof.zkey)) throw new Error('Traders require proof.zkey as an absolute path');
     Object.assign(this, { bridge, identity, store, me, serviceKey, mint: profile?.mint ?? mint, platformCollector: profile?.platformCollector ?? platformCollector, profile, log });
     this.certificates = new CertificatePool({ store, proof, log });
-    this.heartbeats = new Map();
+    this.heartbeats = new Map(); this.startedAt = performance.now();
     this.takeQueue = Promise.resolve();
     this.declined = new Map();   // sender -> time of its last decline, for the last minute
     this.host = new TradeHost({ bridge, identity, store, solana, trac, proof, profile, log, certificatePool: this.certificates,
-      onlineSigners: registry => this.onlineSigners(registry), eligibleOnline: (amount, pair, registry) => this.eligibleOnline(amount, pair, registry) });
+      onlineSigners: registry => this.#warming() ? null : this.onlineSigners(registry),
+      eligibleOnline: (amount, pair, registry) => this.#warming() ? null : this.eligibleOnline(amount, pair, registry) });
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.receive = publicReceiver();
@@ -124,6 +128,8 @@ export class Trader {
       this.log('warm makers unavailable', e.message, `retry in ${WARM_RETRY_SEC}s`);
     }
   }
+
+  #warming() { return performance.now() - this.startedAt < SIGNER_WARMUP_MS; }
 
   onlineSigners(registry = this.registry.usable) {
     const reg = this.registry.usable, now = performance.now(), minimum = registry?.minSoftware;

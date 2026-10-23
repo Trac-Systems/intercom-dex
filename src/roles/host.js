@@ -441,13 +441,13 @@ export class TradeHost {
     const observedAt = performance.now();
     if (event.type === 'makerPresence' && event.connected && trade.makerConnectedAt == null) trade.makerConnectedAt = observedAt;
     if (event.type === 'makerPresence') event = { ...event, type: 'tick' };
+    const online = this.onlineSigners?.(before.registry), eligible = this.eligibleOnline?.(before.draft?.quoteAmount, before.draft?.pair, before.registry);
     event = { ...event, stepElapsedMs: Math.max(0, observedAt - trade.budgetAt),
       makerConnected: trade.makerConnectedAt != null,
       makerConnectedElapsedMs: trade.makerConnectedAt == null ? 0 : Math.max(0, observedAt - trade.makerConnectedAt),
       observedSlot: this.slot ?? 0, finalizedAgeMs: this.slotAt == null ? Infinity : observedAt - this.slotAt,
       tipSlot: this.tip ?? 0, tipAgeMs: this.tipAt == null ? Infinity : observedAt - this.tipAt,
-      ...(this.onlineSigners ? { onlineSigners: this.onlineSigners(before.registry) } : {}),
-      ...(this.eligibleOnline ? { eligibleOnline: this.eligibleOnline(before.draft?.quoteAmount, before.draft?.pair, before.registry).length } : {}) };
+      ...(online ? { onlineSigners: online } : {}), ...(eligible ? { eligibleOnline: eligible.length } : {}) };
     const { state, actions } = STEPS[trade.role](trade.state, event);
     this.#checkState(state);
     if (trade.role === 'buyer' && event.message?.kind === 'ack') {

@@ -13,7 +13,7 @@ import { split, randomScalar } from '../../../src/core/vss.js';
 import { buildTerms, tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { selectCommittee } from '../../../src/core/committee.js';
 import { openStore } from '../../../src/roles/store.js';
-import { IN_FLIGHT_SLACK_SEC, SHARE_REQUESTS, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
+import { IN_FLIGHT_SLACK_SEC, BUSY_TRADES, TICKER_SOON_SEC, SHARE_REQUESTS, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
 import { RegistryView, nowSec, random32, verifySummon, offerIdOf, SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, tracAddress, hex, SOL, SOL2, MINT, SIG } from '../core/helpers.mjs';
 
@@ -825,4 +825,69 @@ test('forwarded transfer evidence reaches the venue through the running host rou
   await s.emit(SIGNERS, s.envelope(s.f.seller, 'transferSent', { tradeId: t.id, txHash }, `intercom-dex:t:${t.id}`));
   await s.service.settlementQueue;
   assert.equal(s.service.store.get(`watch-${t.id}`).txHash, txHash);
+});
+
+test('a seller with BUSY_TRADES dealt trades waiting for its transfer is busy until one ends', async () => {
+  const s = setup({ immediate: true }), svc = s.service, t0 = s.clock.t;
+  for (let i = 0; i < BUSY_TRADES; i++) svc.locked.set('t' + i, { seller: 'S', deadline: t0 + 1200 + i });
+  svc.locked.set('o', { seller: 'O', deadline: t0 + 1200 });
+  assert.deepEqual([...svc.busySellers()], ['S']);
+  svc.delivered.set('t0', t0);
+  assert.deepEqual([...svc.busySellers()], [], 'a delivered trade frees a slot');
+  assert.equal(svc.delivered.size, 0);
+  svc.locked.set('t0', { seller: 'S', deadline: t0 + 1200 });
+  assert.deepEqual([...svc.busySellers()], ['S']);
+  s.clock.t = t0 + 1200;
+  assert.deepEqual([...svc.busySellers()], [], 'a trade past its deadline frees a slot');
+  assert.equal(svc.locked.size, BUSY_TRADES - 1);
+});
+
+test('a listed signer\'s share marks a dealt trade delivered; a share from anyone else does not', async () => {
+  const s = setup({ immediate: true }), t = s.trade();
+  await s.service.start(); s.service.stop(); await s.summon(t);
+  s.service.locked.set(t.id, { seller: t.terms.seller.dexKey, deadline: t.terms.sendBy + t.terms.graceSec });
+  await s.publish(t, 1, t.shares[0], s.f.buyer);
+  assert.equal(s.service.delivered.has(t.id), false);
+  await s.publish(t, 1, t.shares[0]);
+  assert.equal(s.service.delivered.has(t.id), true);
+  assert.deepEqual([...s.service.busySellers()], []);
+  assert.equal(s.service.locked.has(t.id), false);
+});
+
+test('the book leaves out sell offers of a busy seller', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  s.service.funds.trac = { balances: async () => ({ TNK: '9000000000000000000', RESET: '0', feeTnk: '30000000000000000' }) };
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)); };
+  const shown = () => {
+    const last = s.bridge.sent.filter(x => ['book', 'bookDelta'].includes(x.envelope.kind) && x.envelope.body.pair === s.offer.pair).at(-1)?.envelope;
+    return last?.kind === 'book' ? last.body.remaining.map(r => r.offerId) : last;
+  };
+  await tick(5); assert.deepEqual(shown(), [s.offer.offerId]);
+  let hidden = true; s.service.busySellers = () => new Set(hidden ? [s.offer.maker.dexKey] : []);
+  await tick(60); assert.deepEqual(shown(), [], 'hidden');
+  hidden = false; await tick(60); assert.deepEqual(shown(), [s.offer.offerId], 'shown again');
+});
+
+test('a logged trade sends the tickers at once, at most every TICKER_SOON_SEC', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const waits = [];
+  t.mock.method(globalThis, 'setTimeout', (fn, ms) => { waits.push({ fn, ms }); return waits.length; });
+  t.mock.method(globalThis, 'clearTimeout', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  const tickers = () => s.bridge.sent.filter(x => x.envelope.kind === 'ticker').map(x => x.envelope.body);
+  await s.report(s.trade()); await s.service.settlementQueue;
+  assert.equal(waits.length, 1); assert.equal(waits[0].ms, 0);
+  await s.report(s.trade()); await s.service.settlementQueue;
+  assert.equal(waits.length, 1, 'a second trade before the tickers went out adds none');
+  await waits[0].fn(); await new Promise(r => setImmediate(r));
+  assert.equal(tickers().find(x => x.pair === 'TNK/USDC').last, '5');
+  await s.report(s.trade()); await s.service.settlementQueue;
+  assert.equal(waits.length, 2); assert.equal(waits[1].ms, TICKER_SOON_SEC * 1000, 'right after a ticker: waits the spacing');
+  s.service.stop();
+  await s.report(s.trade()); await s.service.settlementQueue;
+  assert.equal(waits.length, 2, 'a stopped venue schedules nothing');
 });

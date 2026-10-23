@@ -13,7 +13,7 @@ import { Trader } from '../../../src/roles/trader.js';
 import { offerIdOf, nowSec, random32 } from '../../../src/roles/common.js';
 import { tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { fixture, tracAddress, SOL, SOL2, MINT } from '../core/helpers.mjs';
-import { SIGNER_ONLINE_SEC, DECLINES_PER_MINUTE, CANCEL_RETRY_MS } from '../../../src/roles/trader.js';
+import { SIGNER_ONLINE_SEC, SIGNER_WARMUP_MS, DECLINES_PER_MINUTE, CANCEL_RETRY_MS } from '../../../src/roles/trader.js';
 import { registryPair } from '../../../src/market/assets.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
@@ -672,4 +672,18 @@ test('repeated take timeouts release live and displayed USDC exactly as persiste
   const { t: restarted } = await trader(buyer, { registry, dir });
   assert.equal(restarted.host.trades.size, 7);
   assert.deepEqual(await wallets(restarted).balances(), await taker.wallets.balances());
+});
+
+test('right after start, running trades do not judge signers offline before their first heartbeats can arrive', async ctx => {
+  let ms = 100000; ctx.mock.method(performance, 'now', () => ms);
+  const f = fixture(), service = party(), { t, bridge } = await trader(party(), { registry: f.registry, serviceKey: service.me.dexKey });
+  t.heartbeats.clear();
+  const reg = t.registry.usable;
+  assert.equal(t.host.onlineSigners(reg), null, 'no heartbeat yet: unknown, not offline');
+  assert.equal(t.host.eligibleOnline('1000000000', 'TNK/USDC', reg), null);
+  assert.deepEqual(t.onlineSigners(), [], 'the dashboard still shows who was heard');
+  await channelPost(t, bridge, f.signers[0], 'heartbeat', { registryVersion: 1, software: '0.1.0', status: 'online', holdCount: 0 }, 'intercom-dex:signers');
+  ms = t.startedAt + SIGNER_WARMUP_MS;
+  assert.deepEqual(t.host.onlineSigners(reg), [f.registry.signers[0].dexKey]);
+  assert.equal(t.host.eligibleOnline('1000000000', 'TNK/USDC', reg).length, 1);
 });

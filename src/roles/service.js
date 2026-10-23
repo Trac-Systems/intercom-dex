@@ -31,6 +31,12 @@ export const IN_FLIGHT_SLACK_SEC = 600;
 // How often the venue asks the committee for a logged trade's missing shares (ten minutes apart).
 export const SHARE_REQUESTS = 3;
 export const SHARE_ALERT_AFTER_SEC = 600, SHARE_ALERT_REPEAT_SEC = 7200;
+// Signers hold at most 8 open trades per trader (signer.js MAX_HELD_PER_TRADER) and refuse further ones. A seller
+// with BUSY_TRADES dealt trades still waiting for its transfer is left out of the book until one of them ends, so
+// buyers take the next offer instead of a trade the signers would refuse.
+export const BUSY_TRADES = 7;
+// A logged trade sends the tickers at once instead of waiting for the ticker timer, at most this often (seconds).
+export const TICKER_SOON_SEC = 3;
 
 // The venue: publishes the signer registry, the order book and tickers, checks every reported trade on both chains
 // before logging it, and accounts the signers' share of the venue fee (paid later, after a holding period).
@@ -103,6 +109,9 @@ export class Service {
     this.heartbeats = new Map();
     this.funds = new MakerFunds({ solana, trac, now: () => this.now(), log: (...a) => this.log(...a) });
     this.unfunded = {}; this.hidden = new Set();
+    this.locked = new Map();       // tradeId -> { seller, deadline } for watched trades whose buyer sent the deal
+    this.delivered = new Map();    // tradeId -> time a listed signer first published a share for it
+    this.busy = new Set();         // sellers currently left out of the book as busy
     if (latest) parseBody('status', { status: 'online', ts: now(), message: '', software: SOFTWARE, latest });
   }
 
@@ -164,7 +173,7 @@ export class Service {
       every(this.tickerMs, () => this.#publishTickers()), every(this.reconcileMs, () => this.reconcile())];
   }
 
-  stop() { this.host.stop(); for (const t of this.timers ?? []) clearInterval(t); this.#saveBook(true); }
+  stop() { this.host.stop(); for (const t of this.timers ?? []) clearInterval(t); this.timers = null; clearTimeout(this.tickerSoon); this.#saveBook(true); }
 
   #saveBook(now = false) {
     if (!now && this.now() - (this.bookSavedAt ?? -Infinity) < 30) return;
@@ -209,12 +218,12 @@ export class Service {
   async #publishBooks() {
     const now = this.now();
     this.#saveBook();
-    const makers = new Set(), pending = this.#pendingByOffer();
+    const makers = new Set(), pending = this.#pendingByOffer(), busy = this.busySellers();
     for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
       const listed = this.book.snapshot(p.pair, now).filter(o => o.registryVersion === this.registry.version && meetsVersion(o.software, this.registry.minSoftware));
       this.funds.refresh(listed);
       for (const o of listed) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
-      const offers = listed.filter(o => {
+      const offers = listed.filter(o => !(o.side === 'sell' && busy.has(o.maker.dexKey))).filter(o => {
         const funded = this.funds.funded(o, p);
         if (funded === this.hidden.has(o.offerId)) {
           if (funded) this.hidden.delete(o.offerId); else this.hidden.add(o.offerId);
@@ -238,7 +247,18 @@ export class Service {
     for (const id of this.hidden) if (!this.book.get(id, now)) this.hidden.delete(id);
   }
 
+  // Dashboards show the last price from the ticker: after a logged trade it goes out within TICKER_SOON_SEC.
+  #tickersSoon() {
+    if (this.tickerSoon || !this.timers) return;
+    const wait = Math.max(0, (this.tickersAt ?? -Infinity) + TICKER_SOON_SEC - this.now()) * 1000;
+    this.tickerSoon = setTimeout(() => {
+      this.tickerSoon = null;
+      this.#publishTickers().catch(e => this.log('service', e.message));
+    }, wait);
+  }
+
   async #publishTickers() {
+    this.tickersAt = this.now();
     const now = this.now() * 1000;
     const logged = this.trades.map(t => ({ pair: t.pair, ts: t.ts * 1000, baseAmount: t.baseAmount, quoteAmount: t.quoteAmount }));
     for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
@@ -285,6 +305,20 @@ export class Service {
     return pending;
   }
 
+  // Sellers with BUSY_TRADES dealt trades not yet delivered; also forgets trades that were delivered or ended.
+  busySellers() {
+    const now = this.now(), open = new Map(), busy = new Set();
+    for (const [id, t] of this.locked) {
+      if (now >= t.deadline || this.delivered.has(id)) { this.locked.delete(id); this.delivered.delete(id); continue; }
+      open.set(t.seller, (open.get(t.seller) ?? 0) + 1);
+    }
+    for (const [seller, n] of open) if (n >= BUSY_TRADES) busy.add(seller);
+    for (const seller of busy) if (!this.busy.has(seller)) this.log('seller busy, offers left out', seller.slice(0, 12), open.get(seller));
+    for (const seller of this.busy) if (!busy.has(seller)) this.log('seller free again', seller.slice(0, 12));
+    this.busy = busy;
+    return busy;
+  }
+
   // Only signers of the current registry count as online; anyone can send a heartbeat on the public channel.
   #listed(dexKey) { return this.registry.signers.some(s => s.dexKey === dexKey); }
 
@@ -304,6 +338,10 @@ export class Service {
         if (!checkDealShape(m.body, w.terms) || !await verifyLock(lockStatement(m.body), m.body.proof)) return;
         const current = this.store.get(name);
         if (current) this.store.put(name, { ...current, deal: { H: m.body.H, commitments: m.body.commitments } });
+        if (current && !this.delivered.has(id)) {
+          this.locked.set(id, { seller: w.terms.seller.dexKey, deadline: w.terms.sendBy + w.terms.graceSec });
+          this.log('deal seen', id.slice(0, 12), 'seller', w.terms.seller.dexKey.slice(0, 12));
+        }
       }
     });
   }
@@ -457,6 +495,8 @@ export class Service {
     const longest = Math.max(...[...this.registries.values()].map(r => r.params.refundSec));
     try { m = open(raw, { now: this.now(), seen: createReplayCache(), maxAgeSec: Math.max(3 * DAY, longest + DAY) }); } catch { return; }
     if (m.kind !== 'sharePublish') return;
+    // A signer publishes its share once it saw the seller's transfer: the trade no longer keeps the seller busy.
+    if (this.locked.has(m.body.tradeId) && !this.delivered.has(m.body.tradeId) && this.#listed(m.from)) this.delivered.set(m.body.tradeId, this.now());
     const key = sha256Hex(stableJSON(m));
     if (!this.firstSeen.has(key)) {
       if (this.firstSeen.size >= 200000) this.firstSeen.delete(this.firstSeen.keys().next().value);
@@ -589,6 +629,7 @@ export class Service {
     if (logged.fill) this.book.fill(logged.fill.offerId, BigInt(logged.fill.amount));
     if (logged.fillPending) this.#fillDue(logged);
     this.log('trade logged', r.tradeId.slice(0, 12), r.report.terms.pair, r.report.terms.baseAmount, r.report.terms.quoteAmount);
+    this.#tickersSoon();
     return true;
   }
 
