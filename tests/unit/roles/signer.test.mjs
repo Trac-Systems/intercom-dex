@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Signer, MAX_HELD_TRADES, MAX_HELD_PER_TRADER, HEARTBEAT_MS } from '../../../src/roles/signer.js';
+import { Signer, MAX_HELD_TRADES, MAX_HELD_PER_TRADER, HEARTBEAT_MS, OLD_REGISTRY_SEC } from '../../../src/roles/signer.js';
 import { seal } from '../../../src/core/envelope.js';
 import { encodeKey } from '../../../src/core/keys.js';
 import { selectCommittee } from '../../../src/core/committee.js';
@@ -58,6 +58,23 @@ test('an existing signer continues holding and serving after minSoftware rises',
   await signer.host.deliver(record.key, { type: 'tick' });
   assert.equal(record.state.phase, 'holding'); assert.equal(record.state.share, held);
   assert.equal(signer.status().updateRequired, true);
+});
+
+test('signers accept trades on offers posted under the previous registry until it was replaced OLD_REGISTRY_SEC ago', async () => {
+  for (const [age, accepted] of [[3600, true], [OLD_REGISTRY_SEC - 60, true], [OLD_REGISTRY_SEC + 60, false]]) {
+    const { signer, f, summon, now } = await setup();
+    const next = { ...f.registry, version: f.registry.version + 1, issuedAt: now - age };
+    signer.registry.current = next;
+    signer.registry.snapshot = v => (v === next.version ? next : v === f.registry.version ? f.registry : null);
+    await summon();
+    assert.equal(signer.host.trades.size, accepted ? 1 : 0, `replaced ${age} s ago`);
+  }
+  const { signer, f, summon, now } = await setup();
+  const next = { ...f.registry, version: f.registry.version + 1, issuedAt: now - 3600, removed: [{ dexKey: f.terms.committee[1].dexKey, removedAt: now - 3600, reason: 'test' }] };
+  signer.registry.current = next;
+  signer.registry.snapshot = v => (v === next.version ? next : v === f.registry.version ? f.registry : null);
+  await summon();
+  assert.equal(signer.host.trades.size, 0, 'a committee member removed since');
 });
 
 test('signers accept a summon only inside the registry send window with the pinned refund distance', async () => {

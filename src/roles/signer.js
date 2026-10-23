@@ -13,6 +13,8 @@ const MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const MAX_HELD_TRADES = 32, MAX_HELD_PER_TRADER = 8;
 // Released traders and venues keep a heartbeat fresh for 90 s.
 export const HEARTBEAT_MS = 30_000;
+// Trades on offers posted under an earlier registry stay possible this long after that registry was replaced.
+export const OLD_REGISTRY_SEC = 31 * 86400;
 
 // A committee signer: joins trades it is summoned to (only when it is really in the signed terms' committee and the
 // registry it trusts lists it), holds its encrypted share, verifies the seller's transfer on its own node, publishes.
@@ -77,9 +79,11 @@ export class Signer {
     const { tradeId } = m.body, now = nowSec(), reg = this.registry.usable;
     if ([...this.host.trades.values()].some(t => t.state.tradeId === tradeId)) return;
     if (!reg) throw new Error('No usable registry');
-    // The trade's registry must be the current one, or the one just before it if that was replaced minutes ago.
-    const version = m.body.terms?.registryVersion;
-    if (!(version === reg.version || (version === reg.version - 1 && now - reg.issuedAt < 600))) throw new Error('Registry version not current');
+    // The trade's registry must be the current one, or an earlier one that was replaced less than OLD_REGISTRY_SEC ago:
+    // offers live up to 30 days and keep naming the registry they were posted under.
+    const version = m.body.terms?.registryVersion, next = Number.isSafeInteger(version) && this.registry.snapshot(version + 1);
+    if (!(version === reg.version || (version < reg.version && next && now - next.issuedAt < OLD_REGISTRY_SEC))) throw new Error('Registry version not current');
+    if (version !== reg.version && m.body.terms.committee?.some(s => reg.removed?.some(r => r.dexKey === s.dexKey))) throw new Error('Committee member removed since');
     const { terms, sigs, lifetimeSec } = verifySummon(m.body, this.registry.snapshot(version), now);
     if (!meetsVersion(SOFTWARE, reg.minSoftware)) throw new Error('update required');
     const pair = registryPair(this.registry.snapshot(version), terms.pair);
