@@ -36,6 +36,15 @@ All local ports bind to 127.0.0.1. Each process on one machine needs its own:
 
 The peer reaches other peers through Hyperswarm and the DHT bootstrap nodes pinned in the network profile.
 
+Public channels (offers, the book, signer heartbeats) travel through the venue. Traders and market feeds connect to
+the venue for them and forward nothing; the venue sends each public message once to every connected peer, with a
+per-peer send budget. Trade channels still connect maker and taker directly, or through a relay. Peers from 0.1.5 on
+keep working with this.
+
+To see what a peer's traffic is made of, send `{ "id": 1, "type": "bandwidth.stats" }` on its authenticated bridge.
+The reply lists cumulative bytes and events per layer (`protocol`, `blocks`, `streams`, `udp`), subsystem and
+direction (`received`, `sent`, `originated`, `relayed`). Take two replies a minute apart and subtract them for a rate.
+
 Create the bridge token before the first start; the role creates its control token itself:
 
 ```sh

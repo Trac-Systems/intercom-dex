@@ -174,10 +174,15 @@ export function negotiationStep(state, event, message) {
     if (['take', 'accept', 'reveal'].includes(message.kind) &&
         !freshChainView(event)) return null;
     if (message.kind === 'take') {
-      if (s.phase !== 'awaitTake' || s.mode !== 'maker' || b.baseAmount !== s.draft.baseAmount ||
+      if (s.phase !== 'awaitTake' || s.mode !== 'maker') throw new Error('Invalid take');
+      // This maker trade exists only for this take, so a mismatching take ends it with a reason the taker receives.
+      if (b.baseAmount !== s.draft.baseAmount ||
           b.pair !== s.draft.pair || b.registryVersion !== s.registry.version || !meetsVersion(b.software, s.registry.minSoftware) ||
           b.sendBy !== s.draft.sendBy || b.refundAfter !== s.draft.refundAfter ||
-          stableJSON(b.taker) !== stableJSON(participant(s.draft, s.role === 'buyer' ? 'seller' : 'buyer'))) throw new Error('Invalid take');
+          stableJSON(b.taker) !== stableJSON(participant(s.draft, s.role === 'buyer' ? 'seller' : 'buyer'))) {
+        s.peerCommit = b.commitment;
+        return abortTransition(s, 'Invalid take');
+      }
       if (event.eligibleOnline !== undefined && event.eligibleOnline < s.draft.k + 1) return abortTransition(s, 'Not enough signers online');
       s.peerCommit = b.commitment;
       // The newest slot, not the finalized one: on mainnet finalization trails the tip by about 32 slots, which would

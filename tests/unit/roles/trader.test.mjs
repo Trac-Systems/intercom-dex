@@ -13,7 +13,7 @@ import { Trader } from '../../../src/roles/trader.js';
 import { offerIdOf, nowSec, random32 } from '../../../src/roles/common.js';
 import { tradeId as termsTradeId } from '../../../src/core/terms.js';
 import { fixture, tracAddress, SOL, SOL2, MINT } from '../core/helpers.mjs';
-import { SIGNER_ONLINE_SEC, SIGNER_WARMUP_MS, DECLINES_PER_MINUTE, CANCEL_RETRY_MS } from '../../../src/roles/trader.js';
+import { SIGNER_ONLINE_SEC, SIGNER_WARMUP_MS, DECLINES_PER_MINUTE, DECLINES_PER_TAKER, CANCEL_RETRY_MS } from '../../../src/roles/trader.js';
 import { registryPair } from '../../../src/market/assets.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
@@ -321,18 +321,18 @@ test('maker emits strict decline reasons once per nonce, declines malformed take
   assert.equal(bridge.sent.length, count);
 });
 
-test('a stranger take flood gets one decline per sender and DECLINES_PER_MINUTE in total; markers are pruned after the take window', async () => {
+test('a take flood gets one decline per take up to DECLINES_PER_TAKER per sender and DECLINES_PER_MINUTE in total; markers are pruned after the take window', async () => {
   const f = fixture(), { t, bridge, dir } = await trader(party(), { registry: f.registry });
   const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
   const ch = 'intercom-dex:t:' + offer.offerId;
   const take = peer => channelPost(t, bridge, peer, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: 1, software: '0.1.0',
     baseAmount: '1000000000000000001', taker: peer.me, commitment: random32(), sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, ch);
   const repeat = party(), repeated = [];
-  for (let i = 0; i < 3; i++) repeated.push(await take(repeat));
+  for (let i = 0; i < DECLINES_PER_TAKER + 2; i++) repeated.push(await take(repeat));
   for (let i = 0; i < 2 * DECLINES_PER_MINUTE; i++) await take(party());
   const declines = bridge.sent.filter(x => x.envelope.kind === 'decline');
   assert.equal(declines.length, DECLINES_PER_MINUTE);
-  assert.equal(declines.filter(x => repeated.includes(x.envelope.body.takeNonce)).length, 1);
+  assert.equal(declines.filter(x => repeated.includes(x.envelope.body.takeNonce)).length, DECLINES_PER_TAKER);
   assert.ok(declines.every(x => x.envelope.body.reason === 'insufficient'));
   assert.equal(t.store.list('decline-').length, DECLINES_PER_MINUTE);
   const [kept, ...old] = t.store.list('decline-');
@@ -724,4 +724,35 @@ test('right after start, running trades do not judge signers offline before thei
   ms = t.startedAt + SIGNER_WARMUP_MS;
   assert.deepEqual(t.host.onlineSigners(reg), [f.registry.signers[0].dexKey]);
   assert.equal(t.host.eligibleOnline('1000000000', 'TNK/USDC', reg).length, 1);
+});
+
+test('a maker answers takes it cannot serve with a decline instead of silence', async () => {
+  const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  const ch = 'intercom-dex:t:' + offer.offerId, taker = party();
+  const body = () => ({ offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion, software: '0.1.0',
+    baseAmount: '1000000000000000000', taker: taker.me, commitment: random32(), sendBy: nowSec() + f.registry.params.sendWindowSec,
+    refundAfter: nowSec() + f.registry.params.refundSec });
+  // Draft and profile errors are declined as invalid.
+  t.profile = { maxBaseAmount: '1' };
+  const nonce = await channelPost(t, bridge, taker, 'take', body(), ch);
+  await new Promise(r => setImmediate(r)); await t.takeQueue;
+  const declines = bridge.sent.filter(x => x.envelope.kind === 'decline' && x.envelope.body.takeNonce === nonce);
+  assert.equal(declines.length, 1);
+  assert.equal(declines[0].envelope.body.reason, 'invalid');
+  assert.equal(t.host.trades.size, 0);
+});
+
+test('a decline refused while the stamp queue is busy is sent again', async () => {
+  const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  const ch = 'intercom-dex:t:' + offer.offerId, taker = party();
+  let refused = 0;
+  const send = t.host.sendPublic.bind(t.host);
+  t.host.sendPublic = (channel, kind, body) => kind === 'decline' && refused++ === 0 ? Promise.reject(new Error('Stamp queue busy')) : send(channel, kind, body);
+  const nonce = await channelPost(t, bridge, taker, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion,
+    software: '0.1.0', baseAmount: '1000000000000000001', taker: taker.me, commitment: random32(), sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, ch);
+  await new Promise(r => setTimeout(r, 2300));
+  const declines = bridge.sent.filter(x => x.envelope.kind === 'decline' && x.envelope.body.takeNonce === nonce);
+  assert.equal(refused, 2); assert.equal(declines.length, 1); assert.equal(declines[0].envelope.body.reason, 'insufficient');
 });

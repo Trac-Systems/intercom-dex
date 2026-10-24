@@ -267,3 +267,29 @@ test('while waiting for a reveal, what this side said is repeated every 2 s; oth
   assert.deepEqual(await repeats('reveal', 'awaitReveal'), [102, 104, 106, 108, 110, 112]);
   assert.deepEqual(await repeats('terms', 'awaitTerms'), [110]);
 });
+
+test('a maker whose Solana view stays stale ends the negotiation with a reason the taker receives', async t => {
+  const clock = { ms: 100000 };
+  t.mock.method(performance, 'now', () => clock.ms);
+  const timers = [];
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { const timer = { fn, ms }; timers.push(timer); return timer; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const sent = [];
+  const bridge = new EventEmitter(); bridge.join = async () => {}; bridge.send = async (ch, payload) => { sent.push(payload); };
+  const records = new Map(), store = { list: () => [], get: name => records.get(name), put: (name, value) => records.set(name, structuredClone(value)) };
+  // One reading at start; no later refresh runs, so the view goes stale once the tip reading is 6 s old.
+  const host = new TradeHost({ bridge, store, solana: { finalizedSlot: async () => 100, tipSlot: async () => 155 }, trac: null, now: () => 106,
+    identity: { publicKey: encodeKey(transcript.f.seller.publicKey), secretKey: transcript.f.seller.secretKey } });
+  t.after(() => host.stop());
+  await host.start();
+  const state = structuredClone(transcript.snapshots.get('seller:awaitTake'));
+  const body = transcript.log.find(x => x.name === 'buyer' && x.action.kind === 'take').action.body;
+  clock.ms += 7000;
+  await host.addTrade({ key: 'maker-stale', role: 'seller', state, lifetimeSec: 86400 });
+  await host.inject('maker-stale', seal({ kind: 'take', ch: `intercom-dex:t:${state.offerId}`, body }, transcript.f.buyer.secretKey, { ts: 106, nonce: hex() }));
+  const trade = host.trades.get('maker-stale'), tick = () => timers.find(timer => timer.ms === 1000).fn();
+  clock.ms += 9000; tick(); await trade.queue;
+  assert.equal(trade.state.phase, 'awaitTake'); assert.equal(trade.buffer.length, 1);
+  clock.ms += 1000; tick(); await trade.queue;
+  assert.equal(trade.state.phase, 'aborted'); assert.equal(trade.state.reason, 'Maker could not read Solana');
+});

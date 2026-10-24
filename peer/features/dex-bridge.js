@@ -18,6 +18,8 @@ export default class DexBridge extends ScBridge {
     this.makerRoutes = new Map();
     this.makerClients = new WeakSet();
     this.warmRoutes = new Map();
+    // The venue forwards public messages, so connect before the first registry arrives, including for old clients.
+    if (this.info?.servicePeerKey) this._pinRegistryPeers([]);
   }
 
   _releaseMaker(client, channel, route = this.makerRoutes.get(client)?.get(channel)) {
@@ -47,7 +49,7 @@ export default class DexBridge extends ScBridge {
     if (!swarm || swarm.destroyed) return;
     this.registryPins ??= new Map();
     const self = swarm.keyPair?.publicKey ? b4a.toString(swarm.keyPair.publicKey, 'hex') : null;
-    const wanted = new Set(keys.filter(k => k !== self));
+    const wanted = new Set([this.info?.servicePeerKey, ...keys].filter(k => k && k !== self));
     for (const [peerKey, pin] of this.registryPins) {
       if (wanted.has(peerKey)) continue;
       this.registryPins.delete(peerKey);
@@ -138,9 +140,10 @@ export default class DexBridge extends ScBridge {
   _handleClientMessage(client, message) {
     if (handleLocksJoin(this, client, message)) return;
     const type = message?.type;
-    if (!['dex_join', 'dex_presence', 'dex_warm', 'leave', 'relays.set', 'relays.stats'].includes(type) && !Object.hasOwn(this.handlers, type)) return super._handleClientMessage(client, message);
+    if (!['dex_join', 'dex_presence', 'dex_warm', 'leave', 'relays.set', 'relays.stats', 'bandwidth.stats'].includes(type) && !Object.hasOwn(this.handlers, type)) return super._handleClientMessage(client, message);
     const reply = (payload) => this._broadcastToClient(client, Number.isInteger(message.id) ? { id: message.id, ...payload } : payload);
     if (this.requireAuth && !client.authed) return reply({ type: 'error', error: 'Unauthorized.' });
+    if (type === 'bandwidth.stats') return reply({ type, stats: this.peer.bandwidth?.snapshot() ?? null });
     if (type === 'leave') {
       const channel = String(message.channel ?? '').trim();
       for (const owner of this.makerRoutes.keys()) this._releaseMaker(owner, channel);

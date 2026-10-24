@@ -11,6 +11,8 @@ import { proveLock, verifyLock } from '../proof/lockproof.js';
 import { checkProfileRegistry, checkProfileTerms } from '../net/profile.js';
 
 const STEPS = { buyer: buyerStep, seller: sellerStep, signer: signerStep };
+// How long a maker waits for a recent Solana view before ending a negotiation it cannot answer.
+export const MAKER_CHAIN_WAIT_MS = 10_000;
 const ANY = '*';
 const NEEDS_CHAIN = new Set(['take', 'accept', 'reveal']);
 // Which message kinds each role's state machine takes in which phase. Anything else waits in the trade's buffer
@@ -321,6 +323,7 @@ export class TradeHost {
     try { trade.seen.consume(`${message.from}:${message.nonce}`, message.ts + trade.lifetimeSec, this.now()); }
     catch { return trade.queue; }
     trade.raw.push(message); trade.buffer.push(message);
+    trade.injectedAt ??= performance.now();
     return this.#enqueue(trade, () => this.#drain(trade));
   }
 
@@ -623,6 +626,14 @@ export class TradeHost {
     const now = this.now();
     for (const trade of this.trades.values()) {
       const s = trade.state;
+      // A maker whose Solana view stays stale cannot answer a take; it ends that negotiation with a reason the taker
+      // receives instead of leaving it to time out.
+      if (s.mode === 'maker' && s.phase === 'awaitTake' && trade.buffer.length && !trade.staleAbort && trade.injectedAt != null &&
+          !this.#chainFresh() && performance.now() - trade.injectedAt >= MAKER_CHAIN_WAIT_MS) {
+        trade.staleAbort = true;
+        this.deliver(trade.key, { type: 'error', definite: true, reason: 'Maker could not read Solana' });
+        continue;
+      }
       if (this.#serving(trade)) {
         if (trade.sellerClaimed) { if (!trade.channelsLeft) this.#leaveChannels(trade); continue; }
         const delay = trade.publicationDelay ?? 10;

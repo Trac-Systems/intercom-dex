@@ -751,9 +751,15 @@ Maker admissions run in arrival order, reserve size before admitting the next
 take, and allow `MAX_TRADES_PER_OFFER = 3` before the lock per offer and
 `MAX_NEGOTIATIONS_PER_TAKER = 3` per taker. A take whose sender is not the named taker
 gets no answer; one whose pair, registry version, minimum amount or deadlines do not
-match is declined `invalid` (0.1.18; earlier makers did not answer those). Each declined envelope nonce receives at most
-one decline, recorded for 300 seconds; at most one decline goes to a sender per minute
-and `DECLINES_PER_MINUTE = 30` in total. Malformed and unrelated takes are ignored.
+match is declined `invalid` (0.1.18; earlier makers did not answer those). Since 0.1.31 every authenticated take a
+maker refuses gets an answer: a maker without a usable registry declines `busy`; a pair the registry cannot resolve,
+or terms the maker's network profile rejects, is declined `invalid`; a take that reaches the maker's negotiation but
+does not match its terms ends that negotiation with an `abort` whose reason is `Invalid take`; and a maker whose
+Solana view stays older than the negotiation limits for `MAKER_CHAIN_WAIT_MS = 10000` after a take arrives ends it with
+an `abort` reason `Maker could not read Solana`. Each declined envelope nonce receives at most one decline, recorded
+for 300 seconds; a sender gets at most `DECLINES_PER_TAKER = 6` declines per minute and all senders together
+`DECLINES_PER_MINUTE = 30`. A decline the transport refuses while its stamp queue is busy is sent again up to three
+times, 2 s apart. Malformed and unrelated takes are ignored.
 Aborted trades release reservations. Accept/reveal routing checks the commitment;
 decline routing checks the saved take envelope nonce before buffering.
 

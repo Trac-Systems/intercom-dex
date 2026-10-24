@@ -38,6 +38,9 @@ export const MAX_NEGOTIATIONS_PER_TAKER = 3;
 // Declines answer strangers, so they are bounded: one per sender per minute, DECLINES_PER_MINUTE in total. A decline
 // marker outlives the take's envelope window (120 s either side of its timestamp) and is then pruned.
 export const DECLINES_PER_MINUTE = 30;
+export const DECLINES_PER_TAKER = 6;
+const DECLINE_RETRIES = 3;
+const DECLINE_RETRY_MS = 2000;
 const DECLINE_MARKER_SEC = 300;
 const beforeLock = t => !isFinished(t) && !t.state.lockAttempted && !t.state.locked && !t.state.escrowOk &&
   !['transferring', 'awaitShares', 'claiming'].includes(t.state.phase);
@@ -170,15 +173,26 @@ export class Trader {
     return registryPair(snapshot, pair);
   }
 
-  // Takes that fail authentication or basic validity get no answer at all; the transport stamps declines last.
+  // Every authenticated take a maker refuses gets a decline with its reason, so the taker never waits for a timeout.
+  // Only takes that fail authentication get no answer. Declines are limited per taker and in total; one that the
+  // transport refuses while its stamp queue is busy is sent again a little later.
   #decline(channel, m, reason) {
     const now = nowSec(), name = `decline-${sha256Hex(m.from + m.nonce)}`;
-    for (const [key, at] of this.declined) if (at <= now - 60) this.declined.delete(key);
-    if (this.declined.has(m.from) || this.declined.size >= DECLINES_PER_MINUTE || this.store.get(name)) return;
-    this.declined.set(m.from, now);
+    let total = 0;
+    for (const [key, times] of this.declined) {
+      const recent = times.filter(at => at > now - 60);
+      if (recent.length) { this.declined.set(key, recent); total += recent.length; } else this.declined.delete(key);
+    }
+    const mine = this.declined.get(m.from) ?? [];
+    if (mine.length >= DECLINES_PER_TAKER || total >= DECLINES_PER_MINUTE || this.store.get(name)) return;
+    this.declined.set(m.from, [...mine, now]);
     this.store.put(name, { at: now, reason });
-    this.host.sendPublic(channel, 'decline', { offerId: m.body.offerId, takeNonce: m.nonce, reason })
-      .catch(e => this.log('decline failed', e.message));
+    const send = left => this.host.sendPublic(channel, 'decline', { offerId: m.body.offerId, takeNonce: m.nonce, reason })
+      .catch(e => {
+        if (left > 0 && /Stamp queue busy/.test(e.message)) setTimeout(() => send(left - 1), DECLINE_RETRY_MS).unref?.();
+        else this.log('decline failed', e.message);
+      });
+    send(DECLINE_RETRIES);
   }
 
   #pruneDeclines(now = nowSec()) {
@@ -229,11 +243,11 @@ export class Trader {
     const decline = reason => this.#decline(channel, m, reason);
     if (m.from !== m.body.taker.dexKey || m.from === this.me.dexKey) return;
     if (!offer || offer.expiresAt <= now) return decline('expired');
-    if (!this.registry.usable) return;
+    if (!this.registry.usable) return decline('busy');
     if (!reg || m.body.pair !== offer.pair || m.body.registryVersion !== offer.registryVersion) return decline('invalid');
     let pair;
     try { pair = this.#newPair(offer.pair, offer.registryVersion, m.body.software); }
-    catch (e) { return e.message === 'update required' ? decline('version') : undefined; }
+    catch (e) { return decline(e.message === 'update required' ? 'version' : 'invalid'); }
     const trades = [...this.host.trades.values()];
     const duplicate = trades.find(t => t.state.mode === 'maker' && t.state.offerId === offer.offerId && t.state.peer === m.from &&
       t.raw.some(x => x.kind === 'take' && x.body.commitment === m.body.commitment));
@@ -258,9 +272,12 @@ export class Trader {
     const quote = quoteAmount(pair, m.body.baseAmount, offer.price), exclude = [this.me.dexKey, m.from];
     if (this.#eligible(quote, offer.pair, reg, exclude).length < p.n ||
         this.eligibleOnline(quote, offer.pair).filter(s => !exclude.includes(s.dexKey)).length < p.k + 1) return decline('signers');
-    const draft = buildDraft({ offer, baseAmount: m.body.baseAmount, maker: this.me, taker: m.body.taker, registry: reg,
-      sendBy: m.body.sendBy, refundAfter: m.body.refundAfter, mint: this.mint, platformCollector: this.platformCollector });
-    if (this.profile) checkProfileTerms(draft, this.profile);
+    let draft;
+    try {
+      draft = buildDraft({ offer, baseAmount: m.body.baseAmount, maker: this.me, taker: m.body.taker, registry: reg,
+        sendBy: m.body.sendBy, refundAfter: m.body.refundAfter, mint: this.mint, platformCollector: this.platformCollector });
+      if (this.profile) checkProfileTerms(draft, this.profile);
+    } catch (e) { this.log('take refused', e.message); return decline('invalid'); }
     const role = offer.side === 'sell' ? 'seller' : 'buyer';
     const create = role === 'seller' ? createSeller : createBuyer;
     const state = create({ mode: 'maker', offerId: offer.offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now });

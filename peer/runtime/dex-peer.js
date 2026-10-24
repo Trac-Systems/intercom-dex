@@ -17,6 +17,7 @@ import { openResetReader } from '../src/trac/reset-reader.js';
 import { verifyResetSource } from '../src/trac/source.js';
 import { subnetChannel } from './subnet-channel.js';
 import { fanOutValidatorSends } from './fanout.js';
+import { Bandwidth } from './bandwidth.js';
 import { resolveProfile } from '../../src/net/profile-core.js';
 
 const hex32 = /^[0-9a-f]{64}$/;
@@ -82,11 +83,12 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
   const token = fs.readFileSync(config.bridge.tokenFile, 'utf8').trim();
   if (token.length < 32) throw new Error('Bridge token too short');
   let bus, peer, resetPeer, relay, sidechannel, bridge, closing, finish;
+  const bandwidth = new Bandwidth();
   const lifetime = new Promise(resolve => { finish = resolve; });
   const close = () => closing ??= (async () => {
     let failure;
     for (const stop of [() => bridge?.stop(), () => sidechannel?.stop(), () => relay?.stop(), () => peer?.close(),
-      () => peer?.store.close(), () => resetPeer?.close(), () => resetPeer?.store.close(), () => bus?.close()]) {
+      () => peer?.store.close(), () => resetPeer?.close(), () => resetPeer?.store.close(), () => bus?.close(), () => bandwidth.close()]) {
       try { await stop(); } catch (error) { failure ??= error; }
     }
     finish();
@@ -107,6 +109,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     if (mc.networkId !== config.msbNetworkId) throw new Error('MSB networkId differs from the network profile');
     const options = { networkPrefix: mc.addressPrefix, derivationPath: mc.derivationPath };
     bus = new MainSettlementBus(mc, await walletAt(mc.keyPairPath, PeerWallet, options)); await bus.ready(); step('msb ready');
+    bandwidth.trackStore(bus.state.base.store, 'msb');
     fanOutValidatorSends(bus.network);
     if (devnet) {
       await bus.network.tryConnect(config.validatorKey, 'validator');
@@ -118,13 +121,19 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
       replicate: true, enableUpdater: true, enableBackgroundTasks: true, enableTxlogs: false,
       apiMsgExposed: false, apiTxExposed: false });
     peer = new Peer({ config: pc, msb: bus, wallet: await walletAt(pc.keyPairPath, Wallet, options),
-      protocol: DexProtocol, contract: DexContract }); await peer.ready(); step('peer ready');
+      protocol: DexProtocol, contract: DexContract });
+    bandwidth.trackStore(peer.store, 'peer');
+    await peer.ready(); step('peer ready');
+    // Hyperswarm applies these limits to discovery; explicit venue/signer/maker pins bypass them.
+    if (transport.connections) Object.assign(peer.swarm, transport.connections);
+    peer.bandwidth = bandwidth;
+    bandwidth.trackSwarm(peer.swarm, 'peer');
     if (configurePeer) await configurePeer(peer);
     relay = new BlindRelay(peer, transport.relay);
     await relay.start(); peer.blindRelay = relay; step('relay ready');
     // The RESET reader's subnet join can take minutes on a slow network; the bridge and the sidechannel open without
     // waiting for it (RESET requests answer "not ready" until then). A reader that fails to open still stops the peer.
-    const resetReady = openResetReader({ bus, config, walletAt });
+    const resetReady = openResetReader({ bus, config, walletAt, bandwidth });
     resetReady.then(r => { if (closing) return r?.close(); resetPeer = r; step('reset reader ready'); },
       error => { console.error(`RESET reader failed: ${error.message}`); void close().finally(() => process.exit(1)); });
     const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer: resetReady }) : {};
@@ -132,7 +141,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     bridge = new DexBridge(peer, { host: '127.0.0.1', port: config.bridge.port, token, requireAuth: true, handlers,
       info: { peerPubkey: peer.wallet.publicKey, swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex'),
         msbAddress: bus.wallet?.address ?? null, environment: config.environment, networkProfile: profile, servicePeerKey: config.servicePeerKey, role: config.role, locks: joinsLocks(config) } });
-    sidechannel = new Sidechannel(peer, { ...transport.sidechannel,
+    sidechannel = new Sidechannel(peer, { ...transport.sidechannel, bandwidth,
       onMessage: (channel, payload, connection) => bridge.handleSidechannelMessage(channel, payload, connection) });
     peer.sidechannel = sidechannel;
     bridge.attachSidechannel(sidechannel);

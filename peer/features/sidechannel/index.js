@@ -1,19 +1,23 @@
 import Feature from 'trac-peer/src/artifacts/feature.js';
 import b4a from 'b4a';
 import c from '../../node_modules/compact-encoding/index.js';
+import { PublicSend } from './public-send.js';
 
 // Charge the frame before decoding; skip oversized or deeply nested JSON before parsing its text. A frame that is not
 // well-formed JSON fails with a plain Error, so protomux closes only that connection: it rethrows SyntaxError and
 // RangeError (safety-catch), which would end the whole process.
-const boundedJson = (limit, charge) => ({
+const boundedJson = (limit, charge, account) => ({
   preencode: c.json.preencode,
   encode: c.json.encode,
   decode(state) {
+    const bytes = state.end - state.start;
+    let payload = null;
     try {
-      return decodeBounded(state, limit, charge);
+      payload = decodeBounded(state, limit, charge);
+      return payload;
     } catch (e) {
       throw new Error(`Malformed sidechannel frame: ${e?.message ?? e}`);
-    }
+    } finally { account(bytes, payload); }
   }
 });
 
@@ -130,6 +134,19 @@ class Sidechannel extends Feature {
     this.allowRemoteOpen = config.allowRemoteOpen !== false;
     this.autoJoinOnOpen = config.autoJoinOnOpen === true;
     this.relayEnabled = config.relayEnabled !== false;
+    this.noRelayChannels = new Set(config.noRelayChannels ?? []);
+    this.discovery = config.discovery ?? { server: true, client: true };
+    this.bandwidth = config.bandwidth ?? null;
+    this.publicDelivery = config.publicDelivery ?? null;
+    this.publicChannels = new Set(this.publicDelivery?.channels ?? []);
+    this.publicSendVerified = new WeakMap();
+    this.publicSend = config.publicSend ? new PublicSend({ ...config.publicSend, now: () => this._now(), send: item => {
+      if (this._powRequired(item.channel) && Math.abs(this._now() - item.payload.ts) >= 60000) { this.publicSend.dropped++; return; }
+      return this._sendNow(item.record, item.channel, item.payload, item.direction);
+    } }) : null;
+    this.publicLeaves = new WeakSet();
+    this.deliverySessions = new WeakMap();
+    this.deliveryMessages = new WeakMap();
     this.relayTtl = Number.isSafeInteger(config.relayTtl) ? config.relayTtl : 3;
     this.maxSeen = Number.isSafeInteger(config.maxSeen) ? config.maxSeen : 5000;
     this.seenTtlMs = Number.isSafeInteger(config.seenTtlMs) ? config.seenTtlMs : 120_000;
@@ -370,7 +387,7 @@ class Sidechannel extends Feature {
   }
 
   _relay(channel, payload, originConnection) {
-    if (!this.relayEnabled) return;
+    if (!this.relayEnabled || this.noRelayChannels.has(channel)) return;
     const control = payload?.message?.control;
     // Never relay handshake/control messages; they are for direct neighbor authorization.
     if (control === 'auth' || control === 'welcome') return;
@@ -383,11 +400,86 @@ class Sidechannel extends Feature {
     };
     for (const [connection, perConn] of this.connections.entries()) {
       if (connection === originConnection) continue;
+      if (this.publicChannels.has(channel) && !this.publicDelivery.forwarder && this.publicLeaves.has(connection)) continue;
       if (!this._remoteAuthorized(channel, connection)) continue;
       const record = perConn.get(channel);
       if (this._usableRecord(connection, channel, record)) {
-        record.message.send(relayed);
+        this._send(record, channel, relayed, 'relayed');
       }
+    }
+  }
+
+  _send(record, channel, payload, direction = 'originated') {
+    if (this.publicSend && this.publicChannels.has(channel)) {
+      const state = { start: 0, end: 0 }; c.json.preencode(state, payload);
+      // Coalescing must not let a spoofed sender replace another maker's queued offer. Verify once per frame,
+      // shared by its fanout; unauthenticated legacy frames retain their independent queue entries.
+      if (!this.publicSendVerified.has(payload)) this.publicSendVerified.set(payload, this._verifySig(payload, payload.from));
+      return this.publicSend.push(record, channel, payload, direction, state.end, this.publicSendVerified.get(payload));
+    }
+    return this._sendNow(record, channel, payload, direction);
+  }
+
+  _sendNow(record, channel, payload, direction = 'originated') {
+    if (record.channel?.closed || record.channel?.destroyed) return false;
+    const result = record.message.send(payload);
+    if (this.bandwidth) {
+      const state = { start: 0, end: 0 }; c.json.preencode(state, payload);
+      this.bandwidth.sidechannel(channel, payload, direction, state.end);
+    }
+    return result;
+  }
+
+  _openPublicDelivery(connection, mux) {
+    if (!this.publicDelivery || this.deliverySessions.has(connection)) return;
+    const generation = this._openGeneration;
+    const account = (direction, bytes) => this.bandwidth?.add('protocol', 'sidechannel-control', 'public-delivery', direction, bytes);
+    const encoding = {
+      preencode: c.uint.preencode,
+      encode(state, flag) { const start = state.start; c.uint.encode(state, flag); account('sent', state.start - start); },
+      decode: state => {
+        const bytes = state.end - state.start;
+        account('received', bytes);
+        if (!this._checkRate(connection, bytes)) { state.start = state.end; return -1; }
+        try { return c.uint.decode(state); }
+        catch { throw new Error('Malformed public delivery frame'); }
+      },
+    };
+    // A separate optional protocol leaves the sidechannel encoding unchanged for 0.1.5+ peers. A leaf opts out
+    // only while its direct venue channel is open; the flag grants no rights and is never relayed.
+    const receive = flag => {
+      if (generation !== this._openGeneration || this.deliverySessions.get(connection) !== channel) return;
+      if (flag === 1) this.publicLeaves.add(connection);
+      else this.publicLeaves.delete(connection);
+    };
+    const channel = mux.createChannel({ protocol: 'intercom-dex-delivery-v1', handshake: encoding,
+      onopen: flag => { receive(flag); if (generation === this._openGeneration) this._updatePublicDelivery(); },
+      onclose: () => {
+        if (this.deliverySessions.get(connection) !== channel) return;
+        this.publicLeaves.delete(connection); this.deliverySessions.delete(connection); this.deliveryMessages.delete(connection);
+      } });
+    if (!channel) return;
+    this.deliverySessions.set(connection, channel);
+    const flag = this._publicDeliveryFlag();
+    this.deliveryMessages.set(connection, { flag, message: channel.addMessage({ encoding, onmessage: receive }) });
+    channel.open(flag);
+  }
+
+  _publicDeliveryFlag() {
+    if (!this.publicDelivery?.leaf) return 0;
+    for (const [connection, channels] of this.connections) {
+      if (this._getRemoteKey(connection) === this.publicDelivery.venueKey && this._usableRecord(connection, 'intercom-dex', channels.get('intercom-dex'))) return 1;
+    }
+    return 0;
+  }
+
+  _updatePublicDelivery() {
+    if (!this.publicDelivery) return;
+    const flag = this._publicDeliveryFlag();
+    for (const connection of this.connections.keys()) {
+      const channel = this.deliverySessions.get(connection), state = this.deliveryMessages.get(connection);
+      if (!channel?.opened || channel.closed || channel.destroyed || !state || state.flag === flag) continue;
+      state.message.send(flag); state.flag = flag;
     }
   }
 
@@ -822,7 +914,7 @@ class Sidechannel extends Feature {
     if (!record?.message) return;
     const payload = await this._buildPayload(entry.name, { control: 'welcome', welcome });
     this._rememberSeen(payload.id, this._now());
-    record.message.send(payload);
+    this._send(record, entry.name, payload);
   }
 
   async _sendAuth(record, entry) {
@@ -839,7 +931,7 @@ class Sidechannel extends Feature {
       invite,
     });
     this._rememberSeen(payload.id, this._now());
-    record.message.send(payload);
+    this._send(record, entry.name, payload);
     record.authSent = true;
   }
 
@@ -857,6 +949,8 @@ class Sidechannel extends Feature {
 
   _openChannelForConnection(connection, entry) {
     if (connection.destroyed || this.channels.get(entry.name) !== entry) return;
+    // Do not open a public protocol to legacy neighbors: they cannot honor delivery preferences.
+    if (this._venueOnly(entry.name) && this._getRemoteKey(connection) !== this.publicDelivery.venueKey) return;
     const mux = connection.userData;
     if (!mux || typeof mux.createChannel !== 'function') {
       const tries = (connection.__sidechannelMuxTries || 0) + 1;
@@ -872,6 +966,7 @@ class Sidechannel extends Feature {
       return;
     }
 
+    this._openPublicDelivery(connection, mux);
     let perConn = this.connections.get(connection);
     if (!perConn) {
       perConn = new Map();
@@ -905,8 +1000,9 @@ class Sidechannel extends Feature {
     const channel = mux.createChannel({
       protocol: entry.protocol,
       onopen() {},
-      onclose() {
+      onclose: () => {
         if (perConn.get(entry.name) === record) perConn.delete(entry.name);
+        if (entry.name === 'intercom-dex') this._updatePublicDelivery();
       }
     });
     if (!channel) {
@@ -917,7 +1013,8 @@ class Sidechannel extends Feature {
     }
 
     const message = channel.addMessage({
-      encoding: boundedJson(this.maxMessageBytes, bytes => this._checkRate(connection, bytes)),
+      encoding: boundedJson(this.maxMessageBytes, bytes => this._checkRate(connection, bytes),
+        (bytes, payload) => this.bandwidth?.sidechannel(entry.name, payload, 'received', bytes)),
       onmessage: guarded((e) => {
         if (this.debug) console.log(`[sidechannel:${entry.name}] drop (handler error) ${e?.message ?? e}`);
       }, (payload) => {
@@ -1074,7 +1171,7 @@ class Sidechannel extends Feature {
       })
     });
 
-    record = { channel, message, authSent: false };
+    record = { channel, message, connection, authSent: false };
     perConn.set(entry.name, record);
     const attempt = { count: perConn._openRetries.get(entry.name)?.count ?? 0, lastAt: perConn._openRetries.get(entry.name)?.lastAt ?? 0 };
     perConn._openRetries.set(entry.name, attempt);
@@ -1091,6 +1188,7 @@ class Sidechannel extends Feature {
         perConn._openRetries.delete(entry.name);
         this._sendWelcome(record, entry, connection).catch(() => {});
         this._sendAuth(record, entry).catch(() => {});
+        if (entry.name === 'intercom-dex') this._updatePublicDelivery();
         return;
       }
       const now = this._now();
@@ -1157,6 +1255,16 @@ class Sidechannel extends Feature {
     return new Promise((resolve) => entry._announceWaiters.push(resolve));
   }
 
+  _venueOnly(channel) {
+    return this.publicDelivery?.venueOnly === true && this.publicChannels.has(channel);
+  }
+
+  _joinTopic(entry) {
+    // Public leaves use the configured venue pin. Private channels still discover both counterparties.
+    if (!this._venueOnly(entry.name))
+      this.peer.swarm.join(entry.topic, this.noRelayChannels.has(entry.name) ? this.discovery : { server: true, client: true });
+  }
+
   // Announce one channel now. Concurrent callers share the in-flight announce;
   // swarm.join is idempotent per topic, so a re-announce is harmless.
   _announceChannel(entry) {
@@ -1166,7 +1274,7 @@ class Sidechannel extends Feature {
     if (!this.peer?.swarm) return Promise.resolve(false);
     const announcing = (async () => {
       try {
-        this.peer.swarm.join(entry.topic, { server: true, client: true });
+        this._joinTopic(entry);
         await this._flushSwarm();
         if (this.channels.get(entry.name) !== entry) return false;
         this._markAnnounced(entry, true);
@@ -1246,7 +1354,7 @@ class Sidechannel extends Feature {
     this.welcomedChannels.delete(normalized);
 
     // Stop discovery even when the join's flush was still pending.
-    if (wasJoined && this.peer?.swarm) {
+    if (wasJoined && this.peer?.swarm && !this._venueOnly(entry.name)) {
       try {
         if (typeof this.peer.swarm.leave === 'function') {
           this.peer.swarm.leave(entry.topic);
@@ -1332,11 +1440,11 @@ class Sidechannel extends Feature {
             ?.fullyOpened()
             .then((opened) => {
               if (opened && this._usableRecord(connection, channel, record) &&
-                  (allowUnauthedSend || this._remoteAuthorized(channel, connection)) && this._checkPow(payload, channel)) record.message.send(payload);
+                  (allowUnauthedSend || this._remoteAuthorized(channel, connection)) && this._checkPow(payload, channel)) this._send(record, channel, payload);
             })
             .catch(() => {});
         } else if (this._usableRecord(connection, channel, record)) {
-          record.message.send(payload);
+          this._send(record, channel, payload);
         }
       } else if (this.debug) {
         console.log(`[sidechannel:${channel}] no message session for connection.`);
@@ -1386,12 +1494,13 @@ class Sidechannel extends Feature {
 
       connection.on('close', () => {
         this.connections.delete(connection);
+        this._updatePublicDelivery();
       });
     });
 
     const round = [];
     for (const entry of this.channels.values()) {
-      this.peer.swarm.join(entry.topic, { server: true, client: true });
+      this._joinTopic(entry);
       round.push(entry);
     }
     await this._flushSwarm();
@@ -1424,9 +1533,13 @@ class Sidechannel extends Feature {
   }
 
   async stop() {
+    this.publicSend?.close();
+    this.publicSendVerified = new WeakMap();
     this.started = false;
     this._openGeneration++;
     this._dhtBootPromise = null;
+    for (const connection of this.connections.keys()) this.deliverySessions.get(connection)?.close();
+    this.deliverySessions = new WeakMap(); this.deliveryMessages = new WeakMap(); this.publicLeaves = new WeakSet();
     this.connections.clear();
     this.stamped.clear(); this.stampedBytes = 0;
     // Nothing is on the swarm any more: drop announced state (a later start()

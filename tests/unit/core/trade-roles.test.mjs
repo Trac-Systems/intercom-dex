@@ -101,3 +101,17 @@ test('common protocol helpers validate routing, dealing and deterministic entrop
   assert.equal(checkDealShape(deal, f.terms), true);
   assert.equal(checkDealShape({ ...deal, tradeId: hex() }, f.terms), false);
 });
+
+test('a maker ends its negotiation with a reason when the take does not match the offer terms', () => {
+  const t = simulation({ capturePhases: true });
+  const state = structuredClone(t.snapshots.get('seller:awaitTake'));
+  const body = structuredClone(t.log.find(x => x.name === 'buyer' && x.action.kind === 'take').action.body);
+  const fresh = { type: 'message', now: state.now, observedSlot: 100, finalizedAgeMs: 0, tipSlot: 155, tipAgeMs: 0 };
+  const mismatched = { kind: 'take', from: state.peer, body: { ...body, refundAfter: body.refundAfter + 1 } };
+  const result = negotiationStep(state, { ...fresh, message: mismatched }, mismatched);
+  assert.equal(result.state.phase, 'aborted'); assert.equal(result.state.reason, 'Invalid take');
+  assert.equal(result.state.peerCommit, body.commitment);
+  assert.deepEqual(result.actions.map(a => a.type), ['abort']);
+  // A take in any other phase is still refused without ending the trade.
+  assert.throws(() => negotiationStep({ ...state, phase: 'awaitReveal' }, { ...fresh, message: mismatched }, mismatched), /Invalid take/);
+});

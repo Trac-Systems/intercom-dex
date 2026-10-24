@@ -16,6 +16,7 @@ export function peerTransport(config) {
   if (!joinsLocks(config)) return dex;
   const locks = locksTransport({ ...config, role: 'lock-signer' }).sidechannel;
   const sidechannel = { ...dex.sidechannel };
+  if (sidechannel.noRelayChannels) sidechannel.noRelayChannels = [...sidechannel.noRelayChannels, LOCKS_CHANNEL];
   for (const key of ['channels', 'openChannels', 'powRequiredChannels', 'powRequiredPrefixes']) sidechannel[key] = [...sidechannel[key], ...locks[key]];
   sidechannel.powClasses = sidechannel.powClasses.map((group, i) => [...new Set([...group, ...(locks.powClasses[i] ?? [])])]);
   return { ...dex, sidechannel };

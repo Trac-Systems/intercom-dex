@@ -19,6 +19,7 @@ export const DEX_POW_LOW = ['decline'];
 export const SERVER_ROLES = ['service', 'signer'];
 export const SERVER_RATE = { rateBytesPerSecond: 2_000_000, rateBurstBytes: 8_000_000 };
 export const TRADER_RATE = { rateBytesPerSecond: 64_000, rateBurstBytes: 256_000 };
+export const TRADER_DISCOVERY_PEERS = 8;
 
 export function dexTransport(config) {
   if (!['service', 'signer', 'trader', 'market-feed'].includes(config.role)) throw new Error('Explicit peer role required');
@@ -27,8 +28,20 @@ export function dexTransport(config) {
   if (['trader', 'market-feed'].includes(config.role) && config.serveRelay === true) throw new Error('Traders do not serve relays');
   const chat = new MarketChat({ chatRelays: config.chatRelays ?? [] });
   return {
+    ...(['trader', 'market-feed'].includes(config.role) ? { connections: {
+      maxPeers: TRADER_DISCOVERY_PEERS, maxClientConnections: TRADER_DISCOVERY_PEERS,
+    } } : {}),
     relay: { serve: !['trader', 'market-feed'].includes(config.role) && config.serveRelay !== false, relays: config.relayKeys ?? [] },
     sidechannel: { channels: DEX_CHANNELS, openChannels: DEX_CHANNELS, welcomeRequired: false,
+      ...(config.role === 'service' ? { publicSend: { rate: 32000, burst: 224000, maxQueue: 512000 } } : {}),
+      // Public leaf protocols use only the pinned venue, including when their other connections run old releases.
+      // Servers retain forwarding to legacy neighbors; private trade relays are unaffected.
+      publicDelivery: { channels: DEX_CHANNELS, venueKey: config.servicePeerKey,
+        leaf: ['trader', 'market-feed'].includes(config.role), venueOnly: ['trader', 'market-feed'].includes(config.role),
+        forwarder: config.role === 'service' },
+      ...(['trader', 'market-feed'].includes(config.role) ? {
+        noRelayChannels: DEX_CHANNELS, discovery: { server: false, client: true },
+      } : {}),
       acceptMessage: (channel, payload) => channel !== CHAT_CHANNEL || chat.receive(payload?.message) !== null,
       ownerWriteChannels: ['intercom-dex'], ownerKeys: { 'intercom-dex': config.servicePeerKey },
       powEnabled: true, powDifficulty: DEX_POW_BITS,

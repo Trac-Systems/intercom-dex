@@ -151,6 +151,7 @@ export default class BlindRelay extends Feature {
     if (!state || state.connection.destroying || state.connection.destroyed || state.client.closed) {
       if (state) state.connection.destroy();
       const connection = this.originalConnect.call(this.peer.swarm.dht, remote, opts);
+      connection.once('open', () => this.peer.bandwidth?.trackConnection(connection, 'relay-control'));
       connection.on('error', () => {});
       state = { connection, client: Client.from(connection, { id: connection.publicKey }), refs: 0 };
       this.controls.set(key, state);
@@ -261,6 +262,7 @@ export default class BlindRelay extends Feature {
 
   _createStream(options) {
     const stream = this.peer.swarm.dht.createRawStream(options);
+    this.peer.bandwidth?.trackConnection({ rawStream: stream }, 'relay');
     const state = { stream, bytes: 0, activity: Date.now() };
     this.streams.set(stream, state);
     stream.on('error', () => {});

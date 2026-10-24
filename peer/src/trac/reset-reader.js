@@ -1,7 +1,8 @@
 import { verifyResetSource } from './source.js';
 import { Peer, Wallet, createConfig, ENV } from 'trac-peer';
+import { replicateReader } from '../../runtime/reader-network.js';
 
-export async function openResetReader({ bus, config, walletAt }) {
+export async function openResetReader({ bus, config, walletAt, bandwidth }) {
   if (config.trac === undefined) return null;
   const reset = config.trac?.reset;
   const fields = ['bootstrap', 'channel', 'dhtBootstrap', 'source', 'beaconOptions'];
@@ -19,6 +20,8 @@ export async function openResetReader({ bus, config, walletAt }) {
   if (reset.beaconOptions != null) pc.beaconOptions = reset.beaconOptions;
   const wallet = await walletAt(pc.keyPairPath, Wallet, { networkPrefix: bus.config.addressPrefix, derivationPath: bus.config.derivationPath });
   const reader = new Peer({ config: pc, msb: bus, wallet, protocol: Protocol, contract: Contract });
+  bandwidth?.trackStore(reader.store, 'reset');
+  reader._replicate = () => replicateReader(reader, bandwidth);
   try {
     await reader.ready();
     if (reader.base.writable) throw new Error('RESET reader must not be an admitted writer');
