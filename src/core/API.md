@@ -903,7 +903,8 @@ balances after either no lock or a refund.
   after its stamp (5,000 entries/16 MB; pending entries are never dropped).
   `powClasses` lists kind groups from most urgent; unlisted kinds follow, then
   `powLowKinds`, refused with `Stamp queue busy` while `powLowPending` (default 4) of them are pending. A stamp
-  yields to any pending more urgent stamp at its next chunk. The dex uses
+  yields to any pending more urgent stamp at its next chunk, for at most `powYieldMs` (default 2,000 ms) in total;
+  after that it shares the worker with them, so a stream of urgent stamps cannot starve offers. The dex uses
   `DEX_POW_CLASSES` and `DEX_POW_LOW` (`['decline']`) from dex-transport.js.
   The dex uses one difficulty, 20 bits, on offers, signers and trade channels.
 ## Locks

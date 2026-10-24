@@ -68,6 +68,24 @@ test('an urgent stamp overtakes a real sliced search and the background keeps it
   assert.deepEqual(sc.powPending, [0, 0, 0]);
 });
 
+test('an endless stream of urgent stamps delays a background stamp only for the yield limit', async t => {
+  const sc = new Sidechannel({}, { powEnabled: true, powDifficulty: 8, powClasses: [['urgent']], powYieldMs: 300 });
+  sc._now = () => 100000;
+  t.mock.method(sc, '_buildPayload', async (channel, message) => {
+    const payload = { channel, from: 'a'.repeat(64), id: 'starve-0', message, origin: 'a'.repeat(64), ts: 100000 };
+    await sc._attachPow(payload); return payload;
+  });
+  // An urgent stamp that is always pending, as on a busy peer sending heartbeats and acks back to back.
+  sc.powPending[0] = 1;
+  sc.powQueues[0] = new Promise(() => {});
+  const started = Date.now();
+  const offer = await sc._stampedPayload('intercom-dex:signers', { kind: 'offer', id: 'x' });
+  const took = Date.now() - started;
+  assert.ok(sc._checkPow(offer, offer.channel));
+  assert.ok(took >= 290 && took < 5000, `took ${took} ms`);
+  sc.powPending[0] = 0;
+});
+
 test('worker slices preserve their cursor, reset on refresh and release completed jobs', async t => {
   const client = new PowWorker(); t.after(() => client.close());
   const job = await client.open('{"nonce":', ',"ts":100000}', 256);

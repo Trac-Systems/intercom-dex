@@ -55,6 +55,8 @@ const guarded = (onError, handler) => (payload) => {
 };
 import crypto from 'crypto';
 import { powWorker } from './pow-client.js';
+// Longest total time one stamp yields to more urgent stamps before it shares the worker with them.
+export const POW_YIELD_MS = 2000;
 import PeerWallet from 'trac-wallet';
 
 // Join topics must be deterministic and collision-resistant.
@@ -155,6 +157,7 @@ class Sidechannel extends Feature {
     this.powLow = powClasses.length - 1;
     this.powQueues = powClasses.map(() => Promise.resolve());
     this.powPending = powClasses.map(() => 0);
+    this.powYieldMs = Number.isSafeInteger(config.powYieldMs) && config.powYieldMs >= 0 ? config.powYieldMs : POW_YIELD_MS;
     // A few lowest-class stamps may wait (several takers declined at once); more are refused, never queued.
     this.powLowPending = Number.isSafeInteger(config.powLowPending) && config.powLowPending > 0 ? config.powLowPending : 4;
     this.powDifficulty = Number.isInteger(config.powDifficulty) ? config.powDifficulty : 0;
@@ -646,10 +649,19 @@ class Sidechannel extends Feature {
     const difficulty = this.powDifficulty, level = this._powClass(payload.message);
     const urgent = () => this.powPending.findIndex((n, i) => i < level && n > 0);
     const job = await powWorker.open(...this._powParts(payload), difficulty);
+    // Total time this stamp may spend waiting for more urgent ones. After that it shares the worker with them, so a
+    // steady stream of urgent stamps (heartbeats, acks) can delay an offer but never starve it.
+    let waitLeft = this.powYieldMs;
     try {
       for (;;) {
         // A more urgent stamp interrupts this one at the next eight-millisecond yield.
-        for (let i = urgent(); i >= 0; i = urgent()) await this.powQueues[i];
+        for (let i = urgent(); i >= 0 && waitLeft > 0; i = urgent()) {
+          const started = Date.now();
+          let timer;
+          await Promise.race([this.powQueues[i], new Promise(resolve => { timer = setTimeout(resolve, waitLeft); })]);
+          clearTimeout(timer);
+          waitLeft -= Math.max(1, Date.now() - started);
+        }
         if (this._now() - payload.ts >= 30000) { payload.ts = this._now(); powWorker.prepare(job, ...this._powParts(payload), difficulty); }
         const { nonce } = await powWorker.slice(job);
         if (nonce >= 0) { payload.pow = { nonce, difficulty }; return; }
