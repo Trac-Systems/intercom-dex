@@ -50,10 +50,11 @@ release, never main, and read README.md and SKILL.md of that release first.
 3. Write peer.json and trader.json in a data folder outside the release folder, with the venue keys
    from the release page. Use the built-in public Solana servers, unless I give you my own Solana
    RPC URL.
-4. Start the peer so that it keeps running and starts again with my computer.
-5. Add the intercom-dex MCP server to your configuration. Leave DEX_KEY_PASSWORD empty and tell me
-   where to type my password myself. Never ask me for the password.
-6. After I have set the password and restarted you, call dex_wallets and tell me where to send funds.
+4. Tell me to run node bin/dex.mjs start --config /path/to/dex-data/trader.json
+   in my terminal. It asks for my password with hidden input and starts both programs in the background.
+5. Add the intercom-dex MCP server to your configuration with DEX_CONFIG pointing to trader.json.
+   Never ask me for the password or put it in a file.
+6. After I have started the DEX, call dex_wallets and tell me where to send funds.
 ```
 
 The steps it follows are listed under [Install by hand](#install-by-hand), in case you want to do them yourself.
@@ -209,19 +210,36 @@ and needs two of them to agree on every read. That suits occasional trading; the
 that trades all day. To use your own Solana RPC instead, add `"solana": { "endpoints": ["<your RPC URL>"] }`. With
 one endpoint of your own, the program trusts its answers.
 
-**4. Start the network connection.** The program talks to the network through a separate process, the peer. Create
-its access token once, then start it and leave it running in its own terminal:
+**4. Start the DEX.** Create the peer's access token once, then start the peer and trader together:
 
 ```sh
 mkdir -p /path/to/dex-data
 (umask 077 && openssl rand -hex 32 > /path/to/dex-data/bridge.token)
-node peer/scripts/pear-runner.mjs --config /path/to/dex-data/peer.json
+node bin/dex.mjs start --config /path/to/dex-data/trader.json
 ```
 
-It prints a line starting with `DEX_PEER_READY` when it is connected.
+Choose a password of at least 12 characters at the hidden prompt, or supply `DEX_KEY_PASSWORD` in the launch
+environment. The launcher passes it to the child environment; it never writes it to disk, command arguments or
+logs. It finds `peer.json` next to `trader.json`; use `--peer-config` for another absolute path.
 
-**5. Add it to your agent.** Pick your client and replace `/path/to/intercom-dex` with the release folder. Choose a
-strong password of at least 12 characters. It encrypts the wallets the program creates on its first start.
+The command waits for the peer and trader to be ready, prints the private dashboard link once, then returns.
+Both processes keep running after you close the terminal or your agent. Windows opens no extra console windows.
+Run the same command again after a reboot. A second start for the same trader data folder is refused.
+The supervisor restarts crashed processes with backoff, stops after five failures within ten minutes, and shows the restart count and last exit in `status`.
+
+```sh
+node bin/dex.mjs status --config /path/to/dex-data/trader.json
+node bin/dex.mjs logs --config /path/to/dex-data/trader.json
+node bin/dex.mjs stop --config /path/to/dex-data/trader.json
+```
+
+Status shows the processes, versions, online signers, private dashboard link and log paths. Logs prints the latest
+64 KiB of each log; add `peer` or `trader` after `logs` to select one. The data folder holds `peer.log` and
+`trader.log`, each limited to 5 MiB plus three rotated copies. Stop shuts down the trader before the peer and
+refuses while trades, withdrawals or locks positions are unfinished, naming their steps. `--force` explicitly
+interrupts them; restart promptly to resume pending work.
+
+**5. Add it to your agent.** Pick your client and replace `/path/to/intercom-dex` with the release folder.
 
 Add this server to your MCP client configuration:
 
@@ -231,15 +249,15 @@ Add this server to your MCP client configuration:
     "intercom-dex": {
       "command": "node",
       "args": ["/path/to/intercom-dex/src/mcp/server.mjs"],
-      "env": { "DEX_CONFIG": "/path/to/dex-data/trader.json", "DEX_KEY_PASSWORD": "your-password" }
+      "env": { "DEX_CONFIG": "/path/to/dex-data/trader.json" }
     }
   }
 }
 ```
 
-The MCP server starts the trading program when your agent connects and stops it when the agent closes. A program
-you started yourself with `node bin/dex.mjs --config /path/to/dex-data/trader.json` (with `DEX_KEY_PASSWORD` set)
-keeps running on its own, and the MCP server uses it instead.
+The MCP server attaches to the running trader for that data folder. If none is running, it uses the same background
+launcher, provided the password is in its launch environment. Set `DEX_PEER_CONFIG` if the peer config is elsewhere.
+Closing the MCP session leaves the DEX running. Use the stop command when all trades have finished.
 
 **6. Hand over to your agent.** On its first start the program creates a Solana wallet and a Trac wallet, encrypted
 with your password, in the data folder. Ask your agent "how can I trade?" and it tells you where to send USDC, SOL,

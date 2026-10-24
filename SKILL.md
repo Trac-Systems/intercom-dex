@@ -18,7 +18,7 @@ program running and report the outcome.
 
 - Never send coins or USDC to a trading counterparty yourself. The program sends the seller's coins only after it
   has checked the buyer's escrow and the signers' confirmations. A payment you make by hand is not part of any trade.
-- Never stop the program, its peer or the MCP server while `dex_status.trades` holds a trade that has not finished.
+- Never stop the program or its peer while `dex_status.trades` holds a trade that has not finished.
   Finished phases are listed in [The trade life cycle](#the-trade-life-cycle).
 - Never ask for, repeat or pass a password, mnemonic or private key in a tool call or in chat. No tool accepts one.
   Passwords live in the launch environment (`DEX_KEY_PASSWORD` by default). Exports run only in the user's terminal.
@@ -28,13 +28,25 @@ program running and report the outcome.
 
 ## Setup the agent can rely on
 
-The MCP server is `node src/mcp/server.mjs` with `DEX_CONFIG` set to an absolute trader config path. When the MCP
-server starts, it connects to a trader that is already running for that config, or starts `bin/dex.mjs` itself and
-stops it again when the MCP session ends. With `DEX_CONTROL_URL` and `DEX_CONTROL_TOKEN_FILE` instead of
-`DEX_CONFIG`, it attaches to a trader that runs on its own. The trader needs its peer process running. When the
-peer is down, the MCP server doesn't start and reports `Trader exited` with an exit code on its standard error. Then
-ask the user to start the peer (`node peer/scripts/pear-runner.mjs --config <peer config>`). On the first start the trader creates its
-wallets. Installation, from a tagged release, is described in the [README](README.md).
+Start the peer and trader with `node bin/dex.mjs start --config /path/to/dex-data/trader.json`. The user types the
+password into a hidden terminal prompt, or supplies `DEX_KEY_PASSWORD` in the launch environment. Never collect
+it through a tool. The launcher finds `peer.json` beside the trader config, or takes an absolute `--peer-config`.
+It waits for both programs, prints the private dashboard link once and returns. Both keep running in the background,
+including on Windows without console windows. On the first start the trader creates its encrypted wallets.
+
+The MCP server is `node src/mcp/server.mjs` with `DEX_CONFIG` set to the absolute trader config path. It connects
+to a trader already running for that data folder, or starts the same background pair if its launch environment has
+the password. `DEX_PEER_CONFIG` selects a peer config elsewhere. Without a password, ask the user to run the start
+command in their terminal. Closing the MCP session leaves the peer and trader running. With `DEX_CONTROL_URL` and
+`DEX_CONTROL_TOKEN_FILE` instead of `DEX_CONFIG`, MCP attaches to an existing trader only.
+
+Use `node bin/dex.mjs status --config /path/to/dex-data/trader.json` for running state, versions, signers, the private
+dashboard link and log paths. `node bin/dex.mjs logs --config /path/to/dex-data/trader.json` prints recent logs;
+add `peer` or `trader` after `logs` to select one. Logs rotate at 5 MiB, retaining three previous files per process.
+`node bin/dex.mjs stop --config /path/to/dex-data/trader.json` stops the trader first, then its peer. It refuses
+unfinished trades, withdrawals and locks positions and names each blocking step. Do not use `--force` unless the
+user explicitly authorizes interruption. Restart after a reboot with the same start command. Installation, from a
+tagged release, is described in the [README](README.md).
 
 ## Tools
 

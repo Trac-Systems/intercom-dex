@@ -2,11 +2,9 @@
 // MCP tools for a running trader (stdio). It talks only to the trader's local control API:
 // DEX_CONTROL_URL (e.g. http://127.0.0.1:47201) and DEX_CONTROL_TOKEN_FILE.
 import { readFileSync } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { isAbsolute, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { isAbsolute } from 'node:path';
 import { readPrivateFile } from '../roles/keyring.js';
-import { controlCall } from '../wallets/control.js';
+import { ensureTrader } from '../lifecycle/manager.js';
 import { registerWalletTools } from './wallet-tools.js';
 import { registerChatTools } from './chat-tools.js';
 import { registerLocksTools } from './locks-tools.js';
@@ -16,35 +14,11 @@ import { z } from 'zod';
 import { SOFTWARE } from '../core/software.js';
 import { pairSchema } from '../core/schemas.js';
 
-let child, config;
-const stopChild = () => { if (child && child.exitCode === null) child.kill('SIGTERM'); };
-process.once('exit', stopChild);
-for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { stopChild(); process.exit(0); });
-process.stdin.once('end', stopChild);
+let config;
 if (process.env.DEX_CONFIG) {
   if (!isAbsolute(process.env.DEX_CONFIG)) throw new Error('DEX_CONFIG must be absolute');
   config = JSON.parse(readFileSync(process.env.DEX_CONFIG, 'utf8'));
-  try {
-    const info = await controlCall(config, 'GET', '/wallets');
-    if (info.storage?.dataDir !== resolve(config.dataDir)) throw new Error('Control API belongs to another data folder');
-  }
-  catch (error) {
-    if (error.code !== 'ENOENT' && error.cause?.code !== 'ECONNREFUSED') throw error;
-    const root = fileURLToPath(new URL('../../', import.meta.url));
-    child = spawn(process.execPath, [fileURLToPath(new URL('../../bin/dex.mjs', import.meta.url)), '--config', process.env.DEX_CONFIG],
-      { cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stderr.pipe(process.stderr);
-    await new Promise((resolve, reject) => {
-      let pending = '';
-      const timeout = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Trader startup timed out')); }, 180000);
-      child.once('error', error => { clearTimeout(timeout); reject(error); });
-      child.once('exit', code => { clearTimeout(timeout); reject(new Error(`Trader exited ${code}`)); });
-      child.stdout.on('data', chunk => {
-        process.stderr.write(chunk); pending = (pending + chunk).slice(-65536);
-        if (pending.includes('DEX_ROLE_READY ')) { clearTimeout(timeout); resolve(); }
-      });
-    });
-  }
+  await ensureTrader(process.env.DEX_CONFIG, { peerConfig: process.env.DEX_PEER_CONFIG });
 }
 const url = config ? `http://127.0.0.1:${config.control.port}` : process.env.DEX_CONTROL_URL;
 if (new URL(url).hostname !== '127.0.0.1' || new URL(url).protocol !== 'http:') throw new Error('MCP requires the local control API');

@@ -4,6 +4,10 @@ Every role runs as two processes on one machine: the peer (`peer/scripts/pear-ru
 network, and the role program (`bin/dex.mjs`), which holds the keys and does the work. Each has its own JSON config.
 The protocol is in [SPEC.md](SPEC.md); the network profile fields are in [NETWORKS.md](NETWORKS.md).
 
+Desktop traders use `node bin/dex.mjs start --config /path/to/dex-data/trader.json` to run both processes in the
+background. Servers keep systemd (or their existing service supervisor) and the separate foreground commands below.
+Do not wrap systemd roles in the desktop launcher. Keep the role's shutdown ordered before its peer's shutdown.
+
 ## Installing and upgrading
 
 Install from a tagged release, never from `main`. Download `intercom-dex-vX.Y.Z.tar.gz` from the
@@ -66,7 +70,9 @@ peer goes away, so a supervisor can restart it; its state is on disk.
 
 The role writes one line per event to standard output, starting with an ISO time and the role name: registry
 versions, trades changing phase, aborts and retries. Set `DEX_DEBUG=1` to add every message received or refused
-and every chain call. A role started by the MCP server writes its output to the MCP server's standard error.
+and every chain call. Desktop traders started through the background launcher, including MCP auto-starts, write
+`peer.log` and `trader.log` in the trader data folder, rotating at 5 MiB with three older copies each. Server logs
+remain with systemd or the existing supervisor.
 
 ## The dashboard
 

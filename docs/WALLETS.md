@@ -1,13 +1,6 @@
 # Trader wallets
 
-The agent can set up and use a trader without terminal input. Configure the peer,
-role JSON, proof files, RPC/gateway endpoints, control port/token path and a password
-environment variable in the MCP launch environment. The default is
-`DEX_KEY_PASSWORD` (at least 12 characters). The peer still runs separately.
-Launch `node src/mcp/server.mjs` with `DEX_CONFIG=/absolute/role.json`; it connects
-to that role if it is already running, otherwise starts `bin/dex.mjs --config`
-and stops the child it owns when MCP closes. Existing `DEX_CONTROL_URL` and
-`DEX_CONTROL_TOKEN_FILE` launches can attach to an independently running role.
+Configure peer.json and trader.json, proof files, RPC/gateway endpoints and the control port/token path. Run node bin/dex.mjs start --config /absolute/trader.json; the hidden prompt or DEX_KEY_PASSWORD supplies the password (at least 12 characters). MCP with DEX_CONFIG attaches to that trader or uses the same background launcher when its environment has the password. Closing MCP leaves the peer and trader running. DEX_CONTROL_URL and DEX_CONTROL_TOKEN_FILE remain attach-only.
 
 The first role start creates `dataDir/keyring.json` and
 `dataDir/trac-wallet.json`. The former contains the Solana key, DEX identity,

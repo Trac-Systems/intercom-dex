@@ -4,6 +4,7 @@ import { constants as osConstants } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const projectDirectory = fileURLToPath(new URL('../', import.meta.url));
 const entrypoint = fileURLToPath(new URL('../index.js', import.meta.url));
@@ -78,7 +79,15 @@ const supervise = (child, { stop, forceStop = null }) => {
       process.removeListener(signal, handler);
     }
     process.removeListener('exit', stopOnHostExit);
+    process.removeListener('message', onMessage);
+    process.removeListener('disconnect', onDisconnect);
   };
+  const onMessage = message => { if (message.type === 'dex-stop') requestStop('SIGTERM'); };
+  const onDisconnect = () => requestStop('SIGTERM');
+  if (process.env.DEX_MANAGED_PEER === '1') {
+    process.on('message', onMessage);
+    process.on('disconnect', onDisconnect);
+  }
   const requestStop = (signal) => {
     if (receivedSignal !== null) {
       (forceStop ?? stop)(signal);
@@ -118,6 +127,23 @@ const supervise = (child, { stop, forceStop = null }) => {
       : exitCodeFor(code, signal);
   });
 };
+
+// pear-runtime 1.3.1 drops spawn options. Launch its installed sidecar directly so Windows hides the actual worker.
+export function runManaged({ spawnChild = spawn, binary } = {}) {
+  if (!binary) {
+    const require = createRequire(import.meta.url);
+    binary = require(path.join(path.dirname(require.resolve('bare-sidecar/package')), 'lib/bare.js'));
+  }
+  const child = spawnChild(binary, [fileURLToPath(new URL('./managed-peer.js', import.meta.url)), ...appArgs], {
+    cwd: projectDirectory, detached: true, windowsHide: true, stdio: ['ignore', 'inherit', 'inherit', 'overlapped'],
+  });
+  child.stdio[3].on('error', () => {});
+  supervise(child, {
+    stop: () => { if (!child.stdio[3].destroyed) child.stdio[3].write('stop\n'); },
+    forceStop: () => { child.kill('SIGKILL'); },
+  });
+  return child;
+}
 
 const runLegacy = () => {
   const child = spawn('pear', ['run', '.', ...appArgs], {
@@ -183,6 +209,7 @@ const runModule = async () => {
 };
 
 export const main = async () => {
+  if (process.env.DEX_MANAGED_PEER === '1') { runManaged(); return; }
   if (legacyPearRunRequested()) {
     const mode = selectPearRunnerMode(detectPear());
     if (mode === 'legacy') {

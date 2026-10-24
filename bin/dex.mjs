@@ -35,6 +35,9 @@ import { resolveNetwork, checkPeerProfile } from '../src/net/profile.js';
 import { startDashboard } from '../src/dashboard/server.js';
 import { startMarketFeed } from '../src/market-feed/runtime.js';
 import { controlHandler } from '../src/roles/control.js';
+import { startDex, stopDex, statusDex, dexLogs } from '../src/lifecycle/manager.js';
+import { lifecycleHandler } from '../src/lifecycle/control.js';
+import { requestStop } from '../src/lifecycle/lock.js';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   config: { type: 'string' }, out: { type: 'string' }, asset: { type: 'string' }, amount: { type: 'string' }, to: { type: 'string' },
@@ -42,15 +45,34 @@ const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   'trade-fee': { type: 'string' }, 'signer-share': { type: 'string' }, bps: { type: 'string' },
   'authority-keypair': { type: 'string' }, yes: { type: 'boolean' }, from: { type: 'string' }, mint: { type: 'string' },
   'first-launch': { type: 'boolean' },
+  'peer-config': { type: 'string' }, force: { type: 'boolean' },
 } });
 if (!isAbsolute(values.config ?? '')) throw new Error('--config must be an absolute path');
 const command = ['fee', 'keys'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
 const allowed = { run: ['first-launch'], setup: ['import-solana', 'import-trac-mnemonic', 'import-reset-keystore'], balances: [], withdraw: ['asset', 'amount', 'to'], export: ['out'],
+  start: ['peer-config'], stop: ['force'], status: [], logs: [],
   restore: ['from'], 'keys check': ['authority-keypair'], 'fee withdraw-platform': ['authority-keypair', 'to', 'mint', 'amount'],
   'fee set': ['trade-fee', 'signer-share'], 'fee platform': ['bps', 'authority-keypair', 'yes'] };
-if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') ? 2 : 1)) throw new Error('Expected setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, or no command');
+if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, or no command');
 if (Object.keys(values).some(k => k !== 'config' && !allowed[command].includes(k))) throw new Error('Option does not apply to this command');
+if (['start', 'stop', 'status', 'logs'].includes(command)) {
+  try {
+    if (command === 'logs') console.log(dexLogs(values.config, positionals[1]));
+    else if (command === 'start') {
+      const result = await startDex(values.config, { peerConfig: values['peer-config'] });
+      console.log('DEX running in the background.');
+      if (result.dashboard) console.log('Dashboard (private link, do not share): ' + result.dashboard);
+      console.log('Logs: ' + result.logs.peer + ', ' + result.logs.trader);
+    } else console.log(JSON.stringify(command === 'stop' ? await stopDex(values.config, { force: values.force === true }) : await statusDex(values.config), null, 2));
+    process.exit(0);
+  } catch (error) { console.error(error.message); process.exit(1); }
+}
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
+let managedStop = () => process.exit(75);
+if (process.env.DEX_LIFECYCLE_ID) {
+  process.on('disconnect', () => managedStop());
+  process.on('message', message => { if (message.type === 'dex-stop') managedStop(); });
+}
 const locksRole = ['lock-signer', 'lock-venue'].includes(config.role);
 if (locksRole && !['run', 'setup'].includes(command)) throw new Error('Locks roles support run and setup');
 if (config.role === 'market-feed' && command !== 'run') throw new Error('market-feed only supports run');
@@ -216,21 +238,49 @@ if (locksRole) {
   await role.start();
   await wallets?.recover();
 
+  let dashboardUrl = null, stopping = false;
+  const stop = code => {
+    if (stopping) return;
+    stopping = true;
+    role.stop(); bridge.close();
+    setImmediate(async () => {
+      try { trac.close(); await wallet?.close(); }
+      finally { keys.solanaSecret?.fill(0); keys.storeKey.fill(0); process.exit(code); }
+    });
+  };
+  managedStop = () => stop(0);
+
   // Local control API (127.0.0.1, bearer token): status for every role; offers and takes for traders.
   if (config.control) {
     const token = secretFile(config.control.tokenFile);
-    createServer(controlHandler({ token, role, wallets, fees })).listen(config.control.port, '127.0.0.1');
+    const fallback = controlHandler({ token, role, wallets, fees });
+    const handler = process.env.DEX_LIFECYCLE_ID && config.role === 'trader' ? lifecycleHandler({
+      id: process.env.DEX_LIFECYCLE_ID, config, role, wallets, dashboard: () => dashboardUrl, stop: () => {
+        requestStop({ id: process.env.DEX_LIFECYCLE_ID, dataDir: config.dataDir }, { traderPid: process.pid });
+        stop(0);
+      }, fallback,
+    }) : fallback;
+    const control = createServer((req, res) => {
+      if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'unauthorized' })); return; }
+      handler(req, res);
+    });
+    if (process.env.DEX_LIFECYCLE_ID) await new Promise((resolve, reject) => {
+      control.once('error', reject); control.listen(config.control.port, '127.0.0.1', resolve);
+    });
+    else control.listen(config.control.port, '127.0.0.1');
   }
   // Local dashboard (127.0.0.1, new access token per start in dataDir/dashboard.token).
   if (config.dashboard) {
     const dashboard = await startDashboard({ config, role, wallets, bridge, log });
-    console.log('Dashboard (private link, do not share): ' + dashboard.url);
+    dashboardUrl = dashboard.url;
+    if (!process.env.DEX_LIFECYCLE_ID) console.log('Dashboard (private link, do not share): ' + dashboard.url);
   }
   log('ready', identity.publicKey);
   console.log('DEX_ROLE_READY ' + JSON.stringify({ role: config.role, dexKey: identity.publicKey,
     ...(role.box ? { boxKey: role.box.publicKey } : {}), ...(config.role === 'trader' ? { me: role.me } : {}) }));
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { role.stop(); trac.close(); wallet?.close(); keys.solanaSecret?.fill(0); keys.storeKey.fill(0); bridge.close(); process.exit(0); });
+  if (process.env.DEX_LIFECYCLE_ID && process.connected) process.send({ type: 'role-ready', dashboard: dashboardUrl });
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => stop(0));
   // Without its peer the role can neither hear nor speak; exit so the supervisor restarts it (state is on disk).
-  bridge.on('close', () => { log('bridge closed, exiting'); role.stop(); process.exit(75); });
+  bridge.on('close', () => { log('bridge closed, exiting'); stop(75); });
 
 }
