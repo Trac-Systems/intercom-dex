@@ -8,7 +8,7 @@ import UDX from '../../../peer/node_modules/udx-native/lib/udx.js';
 import c from '../../../peer/node_modules/compact-encoding/index.js';
 import { Bandwidth } from '../../../peer/runtime/bandwidth.js';
 import { replicateReader, RESET_CONNECTIONS } from '../../../peer/runtime/reader-network.js';
-import { dexTransport, TRADER_DISCOVERY_PEERS } from '../../../peer/features/dex-transport.js';
+import { dexTransport } from '../../../peer/features/dex-transport.js';
 import Hyperswarm from '../../../peer/node_modules/hyperswarm/index.js';
 import { peerTransport, LOCKS_CHANNEL } from '../../../peer/features/locks-bridge.js';
 import Sidechannel from '../../../peer/features/sidechannel/index.js';
@@ -129,10 +129,10 @@ test('public forwarding policy preserves private trade relays and server discove
   await sc.stop();
 });
 
-test('trader discovery is capped while the installed swarm still admits explicit trade peers at the cap', async t => {
+test('trader and feed retain swarm defaults so eight connections do not block private discovery', async t => {
   for (const role of ['trader', 'market-feed']) {
     const transport = peerTransport({ role, servicePeerKey: 'a'.repeat(64), locks: true });
-    assert.deepEqual(transport.connections, { maxPeers: TRADER_DISCOVERY_PEERS, maxClientConnections: TRADER_DISCOVERY_PEERS });
+    assert.equal(transport.connections, undefined);
   }
   for (const role of ['signer', 'service']) assert.equal(dexTransport({ role, servicePeerKey: 'a'.repeat(64) }).connections, undefined);
   const dht = new EventEmitter(), dialed = [];
@@ -146,11 +146,10 @@ test('trader discovery is capped while the installed swarm still admits explicit
   const swarm = new Hyperswarm({ dht, keyPair: { publicKey: Buffer.alloc(32, 99) },
     ...dexTransport({ role: 'trader', servicePeerKey: 'a'.repeat(64) }).connections });
   t.after(() => swarm.destroy());
-  swarm._clientConnections = TRADER_DISCOVERY_PEERS;
+  swarm._clientConnections = 8;
   swarm._handlePeer({ publicKey: Buffer.alloc(32, 1) }, Buffer.alloc(32, 2));
-  assert.equal(dialed.length, 0, 'ordinary discovery waits');
-  swarm.joinPeer(Buffer.alloc(32, 1)); swarm._attemptClientConnections();
-  assert.equal(dialed.length, 1, 'a pinned trade peer bypasses the discovery cap');
+  assert.equal(dialed.length, 1, 'ordinary discovery still dials the trade peer');
+  assert.equal(swarm.explicitPeers.size, 0);
   dialed[0].destroy();
 });
 

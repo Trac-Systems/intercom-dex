@@ -19,7 +19,6 @@ export const DEX_POW_LOW = ['decline'];
 export const SERVER_ROLES = ['service', 'signer'];
 export const SERVER_RATE = { rateBytesPerSecond: 2_000_000, rateBurstBytes: 8_000_000 };
 export const TRADER_RATE = { rateBytesPerSecond: 64_000, rateBurstBytes: 256_000 };
-export const TRADER_DISCOVERY_PEERS = 8;
 
 export function dexTransport(config) {
   if (!['service', 'signer', 'trader', 'market-feed'].includes(config.role)) throw new Error('Explicit peer role required');
@@ -28,9 +27,6 @@ export function dexTransport(config) {
   if (['trader', 'market-feed'].includes(config.role) && config.serveRelay === true) throw new Error('Traders do not serve relays');
   const chat = new MarketChat({ chatRelays: config.chatRelays ?? [] });
   return {
-    ...(['trader', 'market-feed'].includes(config.role) ? { connections: {
-      maxPeers: TRADER_DISCOVERY_PEERS, maxClientConnections: TRADER_DISCOVERY_PEERS,
-    } } : {}),
     relay: { serve: !['trader', 'market-feed'].includes(config.role) && config.serveRelay !== false, relays: config.relayKeys ?? [] },
     sidechannel: { channels: DEX_CHANNELS, openChannels: DEX_CHANNELS, welcomeRequired: false,
       ...(config.role === 'service' ? { publicSend: { rate: 32000, burst: 224000, maxQueue: 512000 } } : {}),
