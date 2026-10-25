@@ -24,7 +24,8 @@ function fixture(t, kind = 'claim') {
     async delete(id) { records.delete(id); },
   };
   const chain = { height: 10, generation: 0, mode: 'unknown', escrow: kind === 'lock' ? 'missing' : 'active',
-    latestCalls: 0, statuses: new Map(), wires: [], reads: [], rejectFinalized: false, submitCalls: 0 };
+    latestCalls: 0, statuses: new Map(), wires: [], reads: [], rejectFinalized: false, submitCalls: 0,
+    failMethods: new Set(), accountSlot: 100, blockhashValid: false };
   const stateData = () => {
     const b = escrowBytes();
     Buffer.from(hashHex, 'hex').copy(b, 2); seller.publicKey.toBuffer().copy(b, 34); buyer.publicKey.toBuffer().copy(b, 66);
@@ -34,9 +35,11 @@ function fixture(t, kind = 'claim') {
   t.mock.method(globalThis, 'fetch', async (url, request) => {
     const { method, params } = JSON.parse(request.body);
     chain.reads.push({ method, params });
+    if (chain.failMethods.has(method)) throw new Error('RPC unavailable');
     if (method === 'getLatestBlockhash') { chain.latestCalls++; return reply({ value: { blockhash: key(chain.generation ? 9 : 8).toBase58(), lastValidBlockHeight: chain.generation ? 200 : 20 } }); }
     if (method === 'getBlockHeight') { assert.equal(params[0].commitment, 'finalized'); return reply(chain.height); }
     if (method === 'getSlot') return reply(100);
+    if (method === 'isBlockhashValid') { assert.equal(params[1].commitment, 'finalized'); return reply({ value: chain.blockhashValid }); }
     if (method === 'getSignatureStatuses') return reply({ value: [chain.statuses.get(params[0][0]) ?? null] });
     if (method === 'getAccountInfo') {
       const [address, config] = params;
@@ -57,13 +60,16 @@ function fixture(t, kind = 'claim') {
         b[67] = platform ? deriveConfigPda().bump : deriveTradeConfigPda(collector).bump;
         value = wireAccount(b);
       }
-      return reply({ context: { slot: 100 }, value });
+      return reply({ context: { slot: chain.accountSlot }, value });
     }
     if (method === 'sendTransaction') {
       chain.submitCalls++;
       const tx = Transaction.from(Buffer.from(params[0], 'base64')), signature = bs58.encode(tx.signature);
       const durable = [...records.values()].flatMap(value => JSON.parse(value).entries);
       assert.ok(durable.some(entry => entry.signature === signature && entry.wire === params[0] && entry.sent), 'signed bytes and submission marker must be durable before broadcast');
+      const entry = durable.find(entry => entry.signature === signature);
+      assert.equal(entry.lastValidBlockHeight, entry.height);
+      assert.ok(Number.isSafeInteger(entry.lastBroadcastAt) && entry.lastBroadcastAt <= Date.now(), 'each broadcast is dated before dispatch');
       chain.wires.push(params[0]);
       if (chain.mode === 'confirmed') {
         chain.statuses.set(signature, { slot: 100, err: null, confirmationStatus: 'confirmed' });
@@ -78,7 +84,16 @@ function fixture(t, kind = 'claim') {
   const create = extra => createSolanaAdapter({ endpoints, sendEndpoint: endpoints[0], keypair: kind === 'claim' ? seller : buyer,
     intents: store, confirmationTimeoutMs: 60, ...extra });
   const input = { terms, hashHex, preimageHex };
-  const invoke = adapter => adapter[kind === 'lock' ? 'lockEscrow' : kind](input);
+  const invoke = async adapter => {
+    // Under CPU load signing can use the tiny confirmation budget before the first send. The host retries
+    // that prepared attempt; do the same here without changing its bytes or obscuring a broadcast result.
+    let result;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      result = await adapter[kind === 'lock' ? 'lockEscrow' : kind](input);
+      if (result.ok || result.unknown || !/^Pending transaction .*: Transaction confirmation timed out$/.test(result.reason ?? '')) break;
+    }
+    return result;
+  };
   return { chain, store, records, create, input, invoke };
 }
 
@@ -226,7 +241,7 @@ for (const failRetirement of [false, true]) {
     assert.deepEqual(await again.lockOutcome({ hashHex: f.input.hashHex }), { ok: true, outcome: failRetirement ? 'unknown' : 'none' });
     assert.equal((await again.pendingIntents()).length, failRetirement ? 1 : 0);
     if (!failRetirement) {
-      assert.match((await f.invoke(again)).reason, /Signing window closed/);
+      assert.match((await f.invoke(again)).reason, /Lock did not go through/);
       assert.equal(f.chain.submitCalls, 0);
     }
   });
@@ -289,4 +304,189 @@ test('a genuinely dispatched attempt still reconciles after its deadline', async
   const result = await f.invoke(f.create());
   assert.equal(result.ok, true); assert.equal(result.signature, first.signature);
   assert.equal(f.chain.submitCalls, 1);
+});
+
+function editLockRecord(f, edit) {
+  const [id, encoded] = [...f.records][0], saved = JSON.parse(encoded);
+  edit(saved.entries[0]);
+  f.records.set(id, JSON.stringify(saved));
+  return saved.entries[0];
+}
+
+test('a dropped lock ends only past its finalized expiry, with no signature status and fenced finalized absence', async t => {
+  const f = fixture(t, 'lock'), adapter = f.create({ finality: 'confirmed' });
+  const sent = await f.invoke(adapter);
+  const record = JSON.parse([...f.records.values()][0]).entries[0];
+  assert.equal(record.signature, sent.signature); assert.equal(record.lastValidBlockHeight, 20);
+  for (const height of [10, 20]) {
+    f.chain.height = height;
+    assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  }
+  f.chain.height = 21; f.chain.reads.length = 0;
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'none' });
+  const methods = f.chain.reads.map(r => r.method);
+  assert.ok(methods.indexOf('getBlockHeight') < methods.indexOf('getSlot'));
+  assert.ok(methods.indexOf('getSlot') < methods.indexOf('getSignatureStatuses'));
+  assert.ok(methods.indexOf('getSignatureStatuses') < methods.indexOf('getAccountInfo'));
+  const accounts = f.chain.reads.filter(r => r.method === 'getAccountInfo');
+  assert.ok(accounts.length > 0 && accounts.every(r => r.params[1].commitment === 'finalized' && r.params[1].minContextSlot === 100));
+  assert.equal(f.chain.latestCalls, 2); assert.equal(f.chain.submitCalls, 1);
+});
+
+test('the absence verdict retires the lock before a queued host retry, including after restart', async t => {
+  const f = fixture(t, 'lock'), adapter = f.create(); await f.invoke(adapter);
+  f.chain.height = 21; f.chain.generation = 1;
+  const [outcome, retry] = await Promise.all([adapter.lockOutcome(f.input), f.invoke(adapter)]);
+  assert.deepEqual(outcome, { ok: true, outcome: 'none' });
+  assert.equal(retry.ok, false); assert.equal(retry.unknown, undefined); assert.match(retry.reason, /Lock did not go through/);
+  assert.equal(JSON.parse([...f.records.values()][0]).entries[0].phase, 'not-executed');
+  const restarted = f.create();
+  assert.deepEqual(await restarted.pendingIntents(), []);
+  assert.match((await f.invoke(restarted)).reason, /Lock did not go through/);
+  assert.deepEqual(await restarted.lockOutcome(f.input), outcome);
+  assert.equal(f.chain.latestCalls, 2); assert.equal(f.chain.submitCalls, 1);
+});
+
+test('failure to persist a terminal absence verdict never releases the buyer commitment', async t => {
+  const f = fixture(t, 'lock'), adapter = f.create(); await f.invoke(adapter); f.chain.height = 21;
+  const put = f.store.put;
+  f.store.put = async (id, record) => {
+    if (record.entries.some(entry => entry.phase === 'not-executed')) throw new Error('terminal journal write failed');
+    return put(id, record);
+  };
+  const result = await adapter.lockOutcome(f.input);
+  assert.equal(result.ok, false); assert.match(result.reason, /terminal journal write failed/);
+  assert.equal(JSON.parse([...f.records.values()][0]).entries[0].phase, 'pending');
+  f.store.put = put;
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'none' });
+});
+
+test('a lock found in the finalized escrow follows the landed path even with a lost signature response', async t => {
+  const f = fixture(t, 'lock'); f.chain.mode = 'accepted_unknown';
+  const adapter = f.create(); await f.invoke(adapter);
+  for (const height of [10, 21]) {
+    f.chain.height = height;
+    assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'landed' });
+  }
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('any extant signature status keeps an absent escrow unresolved; only a finalized failure is definitive', async t => {
+  const f = fixture(t, 'lock'), adapter = f.create(), sent = await f.invoke(adapter);
+  f.chain.height = 21;
+  for (const confirmationStatus of ['processed', 'confirmed', 'finalized']) {
+    f.chain.statuses.set(sent.signature, { slot: 100, err: null, confirmationStatus });
+    assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  }
+  f.chain.statuses.set(sent.signature, { slot: 100, err: { InstructionError: [0, 'InvalidArgument'] }, confirmationStatus: 'confirmed' });
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  f.chain.statuses.get(sent.signature).confirmationStatus = 'finalized';
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'none' });
+});
+
+test('a confirmed lock failure cannot become a definite abort through the submission retry path', async t => {
+  const f = fixture(t, 'lock'), first = await f.invoke(f.create());
+  f.chain.statuses.set(first.signature, { slot: 100, err: { InstructionError: [0, 'InvalidArgument'] }, confirmationStatus: 'confirmed' });
+  f.chain.height = 21;
+  const restarted = f.create(), waiting = await f.invoke(restarted);
+  assert.equal(waiting.unknown, true); assert.equal(waiting.signature, first.signature);
+  assert.equal(f.chain.submitCalls, 1); assert.equal(f.chain.latestCalls, 2);
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  f.chain.statuses.get(first.signature).confirmationStatus = 'finalized';
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'none' });
+});
+
+test('unavailable RPC evidence and account reads below the expiry fence never free a lock', async t => {
+  const f = fixture(t, 'lock'), adapter = f.create(); await f.invoke(adapter); f.chain.height = 21;
+  for (const method of ['getBlockHeight', 'getSlot', 'getSignatureStatuses', 'getAccountInfo']) {
+    f.chain.failMethods.add(method);
+    const result = await adapter.lockOutcome(f.input);
+    assert.ok(!result.ok || result.outcome === 'unknown', `${method}: ${JSON.stringify(result)}`);
+    f.chain.failMethods.clear();
+  }
+  f.chain.accountSlot = 99;
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  f.chain.accountSlot = 100;
+  assert.deepEqual(await adapter.lockOutcome(f.input), { ok: true, outcome: 'none' });
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('a dissenting processed status prevents both restart replacement and absence recovery', async t => {
+  const f = fixture(t, 'lock'); await f.invoke(f.create()); f.chain.height = 21;
+  const fetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', async (url, request) => {
+    if (String(url).includes('127.0.0.2') && JSON.parse(request.body).method === 'getSignatureStatuses') {
+      return reply({ value: [{ slot: 100, err: null, confirmationStatus: 'processed' }] });
+    }
+    return fetch(url, request);
+  });
+  const adapter = f.create({ endpoints: [...endpoints, 'http://127.0.0.2:18899'] });
+  assert.equal((await adapter.lockOutcome(f.input)).ok, false);
+  assert.equal((await adapter.pendingIntents())[0].attempt, 1);
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('restart retains the exact expiry and releases a dead lock without broadcasting again', async t => {
+  const f = fixture(t, 'lock'), sent = await f.invoke(f.create());
+  const restarted = f.create();
+  assert.equal((await restarted.pendingIntents())[0].signature, sent.signature);
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  f.chain.height = 21;
+  assert.deepEqual(await f.create().lockOutcome(f.input), { ok: true, outcome: 'none' });
+  assert.equal(f.chain.submitCalls, 1); assert.equal(f.chain.latestCalls, 2);
+});
+
+test('older journals retain their height alias as exact expiry evidence without waiting ten minutes', async t => {
+  const f = fixture(t, 'lock'); await f.invoke(f.create());
+  editLockRecord(f, entry => { delete entry.lastValidBlockHeight; delete entry.lastBroadcastAt; });
+  f.chain.height = 21;
+  assert.deepEqual(await f.create().lockOutcome(f.input), { ok: true, outcome: 'none' });
+  assert.ok(!f.chain.reads.some(read => read.method === 'isBlockhashValid'));
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('legacy locks wait ten minutes since the last broadcast and require an expired blockhash', async t => {
+  const f = fixture(t, 'lock'); await f.invoke(f.create());
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  editLockRecord(f, entry => {
+    delete entry.height; delete entry.lastValidBlockHeight;
+    entry.createdAt = now - 86400000; entry.lastBroadcastAt = now - 599999;
+  });
+  const restarted = f.create();
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  now++;
+  f.chain.blockhashValid = true;
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'unknown' }, 'a stalled chain cannot expire bytes by wall time alone');
+  f.chain.blockhashValid = false;
+  f.chain.failMethods.add('isBlockhashValid');
+  assert.equal((await restarted.lockOutcome(f.input)).ok, false);
+  f.chain.failMethods.clear();
+  assert.deepEqual(await restarted.lockOutcome(f.input), { ok: true, outcome: 'none' });
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('legacy records without a broadcast date start a durable safe window that survives another restart', async t => {
+  const f = fixture(t, 'lock'); await f.invoke(f.create());
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  editLockRecord(f, entry => {
+    delete entry.height; delete entry.lastValidBlockHeight; delete entry.lastBroadcastAt;
+    entry.createdAt = now - 86400000;
+  });
+  assert.deepEqual(await f.create().lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  const observed = JSON.parse([...f.records.values()][0]).entries[0].legacyObservedAt;
+  assert.equal(observed, now);
+  now += 599999;
+  assert.deepEqual(await f.create().lockOutcome(f.input), { ok: true, outcome: 'unknown' });
+  now++;
+  assert.deepEqual(await f.create().lockOutcome(f.input), { ok: true, outcome: 'none' });
+  assert.equal(JSON.parse([...f.records.values()][0]).entries[0].legacyObservedAt, observed);
+  assert.equal(f.chain.submitCalls, 1);
+});
+
+test('expired lock bytes are never replaced at the lock-start cutoff', async t => {
+  const f = fixture(t, 'lock'); await f.invoke(f.create()); f.chain.height = 21;
+  f.input.terms.sendBy = Math.floor(Date.now() / 1000) + LOCK_START_MARGIN_SEC;
+  const result = await f.invoke(f.create());
+  assert.equal(result.ok, false); assert.match(result.reason, /Signing window closed/);
+  assert.equal(f.chain.submitCalls, 1); assert.equal(f.chain.latestCalls, 2);
 });

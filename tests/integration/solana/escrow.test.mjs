@@ -85,13 +85,14 @@ test('vendored escrow on an isolated local validator', { timeout: 150000 }, asyn
     await assert.rejects(send(connection, buyer, [e.buildInitInstruction(args)]), rejection(12));
   });
 
-  await t.test('quorum tolerates one liar and rejects two conflicting lies', async () => {
+  await t.test('general reads accept a majority but decisive escrow checks reject any conflicting answer', async () => {
     const q = await readAccountQuorum(a.escrowPda, { endpoints });
     assert.ok(q.value.data.equals((await connection.getAccountInfo(a.escrowPda)).data));
     assert.equal(q.agreeing.length, 2); assert.equal(q.reports[2].status, 'disagreed');
     await assert.rejects(readAccountQuorum(a.escrowPda, { endpoints: [LOCAL_RPC, proxyUrl('lie1'), proxyUrl('lie2')] }), QuorumError);
     const verdict = await checkEscrow({ terms, hashHex: paymentHashHex, endpoints });
-    assert.equal(verdict.ok, true, JSON.stringify(verdict.reasons));
+    assert.equal(verdict.ok, false); assert.ok(verdict.reasons.some(reason => reason.code === 'ESCROW_QUORUM'));
+    assert.equal((await checkEscrow({ terms, hashHex: paymentHashHex, endpoints: endpoints.slice(0, 2) })).ok, true);
   });
 
   await t.test('seller checker rejects every reason using real account snapshots altered by local proxies', async () => {

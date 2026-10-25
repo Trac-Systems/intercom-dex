@@ -33,7 +33,9 @@ test('real loopback HTTP: timeouts, malformed responses, quorum and seller verdi
   const endpoints = ['honest1', 'honest2', 'lie1'].map(url);
   const q = await readAccountQuorum(addresses.escrowPda, { endpoints });
   assert.equal(q.agreeing.length, 2); assert.equal(q.reports[2].status, 'disagreed');
-  assert.equal((await checkEscrow({ terms, hashHex, endpoints })).ok, true);
+  const disputed = await checkEscrow({ terms, hashHex, endpoints });
+  assert.equal(disputed.ok, false); assert.equal(disputed.reasons[0].code, 'ESCROW_QUORUM');
+  assert.equal((await checkEscrow({ terms, hashHex, endpoints: endpoints.slice(0, 2) })).ok, true);
   const lies = ['honest1', 'lie1', 'lie2'].map(url);
   await assert.rejects(readAccountQuorum(addresses.escrowPda, { endpoints: lies }), QuorumError);
   assert.equal((await checkEscrow({ terms, hashHex, endpoints: lies })).reasons[0].code, 'ESCROW_QUORUM');

@@ -413,6 +413,12 @@ from a newer full book's `remaining` for their pair are removed. The venue leave
 the maker's wallet cannot fund the pair's smallest trade (it reads makers' wallets at most every 300 seconds; a
 wallet it cannot read hides nothing), and keeps its book across restarts.
 
+Maker offer sizes are recomputed from persisted trades. Aborted trades and refunded buyer trades release their
+amount. A seller trade ending as `lost` also releases its amount when it has no `txHash`, `transferUnknown` or
+`transferFinal` evidence. A recorded or uncertain transfer remains consumed. Wallet offer commitments and
+dashboard sizes use the same rule. A newly released unsent seller amount triggers one immediate announcement
+of its open offer, then the normal 45-second schedule; cancelled and expired offers remain closed.
+
 ## 12. Transport limits, proof-of-work and relays
 
 - Every message on `intercom-dex:offers`, `intercom-dex:signers`, `intercom-dex:chat` and every `intercom-dex:t:` channel carries a

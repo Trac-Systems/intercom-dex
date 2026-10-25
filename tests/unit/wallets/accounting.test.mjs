@@ -55,3 +55,21 @@ test('running trades, unknown locks, confirmed escrow until claim/refund, pendin
   const tnk = accountBalances(args({ trades: [trade('seller', { draft: { ...terms, base: BASES.TNK, baseAmount: '1000000000000000000' } })] }));
   assert.equal(tnk.TNK.committed, '1090000000000000000'); assert.equal(tnk.TNK.free, '8910000000000000000');
 });
+
+test('unsent seller losses return their offer commitment; transfer evidence stays consumed', () => {
+  for (const [evidence, restored] of [[{}, true], [{ transferUnknown: false, transferFinal: false }, true],
+    [{ txHash: 'ab'.repeat(32) }, false], [{ transferUnknown: true }, false], [{ transferFinal: true }, false]]) {
+    for (const base of ['RESET', 'TNK']) {
+      const sell = offer('sell', `${base}/USDC`);
+      const lost = trade('seller', { mode: 'maker', phase: 'lost', offerId: sell.offerId,
+        draft: { ...terms, base: BASES[base] }, ...evidence });
+      const row = accountBalances(args({ offers: [sell], trades: [lost] }))[base];
+      assert.equal(row.breakdown.offers, restored ? '200000000' : '100000000');
+      assert.equal(row.breakdown.trades, '0');
+      for (const offers of [[], [{ ...sell, expiresAt: 0 }]]) {
+        assert.equal(accountBalances(args({ offers, trades: [lost] }))[base].breakdown.offers, '0');
+      }
+      assert.equal(accountBalances(args({ offers: [sell], trades: [{ ...lost, state: { ...lost.state, mode: 'taker' } }] }))[base].breakdown.offers, '200000000');
+    }
+  }
+});

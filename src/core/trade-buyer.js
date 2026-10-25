@@ -4,6 +4,7 @@ import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusa
 
 export function createBuyer(config) { return createTrader('buyer', config); }
 export const LOCK_START_MARGIN_SEC = 120;
+export const LOCK_OUTCOME_RETRY_SEC = 60;
 
 export function ackRejectionReason(s, m) {
   if (s.phase !== 'awaitAcks') return `phase ${s.phase} does not count acks`;
@@ -18,6 +19,7 @@ function maybeLock(s) {
   if (s.acks.length < s.terms.k) return { state: s, actions: [] };
   s.phase = 'locking';
   s.lockAttempted = true;
+  s.nextLockOutcomeCheck = s.now + LOCK_OUTCOME_RETRY_SEC;
   return { state: s, actions: [lockAction(s)] };
 }
 
@@ -30,6 +32,13 @@ const proveAction = s => ({ type: 'prove', tradeId: s.tradeId, secretHex: s.priv
 const lockAction = s => ({ type: 'lockEscrow', tradeId: s.tradeId, terms: s.terms, hashHex: s.H });
 const refundAction = s => ({ type: 'refund', tradeId: s.tradeId, terms: s.terms, hashHex: s.H });
 const settlementAction = s => ({ type: 'checkEscrow', purpose: 'settlement', tradeId: s.tradeId, terms: s.terms, hashHex: s.H });
+
+function pollLockOutcome(s, resume = false) {
+  if (!(s.phase === 'locking' || s.lockUnknown && ['locked', 'refunding'].includes(s.phase)) ||
+      !resume && s.now < (s.nextLockOutcomeCheck ?? 0)) return [];
+  s.nextLockOutcomeCheck = s.now + LOCK_OUTCOME_RETRY_SEC;
+  return [{ type: 'lockOutcome', tradeId: s.tradeId, terms: s.terms, hashHex: s.H }];
+}
 
 function pollSettlement(s) {
   const actions = [];
@@ -52,7 +61,7 @@ export function step(state, event) {
       if (s.phase === 'locking') { s.locked = true; s.lockUnknown = true; }
       s.lockRetryAt = null;
       s.phase = 'refunding';
-      const actions = [refundAction(s)];
+      const actions = [refundAction(s), ...pollLockOutcome(s, e.type === 'resume')];
       if (e.type === 'resume' && s.settlementPending) {
         s.nextSettlementCheck = e.now + 30;
         actions.push(settlementAction(s));
@@ -66,13 +75,14 @@ export function step(state, event) {
       if (s.phase === 'awaitCertificate') return resumeActions(s, [{ type: 'acquireCertificate', tradeId: s.tradeId }]);
       if (s.phase === 'preparingDeal') return resumeActions(s, [{ type: 'prepareDeal', tradeId: s.tradeId }]);
       if (s.phase === 'proving') return resumeActions(s, [proveAction(s)]);
-      // A lock is only (re)tried while the seller could still send; later the trade waits for refundAfter.
+      // Only the adapter may retry the journaled bytes; outcome checks continue after the sending window.
       if (s.phase === 'locking') {
         s.lockRetryAt = null;
-        return resumeActions(s, e.now < s.terms.sendBy ? [lockAction(s)] : []);
+        return resumeActions(s, [...(e.now < s.terms.sendBy ? [lockAction(s)] : []), ...pollLockOutcome(s, true)]);
       }
       const outstanding = s.settlementPending && !terminal ? [settlementAction(s)] : [];
       if (outstanding.length) s.nextSettlementCheck = e.now + 30;
+      outstanding.push(...pollLockOutcome(s, true));
       if (s.phase === 'refunding') {
         s.refundRetryAt = null;
         return resumeActions(s, [refundAction(s), ...outstanding]);
@@ -84,7 +94,7 @@ export function step(state, event) {
     if (e.type === 'tick') {
       if (s.phase === 'locking' && s.lockRetryAt && e.now >= s.lockRetryAt && e.now < s.terms.sendBy) {
         s.lockRetryAt = null;
-        return { state: s, actions: [lockAction(s)] };
+        return { state: s, actions: [lockAction(s), ...pollLockOutcome(s)] };
       }
       if (!s.locked && !['locking', 'aborted'].includes(s.phase) && e.now >= s.draft.sendBy) {
         return abortTransition(s, 'Negotiation deadline expired');
@@ -125,7 +135,7 @@ export function step(state, event) {
       s.lockRetryAt = null;
       s.phase = 'locked';
       return { state: s, actions: [{ type: 'persist', scope: 'locked', tradeId: s.tradeId,
-        record: { hashHex: s.H, terms: s.terms, unknown: s.lockUnknown } }, ...pollSettlement(s).actions] };
+        record: { hashHex: s.H, terms: s.terms, unknown: s.lockUnknown } }, ...pollSettlement(s).actions, ...pollLockOutcome(s)] };
     }
     if (m?.kind === 'ack' && s.phase === 'awaitAcks') {
       if (ackRejectionReason(s, m)) return null;
@@ -185,17 +195,32 @@ export function step(state, event) {
       s.settlementPending = false;
       if (e.ok === true && e.status === 'claimed') { s.phase = 'complete'; return { state: s, actions: [] }; }
       if (e.ok === true && e.status === 'refunded') { s.phase = 'refunded'; return { state: s, actions: [] }; }
-      // An unconfirmed lock whose escrow is absent after refundAfter: ask the Solana journal what became of the
-      // attempt. Only proof that it never ran (expired and absent in a read fenced after expiry) ends the trade.
-      if (e.ok === false && e.unknown !== true && e.status === 'missing' && s.lockUnknown && e.now >= s.terms.refundAfter) {
-        return { state: s, actions: [{ type: 'lockOutcome', tradeId: s.tradeId, terms: s.terms, hashHex: s.H }] };
+      if (e.ok === true && e.status === 'active') s.lockUnknown = false;
+      // Missing escrow alone is insufficient, including before refundAfter: ask the durable transaction journal.
+      if (e.ok === false && e.unknown !== true && e.status === 'missing' && s.lockUnknown) {
+        return { state: s, actions: pollLockOutcome(s) };
       }
       return { state: s, actions: [] };
     }
-    if (e.type === 'lockOutcome' && s.locked && s.lockUnknown && e.tradeId === s.tradeId && e.outcome === 'none') {
-      s.locked = false;
-      s.lockAttempted = false;
-      return abortTransition(s, 'The escrow lock never ran; nothing to refund');
+    if (e.type === 'lockOutcome' && (s.phase === 'locking' || s.locked && s.lockUnknown) && e.tradeId === s.tradeId &&
+        (e.hashHex === undefined || e.hashHex === s.H)) {
+      if (e.outcome === 'none') {
+        s.locked = false;
+        s.lockUnknown = false;
+        s.lockAttempted = false;
+        s.lockRetryAt = null;
+        s.nextLockOutcomeCheck = null;
+        s.refundRetryAt = null;
+        s.settlementPending = false;
+        return abortTransition(s, 'Lock did not go through');
+      }
+      if (e.outcome === 'landed') {
+        s.locked = true;
+        s.lockUnknown = false;
+        s.lockRetryAt = null;
+        if (s.phase === 'locking') s.phase = 'locked';
+        return pollSettlement(s);
+      }
     }
     if (e.type === 'refunded' && s.phase === 'refunding' && e.tradeId === s.tradeId) {
       if (e.ok === false) {
@@ -215,6 +240,7 @@ export function step(state, event) {
         return { state: s, actions: [sendAction(s, 'working', { tradeId: s.tradeId, step: 'certificate' })] };
       }
       const result = pollSettlement(s);
+      result.actions.push(...pollLockOutcome(s));
       if (s.phase === 'refunding' && s.refundRetryAt && e.now >= s.refundRetryAt) {
         s.refundRetryAt = null;
         result.actions.push(refundAction(s));

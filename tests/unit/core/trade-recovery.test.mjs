@@ -119,7 +119,7 @@ test('unresolved locks enter refund recovery at refundAfter and abort only on pr
     assert.equal(recovering.state.phase, 'refunding');
     assert.equal(recovering.state.locked, true);
     assert.equal(recovering.state.lockUnknown, true);
-    assert.deepEqual(types(recovering), ['refund']);
+    assert.deepEqual(types(recovering), ['refund', 'lockOutcome']);
     unchanged(recovering.state, 'escrowLocked', { ok: false });
     const failed = step(recovering.state, 'refunded', { ok: false });
     assert.deepEqual(types(failed), ['checkEscrow']);
@@ -127,7 +127,7 @@ test('unresolved locks enter refund recovery at refundAfter and abort only on pr
       assert.equal(step(failed.state, 'escrowChecked', { purpose: 'settlement', ok: false, status: 'missing', ...fields }).state.phase, 'refunding');
     }
     const asked = step(failed.state, 'escrowChecked', { purpose: 'settlement', ok: false, status: 'missing' });
-    assert.deepEqual(types(asked), ['lockOutcome']);
+    assert.deepEqual(types(asked), [], 'the outcome check already issued with the refund is rate limited');
     assert.equal(step(asked.state, 'lockOutcome', { outcome: 'unknown' }).state.phase, 'refunding');
     const absent = step(asked.state, 'lockOutcome', { outcome: 'none' });
     assert.equal(absent.state.phase, 'aborted');
@@ -377,8 +377,8 @@ test('publications include exactly the selected commitments and have a strict sc
 test('a buyer signs no new lock once the seller could no longer send', () => {
   const s = snapshot('buyer', 'locking'), late = s.terms.sendBy;
   const waiting = { ...s, lockRetryAt: late - 10 };
-  assert.deepEqual(types(step(waiting, 'tick', { now: late - 1 })), ['lockEscrow']);
-  assert.deepEqual(types(step(waiting, 'tick', { now: late })), []);
+  assert.deepEqual(types(step(waiting, 'tick', { now: late - 1 })), ['lockEscrow', 'lockOutcome']);
+  assert.deepEqual(types(step(waiting, 'tick', { now: late })), ['lockOutcome']);
   assert.ok(!types(step(s, 'resume', { now: late })).includes('lockEscrow'));
 });
 

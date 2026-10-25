@@ -144,7 +144,7 @@ test('six stale locked buyers add no PoW jobs over ten minutes of ticks alongsid
       }
     }
   }
-  // Drain even when this regression fails, so no PoW work outlives the test.
+  // Drain even when this test fails, so no PoW work outlives the test.
   await Promise.all(pending);
   assert.equal(f.sent.length, 0, 'stale outboxes never reach the stamping queue');
   assert.equal(work.mock.callCount(), 6, 'only the six fresh negotiation messages require work');

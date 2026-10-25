@@ -269,8 +269,18 @@ test('chain tip is the highest processed slot any endpoint reports, and needs en
   await assert.rejects(make().tipSlot(), /Too few endpoints/);
 });
 
-test('a lock with no attempt in the journal is reported as never run', async () => {
-  assert.deepEqual(await make({ keypair: Keypair.generate() }).lockOutcome({ terms, hashHex }), { ok: true, outcome: 'none' });
+test('an absent journal is not proof of nonexecution; a finalized escrow still proves the lock landed', async t => {
+  let escrow = null;
+  t.mock.method(globalThis, 'fetch', async (_url, request) => {
+    const { method, params } = JSON.parse(request.body);
+    if (method === 'getSlot') return response(100);
+    assert.equal(method, 'getAccountInfo'); assert.equal(params[1].commitment, 'finalized');
+    return response({ context: { slot: 100 }, value: params[0] === addresses.escrowPda.toBase58() ? escrow : wireVault() });
+  });
+  const adapter = make({ keypair: Keypair.generate() });
+  assert.deepEqual(await adapter.lockOutcome({ terms, hashHex }), { ok: true, outcome: 'unknown' });
+  escrow = wireAccount();
+  assert.deepEqual(await adapter.lockOutcome({ terms, hashHex }), { ok: true, outcome: 'landed' });
 });
 
 test('no deposit is signed once the trade send deadline has passed', async () => {

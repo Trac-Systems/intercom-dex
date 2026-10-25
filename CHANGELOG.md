@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.36
+
+- When a buyer refunds and the seller never sent tokens, the amount returns to the seller's open offer,
+  including after a restart. Recorded or uncertain transfers still count as consumed.
+- Wallet commitments, dashboard offer sizes and trade history follow the same rule.
+- Restored offers are announced once immediately, then on the normal schedule. Cancelled and expired offers
+  stay closed.
+- A buyer lock that never landed on Solana no longer holds the buyer's USDC for 48 hours: once the lock
+  transaction has provably expired without an escrow, the trade ends and the USDC is free again, including for
+  trades already stuck in that state.
+- Works with 0.1.32 and later; no minimum-version change.
+
 ## 0.1.35
 
 - Trades waiting for a refund no longer repeat old messages, so their proof-of-work no longer slows new trades

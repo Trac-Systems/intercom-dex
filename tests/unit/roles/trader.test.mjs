@@ -20,6 +20,8 @@ import { WalletManager } from '../../../src/wallets/manager.js';
 import { controlHandler } from '../../../src/roles/control.js';
 import { createAddressProof } from '../../../src/core/address-proof.js';
 import { proofWallet, networkId } from '../core/address-proof-fixture.mjs';
+import { createModel } from '../../../src/dashboard/model.js';
+import { accountBalances } from '../../../src/wallets/accounting.js';
 
 const OFFERS = 'intercom-dex:offers';
 
@@ -126,6 +128,102 @@ test('maker inventory is held by running trades, kept when filled, released when
   add('d', 'refunded', '100', 'buyer');
   const mine = t.status().mine[0];
   assert.deepEqual([mine.reserved, mine.filled, mine.available], ['300', '200', '500']);
+});
+
+test('unsent seller losses restore maker inventory, wallet commitments and dashboard depth, including after restart', async () => {
+  for (const evidence of [{}, { transferUnknown: false, transferFinal: false }, { txHash: random32() }, { transferUnknown: true }, { transferFinal: true }]) {
+    const f = fixture(), alice = party(), { t, dir } = await trader(alice, { registry: f.registry });
+    const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+    const terms = { ...f.terms, offerId: offer.offerId, baseAmount: '1000000000000000000' };
+    const state = { role: 'seller', mode: 'maker', phase: 'lost', offerId: offer.offerId, draft: terms, terms,
+      tradeId: termsTradeId(terms), now: nowSec(), ...evidence };
+    await t.host.addTrade({ key: 'unsent-sale', role: 'seller', state, lifetimeSec: 3600 });
+    const consumed = !!(evidence.txHash || evidence.transferUnknown || evidence.transferFinal);
+    const left = consumed ? '1000000000000000000' : offer.baseAmount;
+    for (const role of [t, (await trader(alice, { dir, registry: f.registry })).t]) {
+      const mine = role.status().mine[0];
+      assert.deepEqual([mine.available, mine.reserved, mine.filled], [left, '0', consumed ? terms.baseAmount : '0']);
+      const balances = accountBalances({ balances: { TNK: '10000000000000000000' }, offers: [...role.mine.values()],
+        trades: [...role.host.trades.values()], registry: () => f.registry });
+      assert.equal(balances.TNK.breakdown.offers, left);
+      assert.equal(balances.TNK.breakdown.trades, '0');
+      const model = createModel({ role, config: { role: 'trader', network: 'local' }, bridge: role.bridge });
+      const rows = (await model.list('trader.offers')).rows;
+      assert.deepEqual([rows[0].left.units, rows[0].filled.units], [left, mine.filled]);
+      const ask = model.book(offer.pair).asks[0];
+      assert.equal(ask.amount.units, left); assert.equal(ask.mine.units, left); assert.equal(ask.take, null);
+    }
+  }
+});
+
+test('an unsent refund reannounces only its maker offer once immediately, then follows the normal schedule', async ctx => {
+  const timers = [];
+  ctx.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  ctx.mock.method(globalThis, 'clearInterval', () => {});
+  const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' });
+  const other = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '2' });
+  const terms = { ...f.terms, offerId: offer.offerId, baseAmount: offer.baseAmount };
+  const state = { role: 'seller', mode: 'maker', phase: 'transferring', offerId: offer.offerId, draft: terms, terms,
+    tradeId: termsTradeId(terms), H: random32(), now: nowSec(), settlementPending: true };
+  await t.host.addTrade({ key: 'unsent', role: 'seller', state, lifetimeSec: 3600 });
+  const count = id => bridge.sent.filter(x => x.envelope.kind === 'offer' && x.envelope.body.offerId === id).length;
+  assert.equal(t.status().mine.find(o => o.offerId === offer.offerId).available, '0');
+  const event = { type: 'escrowChecked', tradeId: state.tradeId, hashHex: state.H, purpose: 'settlement', ok: true, status: 'refunded' };
+  await t.host.deliver('unsent', event);
+  assert.equal(t.host.trades.get('unsent').state.phase, 'lost');
+  assert.equal(count(offer.offerId), 2); assert.equal(count(other.offerId), 1);
+  assert.equal(t.status().mine.find(o => o.offerId === offer.offerId).available, '1000');
+  for (const e of [event, { type: 'tick' }, { type: 'resume' }]) await t.host.deliver('unsent', e);
+  assert.equal(count(offer.offerId), 2, 'finished-state repeats do not announce again');
+  timers.find(x => x.ms === 45000).fn();
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  assert.equal(count(offer.offerId), 3); assert.equal(count(other.offerId), 2);
+});
+
+test('losses cannot reopen cancelled or expired offers, or release recorded or uncertain transfers', async () => {
+  for (const variant of ['cancelled', 'expired', 'hash', 'unknown', 'final', 'taker']) {
+    const f = fixture(), alice = party(), { t, bridge, dir } = await trader(alice, { registry: f.registry });
+    const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' });
+    if (variant === 'cancelled') await t.cancelOffer(offer.offerId);
+    if (variant === 'expired') { t.store.delete(`offer-${offer.offerId}`); offer.expiresAt = nowSec() - 1; offer.offerId = offerIdOf(offer);
+      t.mine.clear(); t.mine.set(offer.offerId, offer); t.store.put(`offer-${offer.offerId}`, { offer, cancelled: false }); }
+    const terms = { ...f.terms, offerId: offer.offerId, baseAmount: offer.baseAmount };
+    const state = { role: 'seller', mode: variant === 'taker' ? 'taker' : 'maker', phase: 'lost', offerId: offer.offerId,
+      draft: terms, terms, tradeId: termsTradeId(terms), now: nowSec(),
+      ...(variant === 'hash' ? { txHash: random32() } : variant === 'unknown' ? { transferUnknown: true } : variant === 'final' ? { transferFinal: true } : {}) };
+    await t.host.addTrade({ key: 'lost', role: 'seller', state, lifetimeSec: 3600 });
+    const count = bridge.sent.length;
+    for (const hook of t.host.hooks.afterStep) await hook(t.host.trades.get('lost'), { ...state, phase: 'transferring' });
+    assert.equal(bridge.sent.length, count, variant + ' does not announce');
+    if (['cancelled', 'expired'].includes(variant)) {
+      assert.equal(t.mine.has(offer.offerId), false);
+      assert.equal((await trader(alice, { dir, registry: f.registry })).t.mine.has(offer.offerId), false);
+    } else if (variant !== 'taker') {
+      assert.equal(t.status().mine[0].available, '0');
+      assert.equal((await trader(alice, { dir, registry: f.registry })).t.mine.size, 0, 'a fully consumed offer stays filled after restart');
+    }
+  }
+});
+
+test('a failed immediate announcement waits for the normal schedule to retry', async ctx => {
+  const timers = [];
+  ctx.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  ctx.mock.method(globalThis, 'clearInterval', () => {});
+  const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' });
+  const trade = { role: 'seller', state: { mode: 'maker', phase: 'lost', offerId: offer.offerId, draft: { baseAmount: '1000' } } };
+  t.host.trades.set('lost', trade);
+  let attempts = 0;
+  const send = bridge.send.bind(bridge);
+  bridge.send = async (...args) => { if (++attempts === 1) throw Error('offline'); return send(...args); };
+  const hook = t.host.hooks.afterStep[0];
+  await hook(trade, { phase: 'transferring' });
+  await hook(trade, trade.state);
+  assert.equal(attempts, 1); assert.equal(t.status().mine[0].available, '1000');
+  timers.find(x => x.ms === 45000).fn();
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  assert.equal(attempts, 2);
 });
 
 test("an own offer is reported not listed when a venue book heard LISTED_AFTER_SEC after it leaves it out", async () => {

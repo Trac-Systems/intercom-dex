@@ -189,6 +189,8 @@ await adapter.refund({terms, hashHex})
 // {ok:false, unknown:true, hashHex, signature, reason}
 await adapter.pendingIntents()
 // [{id, signature, ageMs, createdAt, attempt}]; throws if journal loading fails
+await adapter.lockOutcome({terms, hashHex})
+// {ok:true, outcome:'none'|'landed'|'unknown'} | {ok:false, reason}; never signs or broadcasts
 await adapter.finalizedSlot() // finalized slot number; throws on unavailable quorum
 const watch = adapter.chainWatch({ onUpdate }) // pushed slots (slotSubscribe) from up to 3 of the RPC nodes; watch.start(),
                                                 // watch.view(maxAgeMs) -> {finalized, tip, at} or null, watch.stop()
@@ -271,6 +273,19 @@ or matching terminal state resolves the original attempt; unavailable or conflic
 evidence retains it as unknown. This prevents overlapping live attempts for one
 intent. Later `checkEscrow` calls can find a lock whose submission response was lost.
 
+Buyers call `lockOutcome` every 60 seconds while locking or uncertain, and on resume.
+It proves a dropped lock only when finalized block height is past the journaled
+`lastValidBlockHeight`, signature history unanimously has no status, and a subsequent
+fenced finalized escrow read finds no account. A finalized failed signature and absent
+escrow also prove nonexecution. A matching escrow means `landed`; unavailable,
+conflicting or incomplete evidence means `unknown`. A missing journal entry cannot
+prove that a lock never ran. The core aborts a proven dropped lock with `Lock did not go through`
+and releases its wallet commitment without waiting for `refundAfter`.
+Before returning `none`, the adapter saves the terminal `not-executed` phase.
+Subsequent lock calls, including queued host retries and calls after restart,
+cannot sign or resend that intent. A failed terminal journal write keeps the
+outcome unknown; the buyer retains its commitment until the verdict is durable.
+
 Inject `intents: {get(id), put(id, value), delete(id)}` for restart recovery. Methods
 may be synchronous or asynchronous. Because this interface has no enumeration
 method, the adapter stores one journal snapshot (`{v:1, entries:[...]}`) under
@@ -282,14 +297,24 @@ for different chain networks belong to the caller. The adapter does not open a
 filesystem or wallet store itself. Omitting
 `intents` retains pending state only in memory.
 
-Signed bytes and their intended terms are saved before broadcast. Startup validates
+Signed bytes, signature, `lastValidBlockHeight` (also retained as the older `height`
+field), intended terms and a `lastBroadcastAt` timestamp in milliseconds are saved
+before every broadcast. Startup validates
 the journal and reconciles entries before any new mutation; it does not broadcast
 automatically. Calling the original method resumes the attempt. Journal failures
 prevent new broadcasts. Protect stored signed claim bytes: they contain the preimage.
 `pendingIntents()` exposes ids, signatures, ages, creation times and attempt counts,
-without signed bytes; completed/rejected entries are excluded. Definite validation
+without signed bytes; completed, rejected and terminally retired entries are excluded. Definite validation
 or first-attempt preflight failures return `{ok:false,reason}`. Unresolved submitted
 escrow transactions add `unknown:true`, `hashHex` and the attempted `signature`.
+
+Older lock entries that have neither expiry-height field wait at least ten minutes
+since `lastBroadcastAt` and require the signed blockhash to be invalid at finalized
+commitment, in addition to absent signature status and escrow. If the broadcast date
+is also missing, startup persists `legacyObservedAt` and waits the full interval from
+there; `createdAt` cannot substitute because it survives replacement attempts.
+An old `height` field alone still supplies exact expiry evidence. The signing cutoff
+for any new or replacement lock remains `sendBy - LOCK_START_MARGIN_SEC`.
 
 Service configuration and withdrawal submissions also use the journal. A balance
 cannot prove whether a withdrawal executed. After expiry, its signature status is

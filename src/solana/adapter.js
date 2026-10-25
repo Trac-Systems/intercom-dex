@@ -20,6 +20,7 @@ import { ChainWatch } from './chain-watch.js';
 const QUORUM_ATTEMPTS = 4, QUORUM_RETRY_MS = 400;
 // A history search proves a withdrawal absent only while it still covers the signing time.
 const WITHDRAWAL_PROOF_MS = 6 * 3600 * 1000;
+const LEGACY_LOCK_PROOF_MS = 10 * 60 * 1000;
 const SYSVAR_OWNER = 'Sysvar1111111111111111111111111111111111111';
 
 function unsigned(value) {
@@ -70,7 +71,7 @@ export function createSolanaAdapter({
       return work();
     }).catch(error => {
       const entry = pending.get(id);
-      const unresolved = entry?.sent && !['done', 'rejected', 'retryable', 'retired-unsent'].includes(entry.phase);
+      const unresolved = entry?.sent && !['done', 'rejected', 'retryable', 'retired-unsent', 'not-executed'].includes(entry.phase);
       return {
         ok: false,
         ...(unresolved ? { unknown: true, ...(entry.intent.hashHex ? { hashHex: entry.intent.hashHex } : {}), signature: entry.signature } : {}),
@@ -200,22 +201,25 @@ export function createSolanaAdapter({
   }
 
   async function reconcile(entry) {
-    if (['done', 'rejected', 'retryable', 'retired-unsent'].includes(entry.phase)) return entry;
-    const status = await signatureState(entry.signature);
+    if (['done', 'rejected', 'retryable', 'retired-unsent', 'not-executed'].includes(entry.phase)) return entry;
+    const status = await signatureState(entry.signature, { unanimous: entry.intent.kind === 'lock' });
     if (status && ['confirmed', 'finalized'].includes(status.confirmationStatus)) {
-      if ((commitment === 'finalized' || ['collector-config', 'platform-config', 'platform-withdraw'].includes(entry.intent.kind)) && status.confirmationStatus !== 'finalized') return { ...entry, observedConfirmed: true };
+      if ((commitment === 'finalized' || entry.intent.kind === 'lock' && status.err ||
+          ['collector-config', 'platform-config', 'platform-withdraw'].includes(entry.intent.kind)) &&
+          status.confirmationStatus !== 'finalized') return { ...entry, observedConfirmed: true };
       return { ...entry, phase: status.err ? 'rejected' : 'done', observedConfirmed: false,
         reason: status.err ? `Transaction failed: ${JSON.stringify(status.err)}` : null };
     }
     entry = { ...entry, observedConfirmed: false };
-    const height = await reached('getBlockHeight', [{ commitment: 'finalized' }]);
-    if (height <= entry.height) return entry;
+    if (!await expiredAttempt(entry)) return entry;
     // Fence subsequent account reads at a finalized slot observed after expiry.
     const minContextSlot = await finalizedSlot();
     const { kind, terms, hashHex } = entry.intent;
     const withdrawal = ['withdraw', 'wallet-withdraw', 'platform-withdraw'].includes(kind);
-    const latestStatus = await signatureState(entry.signature, { unanimous: withdrawal });
+    const latestStatus = await signatureState(entry.signature, { unanimous: withdrawal || kind === 'lock' });
     if (latestStatus && ['confirmed', 'finalized'].includes(latestStatus.confirmationStatus)) return entry;
+    // A processed signature is still evidence of a possible execution, not proof of absence.
+    if (kind === 'lock' && latestStatus !== null) return entry;
     if (['lock', 'claim', 'refund'].includes(kind)) {
       const checked = await inspectEscrow({ terms, hashHex, purpose: 'settlement', programId: program,
         ...quorumOptions, commitment: 'finalized', minContextSlot });
@@ -251,16 +255,27 @@ export function createSolanaAdapter({
     for (const raw of saved.entries) {
       const entry = structuredClone(raw);
       if (!entry || typeof entry.id !== 'string' || pending.has(entry.id) ||
-          !['pending', 'retryable', 'done', 'rejected', 'retired-unsent'].includes(entry.phase) ||
+          !['pending', 'retryable', 'done', 'rejected', 'retired-unsent', 'not-executed'].includes(entry.phase) ||
           typeof entry.sent !== 'boolean' || !Number.isSafeInteger(entry.createdAt) || entry.createdAt < 0 ||
           !Number.isSafeInteger(entry.attempt) || entry.attempt < 1 ||
           !['lock', 'claim', 'refund', 'config', 'collector-config', 'platform-config', 'platform-withdraw', 'withdraw', 'wallet-withdraw'].includes(entry.intent?.kind)) throw new Error('Invalid durable intent');
-      slotNumber(entry.height);
+      if (entry.phase === 'not-executed' && entry.intent.kind !== 'lock') throw new Error('Invalid retired lock intent');
+      const height = entry.lastValidBlockHeight ?? entry.height;
+      if (height != null || entry.intent.kind !== 'lock') slotNumber(height);
+      if (entry.height != null && entry.lastValidBlockHeight != null && entry.height !== entry.lastValidBlockHeight) throw new Error('Durable intent expiry mismatch');
+      for (const field of ['lastBroadcastAt', 'legacyObservedAt']) if (entry[field] != null) slotNumber(entry[field]);
       const tx = Transaction.from(Buffer.from(entry.wire, 'base64'));
       if (!keypair || !tx.feePayer.equals(keypair.publicKey) || !tx.verifySignatures() || bs58.encode(tx.signature) !== entry.signature) throw new Error('Durable intent signature or payer mismatch');
       pending.set(entry.id, entry);
     }
     for (const entry of [...pending.values()]) {
+      // Old journals did not date each broadcast. Start a durable observation window rather than mistaking
+      // createdAt (which survives replacement attempts) for the time of the most recent send.
+      if (entry.intent.kind === 'lock' && entry.lastValidBlockHeight == null && entry.height == null &&
+          entry.lastBroadcastAt == null && entry.legacyObservedAt == null) {
+        entry.legacyObservedAt = Date.now();
+        await saveEntry(entry.id, entry);
+      }
       let reconciled;
       try { reconciled = await reconcile(entry); }
       catch { continue; } // Unavailable quorum retains the exact durable attempt.
@@ -277,23 +292,49 @@ export function createSolanaAdapter({
     return Math.max(...slots);
   }
 
-  // What became of this trade's lock attempt, without signing anything: 'none' when no attempt is pending in the
-  // journal or it is proven not executed (failed, or expired and absent in a read fenced after expiry), 'landed'
-  // when it executed, otherwise 'unknown'.
-  async function lockOutcome({ hashHex }) {
+  async function expiredAttempt(entry) {
+    const height = entry.lastValidBlockHeight ?? entry.height;
+    if (height != null) return await reached('getBlockHeight', [{ commitment: 'finalized' }]) > height;
+    const since = entry.lastBroadcastAt ?? entry.legacyObservedAt;
+    if (entry.intent.kind !== 'lock' || !Number.isSafeInteger(since) || Date.now() - since < LEGACY_LOCK_PROOF_MS) return false;
+    // Wall time alone cannot expire a transaction if the chain stopped. Legacy signed bytes still name their
+    // blockhash, so require finalized readers to agree that it is no longer valid as well as the safe age.
+    const blockhash = Transaction.from(Buffer.from(entry.wire, 'base64')).recentBlockhash;
+    return (await readRpcQuorum('isBlockhashValid', [blockhash, { commitment: 'finalized' }], {
+      ...quorumOptions, unanimous: true, select: result => {
+        if (typeof result?.value !== 'boolean') throw new Error('Invalid blockhash validity');
+        return result.value;
+      },
+    })).value === false;
+  }
+
+  // Read-only recovery never signs or sends. Absence requires an expired journaled signature with no status,
+  // followed by an absent finalized escrow fenced after expiry. An absent journal alone proves nothing.
+  async function lockOutcome({ terms, hashHex }) {
+    hex32(hashHex);
     const id = `lock:${hashHex}`, entry = pending.get(id);
-    if (!entry || ['rejected', 'retryable', 'retired-unsent'].includes(entry.phase)) return { ok: true, outcome: 'none' };
-    if (entry.phase === 'done') return { ok: true, outcome: 'landed' };
-    const reconciled = await reconcile(entry);
-    await saveEntry(id, reconciled);
-    const outcome = ['rejected', 'retryable'].includes(reconciled.phase) ? 'none' : reconciled.phase === 'done' ? 'landed' : 'unknown';
-    return { ok: true, outcome };
+    if (entry?.phase === 'not-executed') return { ok: true, outcome: 'none' };
+    const expired = entry ? await expiredAttempt(entry) : false;
+    const minContextSlot = await finalizedSlot();
+    const status = entry ? await signatureState(entry.signature, { unanimous: true }) : undefined;
+    const checked = await inspectEscrow({ terms: entry?.intent.terms ?? terms, hashHex, purpose: 'settlement', programId: program,
+      ...quorumOptions, commitment: 'finalized', minContextSlot });
+    if (checked.ok) return { ok: true, outcome: 'landed' };
+    const absent = checked.reasons.length === 1 && checked.reasons[0].code === 'ESCROW_MISSING';
+    const failed = status?.confirmationStatus === 'finalized' && Boolean(status.err);
+    if (absent && (failed || status === null && (expired || entry?.phase === 'retired-unsent' && !entry.sent))) {
+      // Persist the terminal verdict before returning it. A host retry already waiting in the adapter queue
+      // must not sign a fresh attempt after the buyer has released this trade's wallet commitment.
+      await saveEntry(id, { ...entry, phase: 'not-executed' });
+      return { ok: true, outcome: 'none' };
+    }
+    return { ok: true, outcome: 'unknown' };
   }
 
   async function pendingIntents() {
     const startupError = await ready;
     if (startupError) throw startupError;
-    return [...pending.values()].filter(entry => !['done', 'rejected', 'retired-unsent'].includes(entry.phase)).map(entry => ({
+    return [...pending.values()].filter(entry => !['done', 'rejected', 'retired-unsent', 'not-executed'].includes(entry.phase)).map(entry => ({
       id: entry.id, signature: entry.signature, ageMs: Math.max(0, Date.now() - entry.createdAt),
       createdAt: entry.createdAt, attempt: entry.attempt,
     }));
@@ -307,6 +348,7 @@ export function createSolanaAdapter({
     let signed = false;
     let entry = pending.get(id);
     if (entry && JSON.stringify(entry.intent) !== JSON.stringify(intent)) throw new Error('Intent terms differ from the durable submission');
+    if (entry?.phase === 'not-executed') throw new Error('Lock did not go through');
     const deadline = Date.now() + confirmationTimeoutMs;
     let lastError = 'Transaction confirmation timed out';
     do {
@@ -341,7 +383,8 @@ export function createSolanaAdapter({
         tx.sign(keypair, ...signers.filter(s => !s.publicKey.equals(keypair.publicKey)));
         signed = true; afterSign?.();
         const fresh = { id, intent, phase: 'pending', signature: bs58.encode(tx.signature), wire: tx.serialize().toString('base64'),
-          height: latest.lastValidBlockHeight, sent: false, createdAt: entry?.createdAt ?? Date.now(), attempt: (entry?.attempt ?? 0) + 1 };
+          height: latest.lastValidBlockHeight, lastValidBlockHeight: latest.lastValidBlockHeight,
+          sent: false, createdAt: entry?.createdAt ?? Date.now(), attempt: (entry?.attempt ?? 0) + 1 };
         await saveEntry(id, fresh); // Never send bytes whose durable write failed.
         entry = fresh;
         const height = await reached('getBlockHeight', [{ commitment: 'finalized' }]);
@@ -354,7 +397,7 @@ export function createSolanaAdapter({
         await saveEntry(id, null);
         throw new Error('Signing window closed');
       }
-      entry = { ...entry, sent: true };
+      entry = { ...entry, sent: true, lastBroadcastAt: Date.now() };
       await saveEntry(id, entry); // A crash after this point is conservatively unknown.
       if (!hadPreviousSubmission && sendBefore !== null && Date.now() / 1000 >= sendBefore) {
         await saveEntry(id, { ...entry, phase: 'retired-unsent', sent: false });

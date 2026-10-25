@@ -72,7 +72,8 @@ test('finished trades and reasons in plain words', () => {
   assert.equal(outcome({ role: 'buyer', state }).text, 'Done: you received the TNK');
   assert.equal(outcome({ role: 'seller', state }).text, 'Done: you received the USDC');
   assert.match(outcome({ role: 'buyer', state: { ...state, phase: 'refunded' } }).text, /USDC came back/);
-  assert.equal(outcome({ role: 'seller', state: { ...state, phase: 'lost' } }).tone, 'bad');
+  assert.deepEqual(outcome({ role: 'seller', state: { ...state, phase: 'lost' } }),
+    { tone: 'neutral', text: 'The buyer took the USDC back; your TNK was not sent' });
   assert.equal(outcome({ role: 'seller', state: { ...state, phase: 'aborted', reason: 'Invalid dealing' } }).text, "Called off: the buyer's lock details did not check out. Nothing was locked or sent.");
   assert.equal(plainReason('Timed out: deal'), 'the other side took too long to answer');
   assert.equal(plainReason(undefined), 'no reason given');
@@ -224,5 +225,29 @@ test('seller wording distinguishes an unconfirmed transfer from final coins sent
     assert.match(describeTrade({ ...trade, state: { ...state, phase: 'awaitShares', transferUnknown: false, transferFinal: true } }).now, /was sent/);
     const lost = outcome({ ...trade, state: { ...state, phase: 'lost' } });
     assert.match(lost.text, /still unconfirmed/); assert.doesNotMatch(lost.text, /had been sent/);
+    const unsent = outcome({ ...trade, state: { ...state, phase: 'lost', transferUnknown: false } });
+    assert.equal(unsent.tone, 'neutral'); assert.match(unsent.text, /was not sent/);
+    for (const evidence of [{ txHash: hex() }, { transferFinal: true }]) {
+      const sent = outcome({ ...trade, state: { ...state, phase: 'lost', transferUnknown: false, ...evidence } });
+      assert.equal(sent.tone, 'bad'); assert.match(sent.text, /had been sent/);
+    }
+  }
+});
+
+test('expired offer sizes and history distinguish unsent losses from recorded or uncertain transfers', async () => {
+  for (const [evidence, left] of [[{}, '4'], [{ transferUnknown: false, transferFinal: false }, '4'],
+    [{ txHash: hex() }, '2.5'], [{ transferUnknown: true }, '2.5'], [{ transferFinal: true }, '2.5']]) {
+    const fx = traderFixture(), old = fx.role.host.trades.get('t-sell');
+    const expired = fx.role.store.list('offer-').map(k => fx.role.store.get(k).offer).find(o => o.expiresAt < fx.now);
+    const trade = { ...old, state: { ...old.state, offerId: expired.offerId, phase: 'lost', ...evidence } };
+    fx.role.host.trades.set(old.key, trade);
+    const m = model(fx), attention = (await m.state()).trader.attention;
+    assert.ok(attention.find(a => a.kind === 'expired').text.includes(`; ${left} TNK were not traded.`));
+    const history = (await m.list('trader.history')).rows.find(t => t.key === old.key);
+    assert.deepEqual(history.outcome, outcome(trade));
+    if (left === '4') {
+      assert.match(history.outcome.text, /was not sent/);
+      assert.match(attention.find(a => a.kind === 'failed' && a.text.includes('USDC back')).text, /was not sent/);
+    }
   }
 });

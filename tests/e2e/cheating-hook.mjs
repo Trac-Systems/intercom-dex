@@ -108,6 +108,9 @@ TradeHost.prototype.addTrade = function(trade) {
     const send = this.trac.sendTransfer.bind(this.trac);
     this.trac.sendTransfer = input => {
       const selected = JSON.parse(readFileSync(process.env.DEX_E2E_ATTACK_FILE, 'utf8'));
+      if (selected.kind === 'seller-no-send-refund' && input.terms.seller.tracAddr === selected.sellerAddr) {
+        throw new Error('test transfer adapter unavailable before submission');
+      }
       if (selected.kind === 'seller-no-send' && input.terms.seller.tracAddr === selected.sellerAddr) {
         return Promise.resolve({ ok: false, reason: 'test seller deliberately withholds transfer' });
       }

@@ -2,6 +2,7 @@ import { PublicKey } from '@solana/web3.js';
 import { isSolanaAddress, isTracAddress } from '../core/addresses.js';
 import { quoteAmount, registryPair } from '../market/assets.js';
 import { calculateFees } from '../solana/escrow.js';
+import { releasesOfferAmount } from '../core/offer-inventory.js';
 
 export const DECIMALS = Object.freeze({ USDC: 6, SOL: 9, TNK: 18, RESET: 8 });
 // Keep enough for transaction fees and ATA/escrow rent, and two MSB transfers.
@@ -66,7 +67,7 @@ export function accountBalances({ balances, offers = [], trades = [], registry, 
     let consumed = 0n;
     for (const t of trades) {
       const s = t.state;
-      if (s.mode !== 'maker' || s.offerId !== offer.offerId || ['aborted', 'refunded'].includes(s.phase)) continue;
+      if (s.mode !== 'maker' || s.offerId !== offer.offerId || releasesOfferAmount(t)) continue;
       consumed += BigInt((s.terms ?? s.draft).baseAmount);
     }
     const remaining = max(0n, BigInt(offer.baseAmount) - consumed);

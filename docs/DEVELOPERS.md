@@ -102,6 +102,7 @@ the traders, each as a peer plus its role process.
 ```sh
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs reset-sell refund
+DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs unsent-refund
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs relay
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs relay-none
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs fee-change
@@ -113,6 +114,10 @@ Without arguments it runs `wallets`, `reset-sell`, `tnk-buy`, `cheating-dealer`,
 `relay` and `relay-none` on their own, each with fresh peers. The stack prints its run folder at start; the logs of
 every process are in its `logs` folder. `DEX_DEBUG=1` adds message and adapter logs. It stops every process it
 started on exit.
+
+`unsent-refund` leaves the seller's transfer adapter unavailable before submission until the buyer refunds.
+It checks that the seller's open offer regains the amount, is announced again, and retains that amount after
+a seller restart. Both traders' USDC, TNK and RESET balances must return to or stay at their starting amounts.
 
 `address-proof` requires a registry minimum of at least `0.1.34`. It sends a correctly DEX-signed offer naming a
 funded third-party Trac address without proof, then a take with a substituted address. The venue and counterparty

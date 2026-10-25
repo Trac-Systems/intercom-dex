@@ -1,6 +1,7 @@
 import { inTheMoney } from '../locks/client.js';
 import { existsSync } from 'node:fs';
 import { isFinished } from '../roles/host.js';
+import { releasesOfferAmount } from '../core/offer-inventory.js';
 import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
 import { open, createReplayCache } from '../core/envelope.js';
 import { supportedBase, tradePrice, registryPair } from '../market/assets.js';
@@ -122,6 +123,7 @@ export function outcome(trade, note = null) {
   const s = trade.state, t = s.terms ?? s.draft, base = t.base.id;
   if (s.phase === 'complete') return { tone: 'good', text: trade.role === 'buyer' ? `Done: you received the ${base}` : 'Done: you received the USDC' };
   if (s.phase === 'refunded') return { tone: 'neutral', text: 'Your USDC came back; the seller did not finish in time' };
+  if (s.phase === 'lost' && releasesOfferAmount(trade)) return { tone: 'neutral', text: `The buyer took the USDC back; your ${base} was not sent` };
   if (s.phase === 'lost') return { tone: 'bad', text: s.transferUnknown
     ? `The buyer took the USDC back; your ${base} transfer is still unconfirmed`
     : `The key was not released in time and the buyer took the USDC back; your ${base} had been sent` };
@@ -132,7 +134,7 @@ function offerSizes(offer, trades) {
   let reserved = 0n, filled = 0n;
   for (const t of trades) {
     const s = t.state;
-    if (s.offerId !== offer.offerId || s.mode !== 'maker' || ['aborted', 'refunded'].includes(s.phase)) continue;
+    if (s.offerId !== offer.offerId || s.mode !== 'maker' || releasesOfferAmount(t)) continue;
     const units = BigInt((s.terms ?? s.draft).baseAmount);
     if (isFinished(t)) filled += units; else reserved += units;
   }

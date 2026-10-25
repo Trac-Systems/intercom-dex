@@ -477,7 +477,7 @@ stale `accept.slot` rule above is the explicit additional negotiation rejection.
 Timers, rather than unrelated messages, drive deadline transitions. Late
 negotiation messages cannot start new funding or payment.
 
-Actions are plain objects: `send`, `prove`, `checkProof`, `persist`, `lockEscrow`, `checkEscrow`, `reserveEscrow`,
+Actions are plain objects: `send`, `prove`, `checkProof`, `persist`, `lockEscrow`, `lockOutcome`, `checkEscrow`, `reserveEscrow`,
 `sendTransfer`, `verifyTransfer`, `publishShare`, `claim`, `refund`, `abort`.
 Buyers also emit `acquireCertificate` and `prepareDeal`, both carrying `tradeId`.
 The host returns `certificateAssigned:{tradeId,now,certificate}` (entry or null),
@@ -490,8 +490,9 @@ Every adapter result carries `type`, `now`, and its `tradeId`:
 | `proved` | `ok:true, proof` attaches the certificate; `ok:false, reason?` aborts before locking |
 | `proofChecked` | `ok:boolean` completes a pending certificate check |
 | `escrowLocked` | `ok:true, hashHex`; confirms the lock transaction |
-| Ambiguous lock | `ok:false, unknown:true, hashHex?`; sets `locked:true` and preserves refund recovery |
+| Ambiguous lock | `ok:false, unknown:true, hashHex?`; sets `locked:true, lockUnknown:true` and preserves outcome/refund recovery |
 | Definite lock failure | `ok:false` without `unknown:true`; proves nothing was sent, clears `lockAttempted` and aborts |
+| `lockOutcome` | `outcome:'none'|'landed'|'unknown', hashHex?`; proven absence aborts an attempted/unknown lock, landed clears ambiguity, unknown waits |
 | `escrowReserved` | `hashHex, ok, reservedFor?`; see the reservation contract below |
 | `escrowChecked` | `ok:true, hashHex, status:'active'`; adapter verified the full terms on an independent RPC quorum |
 | Pending escrow check | `ok:false, hashHex, status:'missing'|'pending'`; seller retries on later ticks before sendBy |
@@ -581,9 +582,11 @@ resume its journaled transaction. At `refundAfter`, a tick or resume while still
 `refunding` and emits `{type:'refund',tradeId,terms,hashHex}`. Existing funded
 locks enter refunding at the same deadline. Definite `escrowLocked` failure is
 the explicit exception: it proves no submission and clears `lockAttempted`
-before aborting. A settlement check reporting `ok:false,status:'missing'`
-without `unknown:true` at/after `refundAfter` also clears `locked` and
-`lockAttempted` and aborts, but only if `lockUnknown` was true. An uncertain read
+before aborting. Attempted and unknown locks also poll `lockOutcome` every 60
+seconds, including before `refundAfter`. A missing escrow alone cannot abort:
+the journal and finalized chain must prove nonexecution as described below.
+Only then does the buyer clear `locked`, `lockUnknown`, `lockAttempted` and its
+retry timers and abort with `Lock did not go through`. An uncertain read
 or a confirmed lock is never written off this way. Consequently new transitions
 cannot produce `aborted && lockAttempted && !locked`; no migration of old
 abandoned states is performed by this core.
@@ -645,7 +648,7 @@ fresh envelope nonces; duplicate protocol messages leave receivers unchanged.
 | Buyer `proving` | `prove` with the same private scalar and statement before sendBy; otherwise abort |
 | Buyer `awaitAcks` | Last deal; preserve acks and evaluate the lock/cutoff on the next tick |
 | Seller or signer `checkingProof` | `checkProof` with the saved statement and proof, subject to their deadlines |
-| Buyer `locking` | `lockEscrow` before sendBy (the adapter signs new bytes only before `sendBy - LOCK_START_MARGIN_SEC`); wait afterward, and enter `refunding` at refundAfter |
+| Buyer `locking` | `lockEscrow` before sendBy (new bytes only before `sendBy - LOCK_START_MARGIN_SEC`); `lockOutcome` immediately and every 60 seconds afterward; unresolved attempts enter `refunding` at refundAfter |
 | Buyer `refunding` | `refund`, plus any pending settlement check |
 | Buyer with pending settlement check | `checkEscrow` with `purpose:'settlement'` |
 | Seller `awaitReady` | `checkEscrow`; reset the cached positive verdict and rebuild the in-flight flag |
@@ -718,7 +721,21 @@ requiring this trade's `H` and `holdUntil >= refundAfter`. At k acks, only while
 `now < sendBy - LOCK_START_MARGIN_SEC`, it enters `locking`, records
 `lockAttempted:true`, and issues `{type:'lockEscrow',tradeId,terms,hashHex:H}`.
 At the cutoff without a first lock it aborts with `Signers did not confirm`.
-Failed proving aborts without a lock. Existing attempted-lock recovery is unchanged.
+Failed proving aborts without a lock. Attempted or unknown locks issue `lockOutcome`
+every 60 seconds and immediately on resume. The adapter journals each signature,
+`lastValidBlockHeight` (`height` in older records) and `lastBroadcastAt` before sending.
+Only an expired signature with no status and an absent finalized escrow, read at a
+slot fenced after expiry, proves nonexecution. The buyer then clears its lock flags
+and aborts with `Lock did not go through`, releasing its wallet commitment.
+A finalized failed signature plus finalized escrow absence is also definitive.
+An existing escrow resumes normal settlement; an unknown read keeps waiting.
+Legacy records without either expiry-height field require a ten-minute safe age
+since the last broadcast and a finalized invalid blockhash. If the broadcast date
+is absent, a durable `legacyObservedAt` starts that safe interval on recovery.
+Absence of a journal entry alone cannot prove nonexecution. No replacement lock
+is signed at or after `sendBy - LOCK_START_MARGIN_SEC`. Before returning `none`,
+the adapter durably retires the lock as `not-executed`; queued or restarted host
+retries cannot broadcast it or sign a replacement after the commitment is freed.
 At `draft.sendBy`, ticks, resume and proof completion while proving abort with
 `Negotiation deadline expired`; a later completion cannot revive that trade.
 

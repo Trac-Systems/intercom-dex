@@ -18,6 +18,7 @@ import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 import { createLocksClient } from '../locks/client.js';
 import { takerFunded } from './taker-funds.js';
 import { addressProofRequired, validAddressProof } from '../core/address-proof.js';
+import { releasesOfferAmount } from '../core/offer-inventory.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
@@ -386,21 +387,22 @@ export class Trader {
 
   // Sizes of an own offer, derived from this maker's trades on it (trades are persisted, so this survives restarts):
   // a trade holds its amount while it runs, keeps it once it completed (or the seller's tokens may have left), and
-  // gives it back when it ended before any funds moved (aborted) or the buyer was refunded.
+  // gives it back when aborted, when our buyer was refunded, or when our seller never sent before a refund.
   #inventory(offer) {
     let reserved = 0n, filled = 0n;
     for (const t of this.host.trades.values()) {
       const s = t.state;
-      if (s.offerId !== offer.offerId || s.mode !== 'maker' || ['aborted', 'refunded'].includes(s.phase)) continue;
+      if (s.offerId !== offer.offerId || s.mode !== 'maker' || releasesOfferAmount(t)) continue;
       const amount = BigInt(s.terms?.baseAmount ?? s.draft.baseAmount);
       if (isFinished(t)) filled += amount; else reserved += amount;
     }
     return { reserved, filled, available: BigInt(offer.baseAmount) - reserved - filled };
   }
 
-  async #reannounce() {
+  async #reannounce(offerId = null) {
     const now = nowSec();
     for (const [id, offer] of this.mine) {
+      if (offerId !== null && id !== offerId) continue;
       const inv = this.#inventory(offer);
       if (offer.expiresAt <= now || inv.filled >= BigInt(offer.baseAmount)) { this.mine.delete(id); continue; }
       if (!validAddressProof(offer.maker, this.addressProofPolicy())) {
@@ -488,6 +490,9 @@ export class Trader {
       }
     }
     // Maker bookkeeping and the settlement report for the service.
+    if (s.mode === 'maker' && s.phase === 'lost' && before.phase !== 'lost' && releasesOfferAmount(trade)) {
+      await this.#reannounce(s.offerId).catch(e => this.log('offer announce', e.message));
+    }
     if (s.phase === 'complete' && trade.role === 'seller' && this.#recordReport(trade)) await this.#sendReports();
   }
 

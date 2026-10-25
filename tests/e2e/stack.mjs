@@ -718,6 +718,41 @@ try {
         assert.equal(refused.reason, name === 'cheating-dealer' ? 'Invalid dealing' : 'Invalid lock certificate');
       }
     }
+    if (name === 'unsent-refund') {
+      await setAttack({ kind: 'seller-no-send-refund', sellerAddr: wallets.alice.address });
+      const offer = await api('alice', 'POST', '/offer', { pair: 'RESET/USDC', side: 'sell', baseAmount: '10000', price: '1000', ttlSec: 3600 });
+      await until('unsent offer visible', async () => (await api('bob', 'GET', '/status')).offers.some(o => o.offerId === offer.offerId));
+      const taken = await api('bob', 'POST', '/take', { offerId: offer.offerId, price: offer.price });
+      await until('buyer locked without seller transfer', async () => {
+        const buyer = (await api('bob', 'GET', '/status')).trades.find(t => t.key === taken.key);
+        const seller = (await api('alice', 'GET', '/status')).trades.find(t => t.key.startsWith(offer.offerId));
+        return buyer?.phase === 'locked' && seller?.phase === 'transferring';
+      }, 240000);
+      const reserved = (await api('alice', 'GET', '/status')).mine.find(o => o.offerId === offer.offerId);
+      assert.deepEqual([reserved.available, reserved.reserved, reserved.filled], ['0', '10000', '0']);
+      log('buyer locked; seller sent nothing; waiting for refund');
+      await until('buyer refunded and seller reconciled', async () => {
+        const buyer = (await api('bob', 'GET', '/status')).trades.find(t => t.key === taken.key);
+        const seller = (await api('alice', 'GET', '/status')).trades.find(t => t.key.startsWith(offer.offerId));
+        return buyer?.phase === 'refunded' && seller?.phase === 'lost';
+      }, (PARAMS.refundSec + 240) * 1000);
+      const restored = async () => {
+        const o = (await api('alice', 'GET', '/status')).mine.find(o => o.offerId === offer.offerId);
+        assert.ok(o, 'the unexpired offer remains open');
+        assert.deepEqual([o.available, o.reserved, o.filled], ['10000', '0', '0']);
+      };
+      await restored();
+      await until('restored offer announced', async () => (await api('bob', 'GET', '/status')).offers.some(o => o.offerId === offer.offerId && o.baseAmount === '10000'), 60000);
+      await roleProc.alice.stop(); await startRole('alice');
+      await restored();
+      for (const n of ['alice', 'bob']) {
+        assert.equal(await usdcOf(n), before[n], n + ' USDC returned or unchanged');
+        assert.equal(await resetOf(n), before[n + 'Reset'], n + ' RESET never moved');
+        assert.equal(await tnkOf(n), before[n + 'Tnk'], n + ' TNK never moved');
+      }
+      results.push({ name, ok: true, seller: 'lost', buyer: 'refunded', available: '10000', filled: '0', restart: true });
+      continue;
+    }
     if (name === 'refund') {
       // Gate the buyer after signed terms, then stop the seller before the deal can authorize sending.
       const gate = { kind: name, buyerKey: ids.alice.publicKey, release: false }; await setAttack(gate);

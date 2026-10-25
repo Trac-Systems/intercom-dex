@@ -345,11 +345,13 @@ Each of these ends a trade before the lock (buyer) or before the transfer (selle
 Other reasons come from a chain read or a failed transaction, for example `Escrow verification failed` or
 `Transfer not sent before the deadline: <reason>`. After any abort you may take again; check `dex_status` first.
 
-A buyer whose lock transaction fails keeps retrying in `locking` until `sendBy`. Because a lock sent earlier could
-still land, the program then waits for `refundAfter` before it decides. If no lock ever landed, the trade ends
-`aborted` with `The escrow lock never ran; nothing to refund`. Until then its USDC stays in the wallet but counts as
-committed. This happens, for example, when the platform fee changed after the terms were signed (the program logs
-`platform fee changed, take again`).
+A buyer whose lock transaction has an unknown outcome checks again every 60 seconds, including after a restart.
+Once its blockhash expires at finalized block height, the signature has no status and the finalized escrow is
+absent, the trade ends `aborted` with `Lock did not go through` and its USDC becomes available again. An existing
+escrow follows normal settlement; unavailable or conflicting reads keep the funds committed. Older journals
+without expiry metadata wait at least ten minutes since the last recorded broadcast (or the first recovery
+observation if that date is missing), and also require the blockhash to be invalid at finalized commitment.
+New lock bytes are never signed at or after `sendBy - 120`; existing bytes may still be reconciled.
 
 ## Trading on your own
 
