@@ -6,6 +6,7 @@ import { selectCommittee } from './committee.js';
 import { RANDOMNESS, ACCEPT_SLOT_BEHIND, STEP_BUDGET_MS, tradeId, tradeRandomness, validateTerms } from './terms.js';
 import { SOFTWARE, meetsVersion } from './software.js';
 import { registryPair } from '../market/assets.js';
+import { addressProofRequired, validTermsAddressProofs } from './address-proof.js';
 
 export function seededRng(seed, domain) {
   const key = hexToBytes(seed, 32);
@@ -22,9 +23,10 @@ export function seededRng(seed, domain) {
   };
 }
 
-export function createTrader(role, { mode, offerId, terms, registry, nonce, entropy, now }) {
+export function createTrader(role, { mode, offerId, terms, registry, nonce, entropy, now, networkId, requireAddressProof = addressProofRequired(registry) }) {
   if (!['buyer', 'seller'].includes(role) || !['maker', 'taker'].includes(mode) || !Number.isSafeInteger(now) || now < 0) throw new TypeError('Invalid trader configuration');
   const draft = validateTerms(terms), reg = registrySchema.parse(registry);
+  if (!validTermsAddressProofs(draft, { networkId, now, required: requireAddressProof })) throw new Error('Invalid Trac address proof');
   const pair = registryPair(reg, draft.pair);
   if (!meetsVersion(SOFTWARE, reg.minSoftware)) throw new Error('update required');
   if (stableJSON(draft.base) !== stableJSON(pair.base) || BigInt(draft.baseAmount) < BigInt(pair.minBaseAmount)) throw new Error('Invalid registry pair');
@@ -36,6 +38,7 @@ export function createTrader(role, { mode, offerId, terms, registry, nonce, entr
       draft.fees.platformFeeBps !== reg.fee.platformFeeBps || draft.fees.tradeFeeBps !== reg.fee.tradeFeeBps || draft.fees.collector !== reg.fee.collector ||
       draft.fees.signerShareBps !== reg.fee.signerShareBps || now >= draft.sendBy) throw new Error('Terms do not match registry or time');
   return { role, mode, offerId, draft, registry: reg, nonce, entropy, now, phase: 'new',
+    requireAddressProof,
     self: draft[role].dexKey, peer: draft[role === 'buyer' ? 'seller' : 'buyer'].dexKey,
     terms: null, tradeId: null, peerCommit: null, peerNonce: null, acks: [], shares: [], locked: false };
 }
@@ -46,6 +49,23 @@ export function sendAction(state, kind, body) {
 
 export function abortTransition(state, reason) {
   return { state: { ...state, phase: 'aborted', reason }, actions: [{ type: 'abort', tradeId: state.tradeId, reason }] };
+}
+
+export function refusalReason(state, reason) {
+  if (reason === 'seller-struck') return state.role === 'seller'
+    ? 'Signers refused: your wallet is paused after unsent trades; contact the venue'
+    : 'The seller is paused after unsent trades; contact the venue';
+  if (state.role !== 'seller') return 'The seller cannot deliver this trade right now';
+  const t = state.terms ?? state.draft, scale = 10n ** BigInt(t.base.decimals), units = BigInt(t.baseAmount);
+  const fraction = (units % scale).toString().padStart(t.base.decimals, '0').replace(/0+$/, '');
+  return `Signers refused: your wallet does not hold ${units / scale}${fraction ? '.' + fraction : ''} ${t.base.id} + TNK fee (or its balance could not be read)`;
+}
+
+// The peer may hear the refusal first. Keep the local party's explanation when its courtesy abort arrives first.
+export function peerAbortReason(state, reason) {
+  if (/^(The seller cannot deliver this trade right now|Signers refused: your wallet does not hold )/.test(reason)) return refusalReason(state, 'seller-funds');
+  if (/^(The seller is paused after unsent trades|Signers refused: your wallet is paused after unsent trades)/.test(reason)) return refusalReason(state, 'seller-struck');
+  return 'Peer aborted: ' + reason;
 }
 
 export function eventState(state, event) {
@@ -134,7 +154,7 @@ export function verifiedMessage(state, event) {
     ? [terms.buyer.dexKey, terms.seller.dexKey].includes(m.from) : m.from === state.peer;
   if (['deal', 'working', 'refunded'].includes(m.kind)) allowed = m.from === terms.buyer.dexKey;
   if (['transferSent', 'claimed'].includes(m.kind)) allowed = m.from === terms.seller.dexKey;
-  if (m.kind === 'ack') allowed = !!state.terms?.committee.some(member => member.dexKey === m.from);
+  if (['ack', 'refused'].includes(m.kind)) allowed = !!state.terms?.committee.some(member => member.dexKey === m.from);
   if (m.kind === 'sharePublish') allowed = state.terms?.committee[m.body.signerIndex - 1]?.dexKey === m.from;
   if (!allowed) throw new Error('Unauthorized message sender or kind');
   if (['accept', 'reveal'].includes(m.kind) &&
@@ -146,7 +166,8 @@ export function verifiedMessage(state, event) {
 
 function participant(draft, role) {
   const p = draft[role];
-  return { dexKey: p.dexKey, tracAddr: p.tracAddr, solAddr: p.solPayer ?? p.solRecipient };
+  return { dexKey: p.dexKey, tracAddr: p.tracAddr, solAddr: p.solPayer ?? p.solRecipient,
+    ...(p.tracProof ? { tracProof: p.tracProof } : {}) };
 }
 
 export function negotiationStep(state, event, message) {

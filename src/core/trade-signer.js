@@ -5,21 +5,25 @@ import { checkDealShape, lockStatement, signerShareCheck } from './dealing.js';
 import { hexKey } from './schemas.js';
 import { tradeId, transferNonce, validateTerms } from './terms.js';
 import { abortTransition, resumeActions, runStep, sendAction } from './trade-common.js';
+import { validTermsAddressProofs } from './address-proof.js';
 
-export function createSigner({ terms, signerIndex, boxSecret, now, usedTx = {} }) {
+export function createSigner({ terms, signerIndex, boxSecret, now, usedTx = {}, networkId, requireAddressProof = false }) {
   const t = validateTerms(terms);
+  if (!validTermsAddressProofs(t, { networkId, now, required: requireAddressProof })) throw new Error('Invalid Trac address proof');
   if (!Number.isSafeInteger(now) || now < 0 || now >= t.sendBy || !Number.isSafeInteger(signerIndex) ||
       signerIndex < 1 || signerIndex > t.committee.length || bytesToHex(boxPublic(boxSecret)) !== t.committee[signerIndex - 1].boxKey) throw new Error('Invalid signer configuration');
   if (!usedTx || Object.getPrototypeOf(usedTx) !== Object.prototype) throw new TypeError('Invalid used-tx snapshot');
   for (const [tx, id] of Object.entries(usedTx)) { hexKey.parse(tx); hexKey.parse(id); }
   return { role: 'signer', phase: 'awaitTermsSignatures', terms: t, tradeId: tradeId(t), signerIndex,
     self: t.committee[signerIndex - 1].dexKey, boxSecret: typeof boxSecret === 'string' ? boxSecret : bytesToHex(boxSecret),
-    now, signatures: [], usedTx: { ...usedTx } };
+    now, requireAddressProof, signatures: [], usedTx: { ...usedTx } };
 }
 
 // The transfer must be final before this. A rescued trade (rescueTrade) has until shortly before the refund time.
 const transferDeadline = s => s.rescueUntil ?? s.terms.sendBy + s.terms.graceSec;
 export const RESCUE_MARGIN_SEC = 600;
+// The host repeats acks every ten seconds. Failed balance checks use that same cadence.
+export const SELLER_FUNDS_RETRY_SEC = 10;
 
 // An operator rescue for a trade that expired only because the seller's transfer became final late: the signer
 // checks the transfer again, exactly as before, with a deadline RESCUE_MARGIN_SEC before the buyer's refund time.
@@ -30,6 +34,11 @@ export function rescueTrade(state, now) {
 }
 
 const proofAction = s => ({ type: 'checkProof', tradeId: s.tradeId, statement: lockStatement(s.deal), proof: s.deal.proof });
+const fundsAction = s => ({ type: 'checkSellerFunds', tradeId: s.tradeId, seller: s.terms.seller.tracAddr });
+const checkFunds = s => {
+  s.sellerFundsRetryAt = s.now + SELLER_FUNDS_RETRY_SEC;
+  return { state: s, actions: [fundsAction(s)] };
+};
 const shareRecord = s => ({ type: 'persist', scope: 'signerShare', tradeId: s.tradeId,
   record: { terms: s.terms, signerIndex: s.signerIndex, share: s.share, H: s.H,
     commitments: s.deal.commitments, holdUntil: s.terms.refundAfter } });
@@ -46,10 +55,13 @@ export function step(state, event) {
   return runStep(state, event, (s, e, m) => {
     const committed = ['holding', 'verifyingTransfer', 'persistingTransfer', 'published'].includes(s.phase);
     if (['aborted', 'expired'].includes(s.phase)) return null;
+    if (['persistingShare', 'checkingSellerFunds'].includes(s.phase) &&
+        e.now >= Math.min(s.terms.sendBy, s.sellerFundsDeadline ?? s.terms.sendBy)) return abortTransition(s, 'Signers did not confirm');
     if (s.phase === 'checkingProof' && e.now >= s.terms.sendBy + s.terms.graceSec) return abortTransition(s, 'Transfer verification window expired');
     if (e.type === 'resume') {
       if (s.phase === 'checkingProof') return resumeActions(s, [proofAction(s)]);
       if (s.phase === 'persistingShare') return resumeActions(s, [shareRecord(s)]);
+      if (s.phase === 'checkingSellerFunds') return checkFunds(s);
       if (s.phase === 'verifyingTransfer') return resumeActions(s, [verifyAction(s)]);
       if (s.phase === 'persistingTransfer') {
         s.reserveRetryAt = null;
@@ -59,6 +71,10 @@ export function step(state, event) {
       return resumeActions(s);
     }
     if (e.type === 'error') {
+      if (s.phase === 'checkingSellerFunds') {
+        s.sellerFundsRetryAt = e.now + SELLER_FUNDS_RETRY_SEC;
+        return { state: s, actions: [] };
+      }
       if (s.phase === 'persistingTransfer') {
         s.reserveRetryAt = e.now + 10;
         return { state: s, actions: [] };
@@ -89,6 +105,7 @@ export function step(state, event) {
       s.deal = m.body;
       s.H = m.body.H;
       s.share = bytesToHex(le32(result.share));
+      s.sellerFundsDeadline = Math.min(s.terms.sendBy, e.now + STEP_BUDGET_MS.acks / 1000);
       s.phase = 'checkingProof';
       return { state: s, actions: [proofAction(s)] };
     }
@@ -102,6 +119,22 @@ export function step(state, event) {
       if (e.tradeId !== s.tradeId) return null;
       if (e.ok === false && e.unknown !== true) return abortTransition(s, 'Share persistence failed');
       if (e.ok !== true || e.now >= s.terms.sendBy + s.terms.graceSec) return null;
+      s.sellerFundsDeadline ??= Math.min(s.terms.sendBy, e.now + STEP_BUDGET_MS.acks / 1000);
+      s.phase = 'checkingSellerFunds';
+      return checkFunds(s);
+    }
+    if (e.type === 'sellerFunds' && s.phase === 'checkingSellerFunds' && e.tradeId === s.tradeId) {
+      if (e.ok === false) {
+        s.sellerFundsRetryAt = e.now + SELLER_FUNDS_RETRY_SEC;
+        return { state: s, actions: [sendAction(s, 'refused', { tradeId: s.tradeId,
+          reason: e.refusalReason === 'seller-struck' ? 'seller-struck' : 'seller-funds' })] };
+      }
+      if (e.ok !== true) return null;
+      if (typeof e.feeTnk !== 'string' || !/^(0|[1-9][0-9]*)$/.test(e.feeTnk)) return null;
+      // The host durably saves this holding state before sending the first ack. The terms reserve the base amount;
+      // this fee also reserves TNK across trades in other base assets. Old holding states remain valid on upgrade.
+      s.sellerFundsReservation = { feeTnk: e.feeTnk };
+      s.sellerAddressProven = e.sellerAddressProven === true;
       s.phase = 'holding';
       return { state: s, actions: [sendAction(s, 'ack', { tradeId: s.tradeId, H: s.H, holdUntil: s.terms.refundAfter })] };
     }
@@ -141,6 +174,7 @@ export function step(state, event) {
       return { state: s, actions: [publicationAction(s)] };
     }
     if (e.type === 'tick') {
+      if (s.phase === 'checkingSellerFunds' && e.now >= s.sellerFundsRetryAt) return checkFunds(s);
       if (s.phase === 'persistingTransfer' && s.reserveRetryAt && e.now >= s.reserveRetryAt) {
         s.reserveRetryAt = null;
         return { state: s, actions: [reservationAction(s)] };

@@ -9,6 +9,13 @@ DEX protocol in [SPEC.md](SPEC.md). Enabling locks does not change its messages,
 A trader uses one peer with `locks: true`; signers use dedicated locks peers. Set `locks.venueKey` in the trader
 configuration to pin the separate venue. The trader saves separate locks keys and journals in its encrypted store.
 
+Spot address proofs activate at DEX registry minimum 0.1.34. Locks use a separate admission rule: a party's `trac`
+field is a chosen receiving address, not evidence of wallet ownership or available funds. Signers verify finalized
+funding at the committee-generated lock address; the venue and clients require the committee's matching posted
+attestations. Put holders also fund their committee-generated asset lock before opening. Naming another wallet
+cannot substitute its balance for either lock. Release shares are encrypted to the winning party's signed `boxKey`.
+Locks offers do not establish address ownership for spot offers, chat identities or seller strikes.
+
 ## What each product does
 
 | Product | Maker locks | Taker pays to open | Payment before the deadline | Winner if paid in time | Winner otherwise |

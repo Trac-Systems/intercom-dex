@@ -25,6 +25,19 @@ export function isTracAddress(text) {
   return bits < 5 && (acc & ((1 << bits) - 1)) === 0 && count === 32;
 }
 
+// The bech32m payload is the Trac wallet's Ed25519 public key, not a hash of it.
+export function tracPublicKey(address) {
+  if (!isTracAddress(address)) throw new Error('Invalid Trac address');
+  const bytes = [];
+  let acc = 0, bits = 0;
+  for (const c of address.toLowerCase().slice(5, -6)) {
+    acc = ((acc << 5) | CHARSET.indexOf(c)) & 0xfff;
+    bits += 5;
+    if (bits >= 8) { bits -= 8; bytes.push((acc >>> bits) & 255); }
+  }
+  return Uint8Array.from(bytes);
+}
+
 export function isSolanaAddress(text) {
   if (typeof text !== 'string' || text.length < 32 || text.length > 44) return false;
   const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';

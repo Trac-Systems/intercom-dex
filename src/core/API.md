@@ -306,6 +306,21 @@ The venue fills these only after settlement verification, from terms' `seller.so
 
 ## Terms and signed messages
 
+`core/address-proof.js` exports `createAddressProof(wallet, {networkId,dexKey,expiresAt})`,
+`validAddressProof(party, {networkId,now,validUntil?,required?})`, `validTermsAddressProofs(terms, policy)` and
+`addressProofRequired(registry)`. `createTracAdapter().proveAddress({dexKey,expiresAt})` uses the unlocked Trac
+wallet and pinned network without making a transaction. A participant's `tracProof` is `{expiresAt,signature}`;
+the signature binds its Trac address and DEX key to that network and expiry. It is omitted before the current
+registry minimum reaches `0.1.34` and required for both traders on new admissions afterwards. See
+[the protocol](../../docs/SPEC.md#terms) and [rollout order](../../docs/OPERATORS.md#activating-trac-address-proofs-0134).
+
+`createBuyer`, `createSeller` and `createSigner` accept `networkId` and `requireAddressProof` in their configuration.
+Trader reducers derive the default requirement from their registry; the live signer and trader runners additionally
+apply the current registry minimum when admitting trades on older snapshots. `TradeHost` rechecks its
+`addressProofRequired()` callback before the seller balance lookup and before accepting its result. Committed
+signer shares bypass these admission checks on recovery. `MakerFunds` takes an `addressProof()` policy callback;
+an invalid or missing required proof always hides an offer, including while balances are unknown.
+
 `schemas.js` is the authoritative, exact wire field specification. Terms include:
 
 ```js

@@ -3,6 +3,7 @@ import { parseBody } from '../core/schemas.js';
 import { sha256Hex, stableJSON } from '../core/canonical.js';
 import { validOffer, nowSec } from '../roles/common.js';
 import { priceUnits } from '../market/assets.js';
+import { validTermsAddressProofs } from '../core/address-proof.js';
 
 const DAY = 86400, BOUND = 10000;
 // One record per entry, so an accepted message writes only what it changed.
@@ -24,7 +25,8 @@ const change = (last, first) => {
 
 // Inputs have already passed envelope authentication and registry admission in MarketFeed.
 export class MarketView {
-  constructor({ store, now = nowSec, history }) {
+  constructor({ store, now = nowSec, history, addressProof = () => ({ required: false }) }) {
+    this.addressProof = addressProof;
     this.store = store; this.now = now; this.history = history;
     this.seen = new Map(load(store, SEEN));
     this.trades = new Map(load(store, TRADE).map(([id, t]) => [id, parseBody('tradeLog', t)]));
@@ -39,7 +41,11 @@ export class MarketView {
   #prune() {
     const now = this.now();
     for (const [id, row] of this.seen) if (row.expiresAt <= now) { this.store.delete(SEEN + id); this.seen.delete(id); }
-    for (const [id, row] of this.offers) if (row.offer.expiresAt <= now || row.at <= now - 300) { this.offers.delete(id); this.dirty = true; }
+    // Signatures were verified at intake and cover the offer's whole lifetime. Activation only invalidates
+    // unproven cached offers; re-verifying every cached signature on every incoming packet would be quadratic.
+    const requireProof = this.addressProof().required;
+    for (const [id, row] of this.offers) if (row.offer.expiresAt <= now || row.at <= now - 300 ||
+      requireProof && !row.offer.maker.tracProof) { this.offers.delete(id); this.dirty = true; }
     for (const [id, row] of this.terms) if (row.at <= now - DAY) { this.store.delete(TERMS + id); this.terms.delete(id); }
     const rows = [...this.trades.values()].sort(newest);
     if (rows.length > BOUND && rows[BOUND].ts > now - DAY && rows[BOUND].ts + DAY > this.truncatedUntil) {
@@ -64,7 +70,7 @@ export class MarketView {
 
   #remaining(offer) {
     const book = this.inventory.get(offer.pair);
-    if (!book || book.registryVersion !== offer.registryVersion) return null;
+    if (!book) return null;
     const entry = book.remaining.find(r => r.offerId === offer.offerId);
     if (entry) return entry.amount;
     return this.seen.get(offer.offerId).postedAt <= book.ts ? '0' : null;
@@ -72,7 +78,7 @@ export class MarketView {
 
   offer(body, from) {
     const offer = parseBody('offer', body); this.#prune();
-    if (!validOffer(offer, from) || offer.expiresAt <= this.now()) return false;
+    if (!validOffer(offer, from, this.addressProof()) || offer.expiresAt <= this.now()) return false;
     const meta = this.#remember(offer);
     if (!meta || meta.closed) return false;
     if (this.#remaining(offer) === '0') { this.offers.delete(offer.offerId); this.dirty = true; return false; }
@@ -133,7 +139,8 @@ export class MarketView {
         trade.pair !== terms.pair || trade.baseAmount !== terms.baseAmount || trade.quoteAmount !== terms.quoteAmount ||
         trade.seller.tracAddr !== terms.seller.tracAddr || trade.seller.solAddr !== terms.seller.solRecipient ||
         trade.buyer.tracAddr !== terms.buyer.tracAddr || trade.buyer.solAddr !== terms.buyer.solPayer) return;
-    const association = { keys: [terms.seller, terms.buyer].map(p => [p.dexKey, p.tracAddr]) };
+    const proven = validTermsAddressProofs(terms, { ...this.addressProof(), now: terms.sendBy - 1, required: true });
+    const association = { keys: [terms.seller, terms.buyer].map(p => [p.dexKey, p.tracAddr]), proven };
     this.store.put(PARTY + id, association); this.store.delete(TERMS + id);
     this.parties.set(id, association); this.terms.delete(id);
   }
@@ -141,7 +148,10 @@ export class MarketView {
   address(dexKey) {
     this.#prune();
     for (const { offer } of this.offers.values()) if (offer.maker.dexKey === dexKey) return offer.maker.tracAddr;
-    for (const association of this.parties.values()) for (const [key, address] of association.keys) if (key === dexKey) return address;
+    for (const association of this.parties.values()) {
+      if (this.addressProof().required && !association.proven) continue;
+      for (const [key, address] of association.keys) if (key === dexKey) return address;
+    }
     return dexKey;
   }
 
@@ -158,17 +168,16 @@ export class MarketView {
       const agree = fresh && (!rows.length || t.ts >= rows[0].ts && priceUnits(t.last) === priceUnits(last)) &&
         t.trades24h >= count && BigInt(t.volume24h) >= volume && (t.trades24h > count || BigInt(t.volume24h) === volume);
       if (agree) { last = t.trades24h || priceUnits(t.last) > 0n ? t.last : last; volume = BigInt(t.volume24h); count = t.trades24h; }
-      const book = this.books.get(p.pair), levels = book?.registryVersion === registry.version && book.ts > now - 300 ? book.levels : [];
+      const book = this.books.get(p.pair), levels = p.status === 'open' && book?.registryVersion === registry.version && book.ts > now - 300 ? book.levels : [];
       const best = side => levels.filter(l => l.side === side && BigInt(l.baseAmount) > 0n).reduce((v, l) =>
         v === null || (side === 'buy' ? priceUnits(l.price) > priceUnits(v) : priceUnits(l.price) < priceUnits(v)) ? l.price : v, null);
       const completeDay = this.truncatedUntil <= now && (!agree || count === day.length);
       return { pair: p.pair, base: p.base.id, last, change24h: last !== null && day.length && completeDay ? change(last, day.at(-1).price) : null,
         volume24h: rows.length || agree ? units(volume, 6) : null, bestBuy: best('buy'), bestSell: best('sell'), trades24h: rows.length || agree ? count : null };
     });
-    const offers = [...this.offers.values()].filter(r => definitions.get(r.offer.pair)?.status === 'open' &&
-      r.offer.registryVersion === registry.version)
+    const offers = [...this.offers.values()].filter(r => definitions.get(r.offer.pair)?.status === 'open')
       .sort((a, b) => this.seen.get(b.offer.offerId).postedAt - this.seen.get(a.offer.offerId).postedAt || a.offer.offerId.localeCompare(b.offer.offerId))
-      .slice(0, 200).map(({ offer: o }) => ({ offerId: o.offerId, pair: o.pair, side: o.side, price: o.price,
+      .slice(0, 200).map(({ offer: o }) => ({ offerId: o.offerId, pair: o.pair, registryVersion: o.registryVersion, side: o.side, price: o.price,
         amount: units(o.baseAmount, definitions.get(o.pair).base.decimals),
         left: this.#remaining(o) === null ? null : units(this.#remaining(o), definitions.get(o.pair).base.decimals),
         maker: { trac: o.maker.tracAddr, sol: o.maker.solAddr }, postedAt: this.seen.get(o.offerId).postedAt }));

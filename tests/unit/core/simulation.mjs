@@ -16,7 +16,7 @@ export function simulation(options = {}) {
   let messageCounter = 0;
   let pendingChecks = options.pendingChecks ?? 0, claimFailures = options.claimFailures ?? 0;
   const heldVerifications = [];
-  const config = mode => ({ mode, offerId: f.offerId, terms: f.terms, registry: f.registry, nonce: hex(), entropy: hex(), now });
+  const config = mode => ({ mode, offerId: f.offerId, terms: f.terms, registry: f.registry, nonce: hex(), entropy: hex(), now, networkId: options.networkId });
   nodes.set('buyer', { state: createBuyer(config(options.buyerMaker ? 'maker' : 'taker')), step: buyerStep, identity: f.buyer, seen: createReplayCache() });
   nodes.set('seller', { state: createSeller(config(options.buyerMaker ? 'taker' : 'maker')), step: sellerStep, identity: f.seller, seen: createReplayCache() });
 
@@ -64,6 +64,9 @@ export function simulation(options = {}) {
         if (!options.holdProof) dispatch(name, { type: 'proved', tradeId: a.tradeId, ok: options.proveOk !== false, proof: proofStub() });
       } else if (a.type === 'checkProof') {
         if (!options.holdProofCheck) dispatch(name, { type: 'proofChecked', tradeId: a.tradeId, ok: options.checkProofOk !== false });
+      }
+      else if (a.type === 'checkSellerFunds') {
+        if (!options.holdSellerFunds) dispatch(name, { type: 'sellerFunds', tradeId: a.tradeId, ok: options.sellerFundsOk !== false, feeTnk: '30000000000000000' });
       }
       else if (a.type === 'publishShare') for (const ch of a.channels) deliver(name, 'sharePublish', a.body, ch);
       else if (a.type === 'lockEscrow') {
@@ -139,7 +142,7 @@ export function simulation(options = {}) {
   terms.committee.forEach((member, i) => {
     const fixtureSigner = f.signers.find(s => encodeKey(s.identity.publicKey) === member.dexKey);
     nodes.set('signer' + (i + 1), { state: createSigner({ terms, signerIndex: i + 1, boxSecret: fixtureSigner.box.secretKey, now,
-      usedTx: options.usedSnapshot ?? {} }), step: signerStep, identity: fixtureSigner.identity, seen: createReplayCache() });
+      usedTx: options.usedSnapshot ?? {}, networkId: options.networkId }), step: signerStep, identity: fixtureSigner.identity, seen: createReplayCache() });
   });
   drain();
   // Answers verifications that options.holdVerify kept back (as the real nodes would, a little later).

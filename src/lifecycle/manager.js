@@ -72,7 +72,7 @@ export async function statusDex(configFile, { request = lifecycleCall, isAlive =
   const config = traderConfig(configFile), record = readLock(config.dataDir);
   const result = { running: false, phase: record ? 'stale' : 'stopped', logs: logPaths(config.dataDir), versions: record?.versions ?? null,
     pids: record ? { supervisor: record.pid, peer: record.peerPid ?? null, trader: record.traderPid ?? null } : null, signers: [], dashboard: null,
-    restarts: record?.restarts ?? 0, lastExit: record?.lastExit ?? null };
+    restarts: record?.restarts ?? 0, lastExit: record?.lastExit ?? null, trades: [] };
   if (!record || !lockAlive(record, isAlive)) return result;
   result.phase = record.stopRequested ? 'stopping' : record.phase;
   if (!record.traderPid) return result;
@@ -81,7 +81,8 @@ export async function statusDex(configFile, { request = lifecycleCall, isAlive =
     if (info.id !== record.id || info.pid !== record.traderPid || info.dataDir !== realpathSync(config.dataDir)) throw new Error('Control API belongs to another DEX instance');
     return { ...result, running: !record.stopRequested && !info.stopping && record.phase === 'running' && isAlive(record.peerPid) && isAlive(record.traderPid),
       phase: info.stopping ? 'stopping' : result.phase,
-      versions: { ...record.versions, trader: info.software, node: info.node }, signers: info.signers, dashboard: info.dashboard, blockers: info.blockers };
+      versions: { ...record.versions, trader: info.software, node: info.node }, signers: info.signers, dashboard: info.dashboard, blockers: info.blockers,
+      trades: info.trades ?? [] };
   } catch (error) { return { ...result, phase: ['starting', 'restarting', 'stopping'].includes(result.phase) ? result.phase : 'unreachable', error: error.message }; }
 }
 

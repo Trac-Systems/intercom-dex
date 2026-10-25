@@ -10,6 +10,7 @@ import { RegistryRelays } from '../net/relays.js';
 import { OfferBook } from '../market/book.js';
 import { ticker } from '../market/ticker.js';
 import { MakerFunds } from '../market/funds.js';
+import { addressProofRequired } from '../core/address-proof.js';
 import { TradeHost } from './host.js';
 import { deriveEscrowPda } from '../solana/escrow.js';
 import { open, createReplayCache } from '../core/envelope.js';
@@ -47,6 +48,10 @@ export const TICKER_SOON_SEC = 3;
 // logged together with its offer fill, published, and finally credited once the publication window has closed.
 // Each step is a single record write, so a restart continues exactly where it stopped.
 export class Service {
+  addressProofPolicy() {
+    return { networkId: this.profile?.peer?.msbNetworkId, now: this.now(), required: addressProofRequired(this.registry) };
+  }
+
   constructor({ bridge, identity, store, solana, trac, registryInput, profile = null, latest, log = console.log, now = nowSec,
     bookMs = 5000, tickerMs = 30000, registryMs = 30000, reconcileMs = 15000, firstLaunch = false }) {
     Object.assign(this, { bridge, identity, store, solana, trac, profile, latest, log, now, bookMs, tickerMs, registryMs, reconcileMs, firstLaunch });
@@ -109,7 +114,7 @@ export class Service {
       for (const m of u.messages) this.unmatchedCounts.set(m.from, (this.unmatchedCounts.get(m.from) ?? 0) + 1);
     }
     this.heartbeats = new Map();
-    this.funds = new MakerFunds({ solana, trac, now: () => this.now(), log: (...a) => this.log(...a) });
+    this.funds = new MakerFunds({ solana, trac, now: () => this.now(), addressProof: () => this.addressProofPolicy(), log: (...a) => this.log(...a) });
     this.unfunded = {}; this.hidden = new Set();
     this.shareChecks = new Map(); // `${id}:${share}:${commitments}` -> verifyShare result
     this.locked = new Map();       // tradeId -> { seller, deadline } for watched trades whose buyer sent the deal
@@ -223,7 +228,7 @@ export class Service {
     this.#saveBook();
     const makers = new Set(), pending = this.#pendingByOffer(), busy = this.busySellers();
     for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
-      const listed = this.book.snapshot(p.pair, now).filter(o => o.registryVersion === this.registry.version && meetsVersion(o.software, this.registry.minSoftware));
+      const listed = this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware));
       this.funds.refresh(listed);
       for (const o of listed) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
       const offers = listed.filter(o => !(o.side === 'sell' && busy.has(o.maker.dexKey))).filter(o => {
@@ -276,7 +281,7 @@ export class Service {
     if (channel === SIGNERS && ['deal', 'transferSent'].includes(raw?.kind)) return this.#tradeEvidence(raw);
     const m = this.receive(raw);
     if (!m || m.ch !== channel) return;
-    if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from)) {
+    if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from, this.addressProofPolicy())) {
       try {
         registryPair(this.registry, m.body.pair);
         const snapshot = this.registries.get(m.body.registryVersion);
@@ -437,7 +442,7 @@ export class Service {
   // The service watches trades whose committee it verified, so it knows who may publish which share.
   #summon(m) {
     try {
-      const { terms } = verifySummon(m.body, this.registries.get(m.body.terms?.registryVersion), this.now());
+      const { terms } = verifySummon(m.body, this.registries.get(m.body.terms?.registryVersion), this.now(), this.addressProofPolicy());
       if (this.profile) checkProfileTerms(terms, this.profile);
       this.#watch(terms, m.body);
     } catch {}

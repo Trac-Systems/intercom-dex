@@ -48,6 +48,7 @@ const peerCodeOf = n => peerCode[n] ?? codeOf(n);
 const softwareOf = n => oldNames.has(n) ? OLD_SOFTWARE : SOFTWARE;
 const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ['wallets', 'reset-sell', 'tnk-buy', 'cheating-dealer', 'cheating-certificate', 'signers-offline', 'not-enough-signers', 'signers-vanish-before-ack', 'crowd', 'silent-taker', 'refund'];
 const relayMode = scenarios.some(n => ['relay', 'relay-none'].includes(n));
+const strikeMode = scenarios.includes('seller-strikes');
 if (relayMode && scenarios.length !== 1) throw new Error('Run relay and relay-none separately with fresh peers');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // The RESET seller pays the MSB fee (0.03 TNK) for its transfer.
@@ -57,7 +58,7 @@ const PASSWORD = 'local-e2e-only-password';
 // refundSec - sendWindowSec - graceSec must leave the 600 s claim buffer the protocol requires.
 const zkeyPath = process.env.DEX_PROOF_ZKEY;
 if (!zkeyPath || !path.isAbsolute(zkeyPath)) throw new Error('Set DEX_PROOF_ZKEY to an absolute proving key path');
-const PARAMS = { n: 5, k: 3, sendWindowSec: 300, refundSec: 960, graceSec: 30 };
+const PARAMS = { n: 5, k: 3, sendWindowSec: 300, refundSec: strikeMode ? 1800 : 960, graceSec: 30 };
 
 async function port() {
   const s = net.createServer();
@@ -86,7 +87,7 @@ function launch(name, cmd, args, { cwd, env = {}, marker, logDir }) {
     if (child.exitCode !== null || child.signalCode !== null) return;
     const exited = new Promise(r => child.once('exit', r));
     child.kill('SIGTERM');
-    const t = setTimeout(() => child.kill('SIGKILL'), 60000);
+    const t = setTimeout(() => child.kill('SIGKILL'), strikeMode ? 5000 : 60000);
     await exited; clearTimeout(t);
   };
   return { child, ready, stop };
@@ -106,7 +107,8 @@ let failed = false;
 let stopping = null;
 function stopAll() {
   return stopping ??= (async () => {
-    for (const stop of stops.reverse()) { try { await stop(); } catch (e) { console.error('stop', e.message); } }
+    if (strikeMode) await Promise.allSettled(stops.reverse().map(stop => Promise.resolve().then(stop)));
+    else for (const stop of stops.reverse()) { try { await stop(); } catch (e) { console.error('stop', e.message); } }
     log('stopped everything; logs in', logDir);
   })();
 }
@@ -122,7 +124,9 @@ try {
   const LOCAL_RPC = validator.rpc;
   const market = await setupMarket(validator);
   const { connection, mint } = market;
-  const extraTraders = [...(scenarios.some(n => ['crowd', 'silent-taker'].includes(n)) ? ['charlie', 'dana', 'erin'] : []), ...(scenarios.includes('wallets') ? ['autowallet'] : [])];
+  const extraTraders = [...(scenarios.some(n => ['crowd', 'silent-taker'].includes(n)) ? ['charlie', 'dana', 'erin'] : []), ...(scenarios.includes('wallets') ? ['autowallet'] : []),
+    ...(scenarios.includes('unfunded-seller') ? ['empty'] : []),
+    ...(scenarios.some(n => ['release-forward', 'release-reverse'].includes(n)) ? ['legacy'] : [])];
   const traders = ['alice', 'bob', ...extraTraders];
   // Bob gets an ordinary funded key: the validator's mint key holds more lamports than a safe integer.
   const solKeys = { bob: Keypair.generate(), alice: market.seller, service: market.venue };
@@ -161,6 +165,7 @@ try {
   }
   for (const n of traders.filter(n => n !== 'autowallet')) {
     wallets[n] = await createWallet(path.join(dirs[n], 'trac-wallet.json'), PASSWORD);
+    if (n === 'empty') continue;
     await network.local.fund(network.validator, { address: wallets[n].address });
     await network.gift(wallets[n].publicKey, '200000');
     log(n, 'funded', wallets[n].address);
@@ -223,14 +228,16 @@ try {
     const value = await res.json(); if (!res.ok) throw new Error(`${n} ${route}: ${value.error}`); return value;
   };
   const started = new Set();
-  const startRole = n => {
+  const startRole = (n, { rescue = '' } = {}) => {
     const { role, file } = roleOptions[n];
     // The venue issues its first registry on its first start only; restarts use the stored one.
-    const args = [...(role === 'trader' ? ['--import', './tests/e2e/cheating-hook.mjs'] : []), 'bin/dex.mjs', '--config', file,
+    const args = [...(role === 'trader' ? ['--import', './tests/e2e/cheating-hook.mjs'] : []),
+      ...(role === 'signer' && strikeMode ? ['--import', './tests/e2e/strike-hook.mjs'] : []), 'bin/dex.mjs', '--config', file,
       ...(role === 'service' && !started.has(n) ? ['--first-launch'] : [])];
     started.add(n);
     const p = launch(`role-${n}`, process.execPath, args, { cwd: codeOf(n), logDir, marker: 'DEX_ROLE_READY',
-      env: { DEX_WALLET_PASSWORD: PASSWORD, DEX_KEY_PASSWORD: PASSWORD, DEX_E2E_ATTACK_FILE: attackFile, ...(relayMode && n === 'bob' ? { DEX_E2E_REGISTRY_SEED: registrySeed } : {}) } });
+      env: { DEX_WALLET_PASSWORD: PASSWORD, DEX_KEY_PASSWORD: PASSWORD, DEX_E2E_ATTACK_FILE: attackFile, DEX_RESCUE_TRADES: rescue,
+        ...(relayMode && n === 'bob' ? { DEX_E2E_REGISTRY_SEED: registrySeed } : {}) } });
     stops.push(p.stop); roleProc[n] = p;
     p.ready = p.ready.then(async ready => { await waitForControl(() => api(n, 'GET', '/status')); return ready; });
     return p.ready;
@@ -242,6 +249,7 @@ try {
     control[n] = { url: `http://127.0.0.1:${await port()}`, tokenFile: path.join(dirs[n], 'control.token') };
     config.control = { port: Number(control[n].url.split(':').pop()), tokenFile: control[n].tokenFile };
     if (role === 'service') Object.assign(config, { registry, solana });
+    if (role === 'signer') Object.assign(config, { solana });
     if (role === 'trader') {
       Object.assign(config, { solana, proof: { zkey: zkeyPath },
         trac: { walletFile: path.join(dirs[n], 'trac-wallet.json'), passwordEnv: 'DEX_WALLET_PASSWORD', resetGatewayUrl: manifest.gateways[0].gatewayUrl } });
@@ -314,7 +322,7 @@ try {
     return line ? JSON.parse(line.slice(marker.length + 1)) : null;
   }, 240000, 100);
 
-  const tnkOf = async n => (await network.validator.getBalance(wallets[n].address)).balance;
+  const tnkOf = async n => (await network.validator.getBalance(wallets[n].address))?.balance ?? '0';
   const resetOf = async n => (await (await fetch(`${manifest.gateways[0].gatewayUrl}/v1/account/${wallets[n].publicKey}`)).json()).balance;
 
   // One trade: maker posts, taker takes; wait until both sides finish and report the result.
@@ -364,6 +372,134 @@ try {
     }, 360000);
     const before = { alice: await usdcOf('alice'), bob: await usdcOf('bob'), aliceReset: await resetOf('alice'), bobReset: await resetOf('bob'), aliceTnk: await tnkOf('alice'), bobTnk: await tnkOf('bob') };
     let r;
+    if (['release-forward', 'release-reverse'].includes(name)) {
+      const maker = name === 'release-forward' ? 'legacy' : 'bob', taker = maker === 'legacy' ? 'bob' : 'legacy';
+      const initial = { maker: await usdcOf(maker), taker: await usdcOf(taker), makerReset: await resetOf(maker), takerReset: await resetOf(taker) };
+      r = await trade(name, { maker, taker, pair: 'RESET/USDC', side: 'sell', baseAmount: '10000', price: '1000' });
+      assert.equal(r.ta.phase, 'complete'); assert.equal(r.tb.phase, 'complete');
+      const fees = calculateFees(r.taken.quoteAmount, 10, 50);
+      assert.equal(BigInt(await usdcOf(maker)) - BigInt(initial.maker), fees.netAmount);
+      assert.equal(BigInt(await usdcOf(taker)) - BigInt(initial.taker), -fees.totalAmount);
+      assert.equal(BigInt(await resetOf(maker)) - BigInt(initial.makerReset), -10000n);
+      assert.equal(BigInt(await resetOf(taker)) - BigInt(initial.takerReset), 10000n);
+      results.push({ name, ok: true, maker: r.ta.phase, taker: r.tb.phase, oldVersion: OLD_SOFTWARE, newVersion: SOFTWARE });
+      continue;
+    }
+    if (name === 'address-proof') {
+      assert.ok(meetsVersion(registry.minSoftware, '0.1.34'), 'address proofs require the activated protocol');
+      await setAttack({ kind: 'address-proof-offer', attackerKey: ids.alice.publicKey, foreignAddr: wallets.bob.address });
+      const forged = await api('alice', 'POST', '/offer', { pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1', ttlSec: 900 });
+      assert.equal(forged.maker.tracAddr, wallets.bob.address);
+      assert.equal(forged.maker.tracProof, undefined);
+      // Several venue book intervals let both intake paths process the authenticated attack.
+      await sleep(15000);
+      assert.ok(!(await api('bob', 'GET', '/status')).offers.some(o => o.offerId === forged.offerId));
+      assert.equal((await api('service', 'GET', '/status')).book['TNK/USDC'], 0);
+      await setAttack({ kind: 'address-proof-take', attackerKey: ids.alice.publicKey, foreignAddr: wallets.bob.address });
+      const buy = await api('bob', 'POST', '/offer', { pair: 'TNK/USDC', side: 'buy', baseAmount: '1000000000000000000', price: '1', ttlSec: 900 });
+      assert.ok(buy.maker.tracProof, 'honest buy maker proves its receiving address');
+      await until('proven buy offer visible', async () => (await api('alice', 'GET', '/status')).offers.some(o => o.offerId === buy.offerId));
+      const taken = await api('alice', 'POST', '/take', { offerId: buy.offerId, price: buy.price });
+      const refused = await until('foreign-address take declined', async () => {
+        const t = (await api('alice', 'GET', '/status')).trades.find(t => t.key === taken.key);
+        return t?.phase === 'aborted' ? t : null;
+      }, 90000);
+      assert.equal(refused.reason, 'invalid');
+      assert.ok(!(await api('bob', 'GET', '/status')).trades.some(t => t.key.startsWith(buy.offerId)));
+      assert.equal(await usdcOf('alice'), before.alice); assert.equal(await usdcOf('bob'), before.bob);
+      assert.equal(await tnkOf('alice'), before.aliceTnk); assert.equal(await tnkOf('bob'), before.bobTnk);
+      await setAttack({}); await api('bob', 'POST', '/cancel', { offerId: buy.offerId });
+      results.push({ name, ok: true, foreignOffer: 'rejected', foreignTake: 'declined before escrow' });
+      continue;
+    }
+    if (name === 'seller-strikes') {
+      const signers = ['s1', 's2', 's3', 's4', 's5'];
+      const ledgers = () => Promise.all(signers.map(n => api(n, 'GET', '/seller-strikes')));
+      const begin = async () => {
+        const offer = await api('bob', 'POST', '/offer', { pair: 'RESET/USDC', side: 'buy', baseAmount: '10000', price: '1000', ttlSec: 900 });
+        await until('grief offer visible', async () => (await api('alice', 'GET', '/status')).offers.some(o => o.offerId === offer.offerId));
+        await api('alice', 'POST', '/warm', { pair: 'RESET/USDC', offerIds: [offer.offerId] });
+        const taken = await api('alice', 'POST', '/take', { offerId: offer.offerId, price: offer.price });
+        return { offer, taken, buyer: async () => (await api('bob', 'GET', '/status')).trades.find(t => t.key.startsWith(offer.offerId)) };
+      };
+      await setAttack({ kind: 'seller-no-send', sellerAddr: wallets.alice.address });
+      const griefIds = [];
+      for (const count of [1, 2]) {
+        const attempt = await begin();
+        const buyer = await until('buyer locked for grief ' + count, async () => {
+          const b = await attempt.buyer(); return b?.phase === 'locked' && b;
+        }, 240000);
+        griefIds.push(buyer.tradeId);
+        log('grief', count, 'buyer locked', buyer.tradeId);
+        await until('all signers record strike ' + count, async () => (await ledgers()).every(l =>
+          l.strikes.filter(s => s.tracAddr === wallets.alice.address && s.dexKey === ids.alice.publicKey).length === count), 420000);
+        for (const ledger of await ledgers()) assert.equal(ledger.refusals.length, count === 1 ? 0 : 1);
+        assert.equal(await resetOf('alice'), before.aliceReset); assert.equal(await tnkOf('alice'), before.aliceTnk);
+        log('grief', count, 'all five strike ledgers confirmed');
+      }
+      await roleProc.s1.stop(); await startRole('s1');
+      assert.equal((await api('s1', 'GET', '/seller-strikes')).refusals.length, 1, 'refusal survives a real signer restart');
+      const third = await begin();
+      const refused = await until('third take refused at ack', async () => {
+        const b = await third.buyer(); return b?.phase === 'aborted' && b;
+      }, 240000);
+      assert.equal(refused.reason, 'The seller is paused after unsent trades; contact the venue');
+      const struckSeller = await until('seller sees strike refusal', async () => {
+        const s = (await api('alice', 'GET', '/status')).trades.find(t => t.key === third.taken.key);
+        return s?.phase === 'aborted' && s;
+      });
+      assert.equal(struckSeller.reason, 'Signers refused: your wallet is paused after unsent trades; contact the venue');
+      const buyerLog = await fs.readFile(path.join(logDir, 'role-bob.log'), 'utf8');
+      assert.ok(!buyerLog.includes('DEX_E2E_LOCK_ATTEMPTED ' + refused.tradeId));
+      assert.ok((await Promise.all(signers.map(n => fs.readFile(path.join(logDir, `role-${n}.log`), 'utf8'))))
+        .some(text => text.includes('seller struck tradeId=' + refused.tradeId)));
+      log('third take refused before any buyer lock');
+
+      // Bob is an independent honest seller. All signers see his attempt, but their finality reads arrive late.
+      await setAttack({ kind: 'late-rescue', sellerAddr: wallets.bob.address, release: false });
+      let rescuedId;
+      const rescued = await trade('late-rescue', { maker: 'bob', taker: 'alice', pair: 'RESET/USDC', side: 'sell', baseAmount: '10000', price: '1000',
+        afterTake: async taken => {
+          const seller = await until('honest transfer announced', async () => {
+            const buyer = (await api('alice', 'GET', '/status')).trades.find(t => t.key === taken.key);
+            if (!buyer?.tradeId) return null;
+            const states = await Promise.all(signers.map(n => api(n, 'GET', '/status')));
+            return states.every(s => s.trades.some(t => t.tradeId === buyer.tradeId && t.phase === 'verifyingTransfer')) && buyer;
+          }, 240000);
+          rescuedId = seller.tradeId;
+          await until('late transfer expired on all signers', async () => (await Promise.all(signers.map(n => api(n, 'GET', '/status'))))
+            .every(s => s.trades.some(t => t.tradeId === rescuedId && t.phase === 'expired')), 420000);
+          for (const ledger of await ledgers()) assert.ok(!ledger.strikes.some(s => s.dexKey === ids.bob.publicKey));
+          await setAttack({ kind: 'late-rescue', sellerAddr: wallets.bob.address, release: true });
+          await Promise.all(signers.map(n => roleProc[n].stop()));
+          await Promise.all(signers.map(n => startRole(n, { rescue: rescuedId })));
+        } });
+      assert.equal(rescued.ta.phase, 'complete'); assert.equal(rescued.tb.phase, 'complete');
+      for (const ledger of await ledgers()) {
+        assert.ok(!ledger.strikes.some(s => s.dexKey === ids.bob.publicKey));
+        assert.equal(ledger.strikes.length, 2);
+      }
+      results.push({ name, ok: true, griefIds, refusedTradeId: refused.tradeId, rescuedTradeId: rescuedId,
+        strikesPerSigner: 2, honestSellerStrikes: 0, realSignerRestart: true });
+      log('seller strike and late rescue scenarios passed');
+      continue;
+    }
+    if (name === 'unfunded-seller') {
+      const emptyBefore = { usdc: await usdcOf('empty'), reset: await resetOf('empty'), tnk: await tnkOf('empty') };
+      assert.equal(BigInt(emptyBefore.reset), 0n); assert.equal(BigInt(emptyBefore.tnk), 0n);
+      await setAttack({ kind: name, sellerAddr: wallets.empty.address });
+      r = await trade(name, { maker: 'bob', taker: 'empty', pair: 'RESET/USDC', side: 'buy', baseAmount: '30000', price: '1500' });
+      assert.equal(r.ta.phase, 'aborted'); assert.equal(r.tb.phase, 'aborted');
+      assert.equal(r.ta.reason, 'The seller cannot deliver this trade right now');
+      assert.match(r.tb.reason, /^Signers refused: your wallet does not hold 0\.0003 RESET \+ TNK fee/);
+      const buyerLog = await fs.readFile(path.join(logDir, 'role-bob.log'), 'utf8');
+      assert.ok(!buyerLog.includes('DEX_E2E_LOCK_ATTEMPTED ' + r.ta.tradeId), 'buyer never attempted a Solana lock');
+      const sellerLog = await fs.readFile(path.join(logDir, 'role-empty.log'), 'utf8');
+      assert.ok(!sellerLog.includes('DEX_E2E_TRANSFER_AUTHORIZED ' + r.tb.tradeId), 'seller never attempted a transfer');
+      assert.deepEqual({ usdc: await usdcOf('empty'), reset: await resetOf('empty'), tnk: await tnkOf('empty') }, emptyBefore);
+      assert.ok((await Promise.all(['s1', 's2', 's3', 's4', 's5'].map(n => fs.readFile(path.join(logDir, `role-${n}.log`), 'utf8'))))
+        .some(text => text.includes('seller funds refused tradeId=' + r.ta.tradeId)), 'a signer refused before the traders aborted');
+    }
     if (['reset-retry', 'tnk-retry'].includes(name)) {
       const asset = name === 'reset-retry' ? 'RESET' : 'TNK';
       const attack = { kind: 'transfer-retry', asset, release: false };
@@ -626,7 +762,7 @@ try {
     }
     const cheating = ['cheating-dealer', 'cheating-certificate'].includes(name);
     const noFundsMoved = Object.keys(before).every(k => BigInt(after[k]) === BigInt(before[k]));
-    if (['not-enough-signers', 'signers-vanish-before-ack'].includes(name)) assert.ok(noFundsMoved, 'USDC, TNK and RESET balances unchanged');
+    if (['not-enough-signers', 'signers-vanish-before-ack', 'unfunded-seller'].includes(name)) assert.ok(noFundsMoved, 'USDC, TNK and RESET balances unchanged');
     if (name === 'signers-offline') {
       const fees = calculateFees(r.taken.quoteAmount, 10, 50);
       assert.equal(delta('alice'), fees.netAmount.toString()); assert.equal(delta('bob'), (-fees.totalAmount).toString());
@@ -636,6 +772,7 @@ try {
     const ok = cheating ? r.ta.phase === 'aborted' && ['aborted', 'refunded'].includes(r.tb.phase) && noFundsMoved
       : name === 'not-enough-signers' ? noFundsMoved && r.tb.phase === 'refused'
       : name === 'signers-vanish-before-ack' ? noFundsMoved && r.ta.phase === 'aborted' && r.tb.phase === 'aborted'
+      : name === 'unfunded-seller' ? noFundsMoved && r.ta.phase === 'aborted' && r.tb.phase === 'aborted'
       : name === 'refund' ? r.ta.phase === 'refunded' && delta('aliceReset') === '0' && delta('alice') === '0'
       : r.ta.phase === 'complete' && r.tb.phase === 'complete';
     results.push({ name, ok, maker: r.ta.phase, taker: r.tb.phase, reason: r.ta.reason ?? r.tb.reason ?? null,

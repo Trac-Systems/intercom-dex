@@ -179,6 +179,18 @@ function invoke(handler, method, url, body) {
   });
 }
 
+test('managed CLI status exposes trade refusal reasons without private trade state', async t => {
+  const f = fixture(t), record = acquireLock(f.dir);
+  record.traderPid = process.pid; record.peerPid = process.pid; record.phase = 'running'; saveLock(record);
+  const reason = 'The seller cannot deliver this trade right now';
+  const role = { onlineSigners: () => [], host: { trades: new Map([['t', { key: 't', role: 'buyer',
+    state: { phase: 'aborted', tradeId: 'a'.repeat(64), reason, entropy: 'private-state' } }]]) } };
+  const handler = lifecycleHandler({ id: record.id, config: f.config, role, dashboard: () => null, fallback: () => {} });
+  const result = await statusDex(f.configFile, { request: async () => (await invoke(handler, 'GET', '/lifecycle')).body });
+  assert.equal(result.trades[0].reason, reason); assert.equal(result.trades[0].phase, 'aborted');
+  assert.ok(!JSON.stringify(result).includes('private-state'));
+});
+
 test('live stop guard names every unfinished trade, checks buyer lock state, and force is explicit', async t => {
   const f = fixture(t), role = { host: { trades: new Map([['t', { key: 'trade-1', role: 'buyer', state: { phase: 'aborted', locked: true } }]]) }, onlineSigners: () => ['s'] };
   assert.equal(stopBlockers(role).length, 1);

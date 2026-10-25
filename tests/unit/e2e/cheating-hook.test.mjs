@@ -9,9 +9,11 @@ import { Bridge } from '../../../src/net/bridge.js';
 test('fee rotation gates signed terms with the prepared certificate intact and refuses an empty pool', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'dex-fee-gate-')), file = join(dir, 'attack.json');
   const saved = { deliver: TradeHost.prototype.deliver, add: TradeHost.prototype.addTrade, send: Bridge.prototype.send,
+    sendPublic: TradeHost.prototype.sendPublic, sendEnvelope: TradeHost.prototype.sendEnvelope,
     attackFile: process.env.DEX_E2E_ATTACK_FILE };
   t.after(() => {
     TradeHost.prototype.deliver = saved.deliver; TradeHost.prototype.addTrade = saved.add; Bridge.prototype.send = saved.send;
+    TradeHost.prototype.sendPublic = saved.sendPublic; TradeHost.prototype.sendEnvelope = saved.sendEnvelope;
     if (saved.attackFile === undefined) delete process.env.DEX_E2E_ATTACK_FILE; else process.env.DEX_E2E_ATTACK_FILE = saved.attackFile;
     rmSync(dir, { recursive: true });
   });

@@ -16,6 +16,8 @@ import { seal } from '../core/envelope.js';
 import { sha256Hex } from '../core/canonical.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 import { createLocksClient } from '../locks/client.js';
+import { takerFunded } from './taker-funds.js';
+import { addressProofRequired, validAddressProof } from '../core/address-proof.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
@@ -56,6 +58,7 @@ export class Trader {
     this.takeQueue = Promise.resolve();
     this.declined = new Map();   // sender -> time of its last decline, for the last minute
     this.host = new TradeHost({ bridge, identity, store, solana, trac, proof, profile, log, certificatePool: this.certificates,
+      addressProofRequired: () => !this.registry.usable || addressProofRequired(this.registry.usable),
       onlineSigners: registry => this.#warming() ? null : this.onlineSigners(registry),
       eligibleOnline: (amount, pair, registry) => this.#warming() ? null : this.eligibleOnline(amount, pair, registry),
       // An own open offer's channel stays joined after a trade on it ended: the next taker comes through it.
@@ -98,6 +101,18 @@ export class Trader {
 
   stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer);
     this.locks?.stop().catch(e => this.log('locks stop', e.message)); }
+
+  addressProofPolicy() {
+    return { networkId: this.profile?.peer?.msbNetworkId, now: nowSec(), required: addressProofRequired(this.registry.usable) };
+  }
+
+  async #participant(expiresAt) {
+    if (!this.addressProofPolicy().required) return this.me;
+    const tracProof = await this.host.trac.proveAddress({ dexKey: this.me.dexKey, expiresAt });
+    const party = { ...this.me, tracProof };
+    if (!validAddressProof(party, this.addressProofPolicy())) throw new Error('Invalid Trac address proof');
+    return party;
+  }
 
   // The dashboard reports the offers a click on its best ask and bid would take.
   noteViewing(pair, offerIds) { this.viewing?.set(pair, { at: nowSec(), offerIds: offerIds.filter(Boolean) }); }
@@ -219,7 +234,7 @@ export class Trader {
         if (m.body.status === 'online') this.heartbeats.set(m.from, { at: performance.now(), software: m.body.software, registryVersion: m.body.registryVersion });
         else this.heartbeats.delete(m.from);
       }
-    } else if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from)) {
+    } else if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from, this.addressProofPolicy())) {
       try { this.#newPair(m.body.pair, m.body.registryVersion, m.body.software); } catch { return; }
       const now = nowSec();
       this.pruneOffers(now);
@@ -248,6 +263,9 @@ export class Trader {
     let pair;
     try { pair = this.#newPair(offer.pair, offer.registryVersion, m.body.software); }
     catch (e) { return decline(e.message === 'update required' ? 'version' : 'invalid'); }
+    const policy = { ...this.addressProofPolicy(), validUntil: m.body.sendBy };
+    if (offer.maker.tracAddr !== this.me.tracAddr || offer.maker.solAddr !== this.me.solAddr ||
+        !validAddressProof(offer.maker, policy) || !validAddressProof(m.body.taker, policy)) return decline('invalid');
     const trades = [...this.host.trades.values()];
     const duplicate = trades.find(t => t.state.mode === 'maker' && t.state.offerId === offer.offerId && t.state.peer === m.from &&
       t.raw.some(x => x.kind === 'take' && x.body.commitment === m.body.commitment));
@@ -274,13 +292,16 @@ export class Trader {
         this.eligibleOnline(quote, offer.pair).filter(s => !exclude.includes(s.dexKey)).length < p.k + 1) return decline('signers');
     let draft;
     try {
-      draft = buildDraft({ offer, baseAmount: m.body.baseAmount, maker: this.me, taker: m.body.taker, registry: reg,
+      draft = buildDraft({ offer, baseAmount: m.body.baseAmount, maker: offer.maker, taker: m.body.taker, registry: reg,
         sendBy: m.body.sendBy, refundAfter: m.body.refundAfter, mint: this.mint, platformCollector: this.platformCollector });
       if (this.profile) checkProfileTerms(draft, this.profile);
     } catch (e) { this.log('take refused', e.message); return decline('invalid'); }
     const role = offer.side === 'sell' ? 'seller' : 'buyer';
+    if (await takerFunded({ terms: draft, role: role === 'seller' ? 'buyer' : 'seller',
+      trac: this.host.trac, solana: this.host.solana }) === false) return decline('insufficient');
     const create = role === 'seller' ? createSeller : createBuyer;
-    const state = create({ mode: 'maker', offerId: offer.offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now });
+    const state = create({ mode: 'maker', offerId: offer.offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now,
+      networkId: policy.networkId, requireAddressProof: policy.required });
     const key = `${offer.offerId}-${sha256Hex(m.from + m.body.commitment)}`;
     await this.host.addTrade({ key, role, state, lifetimeSec: p.refundSec + 3600 });
     // The durable reservation is installed. Network sends run on this trade's queue, outside admission and the wallet lock.
@@ -294,7 +315,6 @@ export class Trader {
   #listed(o, inv) {
     const at = this.bookView.listedAt.get(o.pair), ids = this.bookView.listed.get(o.pair), posted = this.offers.get(o.offerId)?.firstSeen;
     if (at == null || posted == null || at < posted + LISTED_AFTER_SEC || ids.size >= 200 || inv.reserved > 0n || inv.available <= 0n) return null;
-    if (this.bookView.inventory.get(o.pair)?.registryVersion !== o.registryVersion) return null;
     return ids.has(o.offerId);
   }
 
@@ -310,8 +330,12 @@ export class Trader {
     const { info } = await this.bridge.info();
     const offer = { registryVersion: reg.version, software: SOFTWARE, pair, side, baseAmount: String(baseAmount), price: String(price), maker: this.me,
       peerKey: info.swarmPublicKey, expiresAt: nowSec() + ttlSec };
-    while (this.mine.has(offerIdOf(offer)) || this.store.get(`offer-${offerIdOf(offer)}`)) offer.expiresAt++;
-    offer.offerId = offerIdOf(offer);
+    for (;;) {
+      offer.maker = await this.#participant(offer.expiresAt + reg.params.sendWindowSec + 120);
+      offer.offerId = offerIdOf(offer);
+      if (!this.mine.has(offer.offerId) && !this.store.get(`offer-${offer.offerId}`)) break;
+      offer.expiresAt++;
+    }
     parseBody('offer', offer);
     if (this.wallets) await this.wallets.requireFunds({ role: side === 'sell' ? 'seller' : 'buyer', base: entry.base,
       baseAmount, quoteAmount: quoteAmount(entry, baseAmount, price), fees: { platformFeeBps: reg.fee.platformFeeBps, tradeFeeBps: reg.fee.tradeFeeBps } });
@@ -348,6 +372,11 @@ export class Trader {
       const rec = this.store.get(name);
       if (!rec?.offer || rec.cancelled || rec.offer.expiresAt <= now || rec.offer.maker.dexKey !== this.identity.publicKey) continue;
       if (rec.offer.offerId !== offerIdOf(rec.offer) || this.#inventory(rec.offer).filled >= BigInt(rec.offer.baseAmount)) continue;
+      if (!validAddressProof(rec.offer.maker, this.addressProofPolicy())) {
+        this.store.put(name, { ...rec, cancelled: true });
+        this.log('offer ended: Trac address proof required; post a new offer', rec.offer.offerId.slice(0, 12));
+        continue;
+      }
       this.mine.set(rec.offer.offerId, rec.offer);
       this.offers.set(rec.offer.offerId, { offer: rec.offer, from: this.identity.publicKey, firstSeen: now, lastSeen: now });
       await this.bridge.join(tradeChannel(rec.offer.offerId));
@@ -374,6 +403,11 @@ export class Trader {
     for (const [id, offer] of this.mine) {
       const inv = this.#inventory(offer);
       if (offer.expiresAt <= now || inv.filled >= BigInt(offer.baseAmount)) { this.mine.delete(id); continue; }
+      if (!validAddressProof(offer.maker, this.addressProofPolicy())) {
+        this.log('offer ended: Trac address proof required; post a new offer', id.slice(0, 12));
+        await this.cancelOffer(id);
+        continue;
+      }
       let entry;
       try { entry = this.#newPair(offer.pair, offer.registryVersion, offer.software); } catch { continue; }
       // A rest below the pair's smallest trade can never be taken: the offer ends instead of being announced as dust.
@@ -396,6 +430,7 @@ export class Trader {
   availableOffer(offerId, now = nowSec()) {
     const seen = this.offers.get(offerId);
     if (!freshOffer(seen, now)) { this.offers.delete(offerId); return null; }
+    if (!validAddressProof(seen.offer.maker, this.addressProofPolicy())) return null;
     if (seen.offer.maker.dexKey === this.me.dexKey) return null;
     const pair = seen.offer.pair;
     return availableOffer(seen, this.book.get(pair), this.bookView.inventory.get(pair) ?? this.book.get(pair), now, this.bookView.heard.get(pair));
@@ -410,6 +445,7 @@ export class Trader {
     const seen = this.offers.get(offerId), reg = seen && this.registry.snapshot(seen.offer.registryVersion), now = nowSec();
     if (!seen) throw new Error(STALE_OFFER_MESSAGE);
     if (seen.offer.maker.dexKey === this.identity.publicKey) throw new Error('Own offer');
+    this.#newPair(seen.offer.pair, seen.offer.registryVersion, seen.offer.software);
     const offer = this.availableOffer(offerId, now);
     if (!offer) throw new Error(STALE_OFFER_MESSAGE);
     if (!reg) throw new Error(this.registry.conflict ? 'The venue published two different registries; trading is paused' : 'No registry yet');
@@ -421,7 +457,8 @@ export class Trader {
     const quote = quoteAmount(pair, amount, offer.price), exclude = [this.me.dexKey, offer.maker.dexKey];
     if (this.#eligible(quote, offer.pair, reg, exclude).length < reg.params.n ||
         this.eligibleOnline(quote, offer.pair).filter(s => !exclude.includes(s.dexKey)).length < reg.params.k + 1) throw new Error('Not enough signers online');
-    const draft = buildDraft({ offer, baseAmount: amount, maker: offer.maker, taker: this.me, registry: reg,
+    const taker = await this.#participant(now + reg.params.sendWindowSec);
+    const draft = buildDraft({ offer, baseAmount: amount, maker: offer.maker, taker, registry: reg,
       sendBy: now + reg.params.sendWindowSec, refundAfter: now + reg.params.refundSec, mint: this.mint, platformCollector: this.platformCollector });
     if (this.profile) checkProfileTerms(draft, this.profile);
     const role = offer.side === 'sell' ? 'buyer' : 'seller';
@@ -430,7 +467,9 @@ export class Trader {
     if (!current) throw new Error(STALE_OFFER_MESSAGE);
     if (BigInt(amount) > BigInt(current.baseAmount)) throw new Error('Amount must be 1 to the offer size in base units');
     const create = role === 'seller' ? createSeller : createBuyer;
-    const state = create({ mode: 'taker', offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now });
+    const policy = this.addressProofPolicy();
+    const state = create({ mode: 'taker', offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now,
+      networkId: policy.networkId, requireAddressProof: policy.required });
     const key = `${offerId}-${random32()}`;
     await this.host.addTrade({ key, role, state, makerPeer: offer.peerKey, lifetimeSec: reg.params.refundSec + 3600 });
     await this.host.deliver(key, { type: 'tick' });
@@ -515,6 +554,7 @@ export class Trader {
 
   status() {
     this.pruneOffers();
+    const open = new Set((this.registry.usable?.pairs ?? []).filter(p => p.status === 'open').map(p => p.pair));
     return {
       software: SOFTWARE, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '',
@@ -522,13 +562,14 @@ export class Trader {
       me: this.me, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       signersOnline: this.onlineSigners(), certificatesReady: this.certificates.available().length,
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
-      offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
+      offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
         return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv) }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
         tradeId: t.state.tradeId, H: t.state.H ?? null, committee: t.state.terms?.committee.map(c => c.dexKey) ?? [],
         pair: t.state.draft?.pair, baseAmount: t.state.draft?.baseAmount, quoteAmount: t.state.draft?.quoteAmount })),
-      book: Object.fromEntries(this.book), tickers: Object.fromEntries(this.tickers), chat: this.readChat(),
+      book: Object.fromEntries([...this.book].filter(([pair]) => open.has(pair))),
+      tickers: Object.fromEntries([...this.tickers].filter(([pair]) => open.has(pair))), chat: this.readChat(),
     };
   }
 }

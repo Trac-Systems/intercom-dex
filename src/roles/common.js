@@ -9,13 +9,15 @@ import { selectCommittee } from '../core/committee.js';
 import { quoteAmount, registryPair } from '../market/assets.js';
 import { meetsVersion } from '../core/software.js';
 import { checkProfileRegistry } from '../net/profile-core.js';
+import { validAddressProof, validTermsAddressProofs } from '../core/address-proof.js';
 
 // An offer id is the hash of the offer's content, so one id always means one maker, price, size and expiry.
 export function offerIdOf({ pair, side, baseAmount, price, maker, peerKey, expiresAt, registryVersion, software }) {
   return sha256Hex(stableJSON({ v: 'intercom-dex/v1/offer', pair, side, baseAmount, price, maker, peerKey, expiresAt, registryVersion, software }));
 }
 
-export const validOffer = (offer, from) => offer.maker.dexKey === from && offer.offerId === offerIdOf(offer);
+export const validOffer = (offer, from, policy = { required: false }) => offer.maker.dexKey === from &&
+  offer.offerId === offerIdOf(offer) && validAddressProof(offer.maker, { ...policy, validUntil: offer.expiresAt });
 
 // A local access token (bridge, control API) in a private 0600 file, created on first use. Never printed. Keys are
 // not kept like this; they live in the role's encrypted keyring (keyring.js).
@@ -143,8 +145,9 @@ export function checkTermsAgainstRegistry(terms, registry) {
 // the trade can still lock: sendBy lies within one send window (plus clock skew) from now, and refundAfter keeps the
 // registry's distance from it.
 export const SUMMON_SKEW_SEC = 120;
-export function verifySummon(body, registry, now) {
+export function verifySummon(body, registry, now, addressProof = { required: false }) {
   const terms = validateTerms(body.terms), id = body.tradeId;
+  if (!validTermsAddressProofs(terms, { ...addressProof, now })) throw new Error('Invalid Trac address proof');
   if (termsTradeId(terms) !== id) throw new Error('Trade id does not match terms');
   checkTermsAgainstRegistry(terms, registry);
   const p = registry.params;
@@ -175,8 +178,10 @@ export function buildDraft({ offer, baseAmount, maker, taker, registry, sendBy, 
   if (placeholder.length < registry.params.n) throw new Error('Not enough active signers');
   return {
     offerId: offer.offerId, pair: offer.pair, base: pair.base, baseAmount, quoteAmount: quote, mint,
-    seller: { dexKey: seller.dexKey, tracAddr: seller.tracAddr, solRecipient: seller.solAddr },
-    buyer: { dexKey: buyer.dexKey, tracAddr: buyer.tracAddr, solPayer: buyer.solAddr },
+    seller: { dexKey: seller.dexKey, tracAddr: seller.tracAddr, solRecipient: seller.solAddr,
+      ...(seller.tracProof ? { tracProof: seller.tracProof } : {}) },
+    buyer: { dexKey: buyer.dexKey, tracAddr: buyer.tracAddr, solPayer: buyer.solAddr,
+      ...(buyer.tracProof ? { tracProof: buyer.tracProof } : {}) },
     registryVersion: registry.version, committee: placeholder, k: registry.params.k,
     fees: { platformFeeBps: registry.fee.platformFeeBps, tradeFeeBps: registry.fee.tradeFeeBps, signerShareBps: registry.fee.signerShareBps,
       collector: registry.fee.collector, platformCollector },

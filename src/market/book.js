@@ -35,12 +35,13 @@ export function availableOffer(seen, book, inventory, now, heardAt = null) {
   const o = seen.offer, firstSeen = seen.firstSeen ?? seen.lastSeen;
   if (heardAt != null && heardAt < firstSeen && now - heardAt < VENUE_SILENT_SEC) return null;
   let left = BigInt(o.baseAmount);
-  if (inventory?.registryVersion === o.registryVersion && inventory.remaining) {
+  // The venue's current book includes live offers made under earlier registry terms.
+  if (inventory?.pair === o.pair && inventory.remaining) {
     const row = inventory.remaining.find(r => r.offerId === o.offerId);
     if (row) left = left < BigInt(row.amount) ? left : BigInt(row.amount);
     else if (inventory.ts >= firstSeen && inventory.remaining.length < 200) return null;
   }
-  if (book?.registryVersion === o.registryVersion && book.ts >= firstSeen) {
+  if (book?.pair === o.pair && book.ts >= firstSeen) {
     const levels = book.levels.filter(l => l.side === o.side), price = priceUnits(o.price);
     const level = levels.find(l => priceUnits(l.price) === price);
     if (level) left = left < BigInt(level.baseAmount) ? left : BigInt(level.baseAmount);

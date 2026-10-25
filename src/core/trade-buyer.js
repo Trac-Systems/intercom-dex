@@ -1,6 +1,6 @@
 import { STEP_BUDGET_MS } from './terms.js';
 import { lockStatement, prepareDeal } from './dealing.js';
-import { abortTransition, createTrader, negotiationStep, resumeActions, runStep, seededRng, sendAction } from './trade-common.js';
+import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusalReason, resumeActions, runStep, seededRng, sendAction } from './trade-common.js';
 
 export function createBuyer(config) { return createTrader('buyer', config); }
 export const LOCK_START_MARGIN_SEC = 120;
@@ -107,8 +107,10 @@ export function step(state, event) {
         ? abortTransition(s, e.reason || 'Definite adapter failure') : null;
     }
     if (m?.kind === 'abort') {
-      return !s.lockAttempted && !s.locked ? abortTransition(s, 'Peer aborted: ' + m.body.reason) : null;
+      return !s.lockAttempted && !s.locked ? abortTransition(s, peerAbortReason(s, m.body.reason)) : null;
     }
+    if (m?.kind === 'refused') return !s.lockAttempted && !s.locked
+      ? abortTransition(s, refusalReason(s, m.body.reason)) : null;
     if (e.type === 'escrowLocked' && s.phase === 'locking') {
       if (e.tradeId !== s.tradeId || (e.hashHex !== undefined && e.hashHex !== s.H)) return null;
       if (e.ok === false && e.unknown !== true) {

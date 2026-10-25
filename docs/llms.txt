@@ -65,9 +65,12 @@ seller: awaitDeal, checkingProof, awaitReady, reservingEscrow, transferring, awa
   finished: complete, lost, aborted.
 aborted always means nothing moved; read reason. lost means the buyer refunded after the seller sent; tell the user.
 
+Signers can refuse a trade before funds move when the seller cannot cover the asset and TNK fee, the balance cannot be read, or the seller is paused after unsent trades. Read the trade reason in dex_status and explain it to the owner. Restore funding or the reader before a fresh take; for a pause, contact the venue. Older apps may instead report Signers did not confirm. No collateral or trading deposit is needed.
+At registry minimum 0.1.34, traders prove control of their Trac addresses with the existing wallet. Update and repost open offers when this activates. Proven seller strikes follow the wallet across DEX identity changes. Already committed trades retain settlement and recovery.
+
 Declines (a take ends aborted with this reason):
 busy - offer has 3 trades before their lock, or you have 3 with this maker; retry later.
-insufficient - less is left than you asked; take less.
+insufficient - less is left than you asked, or your wallet cannot cover the trade and fees; check balances or take less.
 signers - too few eligible signers online at the maker; retry in a few minutes.
 expired - the offer expired or was cancelled.
 invalid - the take didn't match the offer, the registry or the clock; refresh dex_book, check the clock.

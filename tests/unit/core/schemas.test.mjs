@@ -39,7 +39,7 @@ test('every message kind has a strict top-level and nested body schema', () => {
     decline: { offerId: id, takeNonce: key, reason: 'busy' }, working: { tradeId: id, step: 'certificate' },
     present: { ref: id }, summon: { tradeId: id, terms: f.terms, sigs: [{ v: 1 }, { v: 1 }] },
     terms: { tradeId: id, terms: f.terms }, termsSig: { tradeId: id }, deal,
-    ack: { tradeId: id, H: key, holdUntil: 100 }, transferSent: { tradeId: id, txHash: key },
+    ack: { tradeId: id, H: key, holdUntil: 100 }, refused: { tradeId: id, reason: 'seller-funds' }, transferSent: { tradeId: id, txHash: key },
     sharePublish: { tradeId: id, H: key, signerIndex: 1, share: key, commitments: [key] },
     claimed: { tradeId: id, claimSignature: SIG }, refunded: { tradeId: id, refundSignature: SIG }, abort: { tradeId: id, reason: 'test' },
     registry: f.registry, book: { registryVersion: 1, pair: 'TNK/USDC', ts: 1, seq: 1, levels: [] },

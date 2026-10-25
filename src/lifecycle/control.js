@@ -26,6 +26,8 @@ export function lifecycleHandler({ id, config, role, wallets, dashboard, stop, f
         if (req.method === 'GET' && req.url === '/lifecycle') return reply(200, {
           id, dataDir: realpathSync(config.dataDir), pid: process.pid, software: SOFTWARE, node: process.version,
           signers: role.onlineSigners(), dashboard: dashboard(), blockers: stopBlockers(role, wallets), stopping,
+          trades: [...(role.host?.trades.values() ?? [])].map(t => ({ key: t.key, tradeId: t.state.tradeId ?? null,
+            role: t.role, phase: t.state.phase, reason: t.state.reason ?? null })),
         });
         if (req.method !== 'POST' || req.url !== '/lifecycle/stop') return reply(404, { error: 'not found' });
         const input = JSON.parse(body || '{}');

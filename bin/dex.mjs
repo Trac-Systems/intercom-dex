@@ -38,6 +38,7 @@ import { controlHandler } from '../src/roles/control.js';
 import { startDex, stopDex, statusDex, dexLogs } from '../src/lifecycle/manager.js';
 import { lifecycleHandler } from '../src/lifecycle/control.js';
 import { requestStop } from '../src/lifecycle/lock.js';
+import { validateSeller } from '../src/roles/signer-strikes.js';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   config: { type: 'string' }, out: { type: 'string' }, asset: { type: 'string' }, amount: { type: 'string' }, to: { type: 'string' },
@@ -46,14 +47,16 @@ const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   'authority-keypair': { type: 'string' }, yes: { type: 'boolean' }, from: { type: 'string' }, mint: { type: 'string' },
   'first-launch': { type: 'boolean' },
   'peer-config': { type: 'string' }, force: { type: 'boolean' },
+  seller: { type: 'string' }, identity: { type: 'string' },
 } });
 if (!isAbsolute(values.config ?? '')) throw new Error('--config must be an absolute path');
-const command = ['fee', 'keys'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
+const command = ['fee', 'keys', 'strikes'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
 const allowed = { run: ['first-launch'], setup: ['import-solana', 'import-trac-mnemonic', 'import-reset-keystore'], balances: [], withdraw: ['asset', 'amount', 'to'], export: ['out'],
   start: ['peer-config'], stop: ['force'], status: [], logs: [],
   restore: ['from'], 'keys check': ['authority-keypair'], 'fee withdraw-platform': ['authority-keypair', 'to', 'mint', 'amount'],
-  'fee set': ['trade-fee', 'signer-share'], 'fee platform': ['bps', 'authority-keypair', 'yes'] };
-if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, or no command');
+  'fee set': ['trade-fee', 'signer-share'], 'fee platform': ['bps', 'authority-keypair', 'yes'],
+  'strikes list': [], 'strikes clear': ['seller', 'identity'] };
+if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, strikes list, strikes clear, or no command');
 if (Object.keys(values).some(k => k !== 'config' && !allowed[command].includes(k))) throw new Error('Option does not apply to this command');
 if (['start', 'stop', 'status', 'logs'].includes(command)) {
   try {
@@ -77,6 +80,13 @@ const locksRole = ['lock-signer', 'lock-venue'].includes(config.role);
 if (locksRole && !['run', 'setup'].includes(command)) throw new Error('Locks roles support run and setup');
 if (config.role === 'market-feed' && command !== 'run') throw new Error('market-feed only supports run');
 if (values['first-launch'] && config.role !== 'service') throw new Error('--first-launch is for the first start of a new venue only');
+if (command.startsWith('strikes ')) {
+  if (config.role !== 'signer') throw new Error('Strike commands are signer only');
+  const clear = command === 'strikes clear';
+  const body = clear ? validateSeller({ tracAddr: values.seller, dexKey: values.identity }) : undefined;
+  console.log(JSON.stringify(await controlCall(config, clear ? 'POST' : 'GET', clear ? '/seller-strikes/clear' : '/seller-strikes', body), null, 2));
+  process.exit(0);
+}
 if (['fee set', 'fee platform'].includes(command)) {
   if (config.role !== 'service') throw new Error('Fee commands are service only');
   let body;
@@ -222,7 +232,7 @@ if (locksRole) {
     role = new Service({ bridge, identity, store, solana, trac, profile, registryInput: config.registry, latest: config.latest, log,
       firstLaunch: values['first-launch'] === true });
   } else if (config.role === 'signer') {
-    role = new Signer({ bridge, identity, box: keys.box, store, trac, profile, serviceKey: config.serviceKey, log });
+    role = new Signer({ bridge, identity, box: keys.box, store, trac, solana, profile, serviceKey: config.serviceKey, log });
   } else if (config.role === 'trader') {
     const me = { dexKey: identity.publicKey, tracAddr: wallet.address, solAddr: keypair.publicKey.toBase58() };
     role = new Trader({ bridge, identity, store, solana, trac, me, profile, serviceKey: config.serviceKey, mint: profile.mint,

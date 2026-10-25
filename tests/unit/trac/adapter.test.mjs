@@ -9,6 +9,7 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { createTracAdapter } from '../../../src/trac/adapter.js';
 import { buildTnkTransfer, buildResetTransfer, transferNonce } from '../../../src/trac/transfers.js';
 import { openIntentStore } from '../../../src/trac/intents.js';
+import { validAddressProof } from '../../../src/core/address-proof.js';
 
 const root = process.env.TMPDIR ?? fileURLToPath(new URL('../../../.test-tmp/trac/', import.meta.url));
 fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -54,6 +55,17 @@ test('adapter sends TNK with bound nonce and runner result fields', async () => 
   assert.equal((await adapter.sendTransfer(f)).reason, 'adapter_closed');
   assert.equal((await adapter.verifyTransfer(f.request)).reason, 'adapter_closed');
   assert.equal(adapter.reserveTx(f.request).ok, false);
+});
+
+test('adapter signs address ownership with its existing wallet and pinned network without a transaction', () => {
+  const f = fixture(), networkId = 918, dexKey = 'ab'.repeat(32);
+  const adapter = createTracAdapter({ ...f, profile: { peer: { msbNetworkId: networkId } } });
+  const proof = adapter.proveAddress({ dexKey, expiresAt: 1000 });
+  assert.equal(validAddressProof({ dexKey, tracAddr: f.wallet.address, tracProof: proof }, { networkId, now: 100 }), true);
+  assert.deepEqual(f.calls, []);
+  adapter.close(); assert.throws(() => adapter.proveAddress({ dexKey, expiresAt: 1000 }));
+  const noWallet = createTracAdapter({ bridge: f.bridge, profile: { peer: { msbNetworkId: networkId } } });
+  assert.throws(() => noWallet.proveAddress({ dexKey, expiresAt: 1000 })); noWallet.close();
 });
 
 test('adapter refuses invalid sends, wrong wallet, deadlines, context and receipts', async () => {

@@ -61,7 +61,8 @@ Call it first, then about once a minute while trades run. Fields:
 
 - `software`, `updateRequired`, `message`: this program's version. `updateRequired: true` with message
   `update required` means the venue's registry needs a newer version. New offers and takes are refused; running
-  trades continue.
+  trades continue. When the venue activates Trac address proofs at minimum 0.1.34, update the app and repost open
+  offers. The app signs with its existing Trac wallet automatically; no transaction or trading deposit is needed.
 - `pairs`: the registry pairs. Each has `pair`, `base` (`kind`, `id`, `decimals`), `minBaseAmount`, `status`
   (`open` or `paused`) and `availability` (`open`, `paused` or `needs a newer version`). Trade only pairs whose
   `availability` is `open`.
@@ -309,6 +310,8 @@ finalized Solana block), the lock about 10 seconds, and from the lock to `comple
 call a trade stuck before it has spent 5 minutes in one phase. The trade runs on by itself when you stop checking,
 so if your session ends, tell the user the trade continues and that they can ask you for the result later.
 
+Signers can refuse a trade before funds move when the seller cannot cover the asset and TNK fee, the balance cannot be read, or the seller is paused after unsent trades. Read the trade reason in dex_status and explain it to the owner. Restore funding or the reader before a fresh take; for a pause, contact the venue. Older apps may instead report Signers did not confirm. No collateral or trading deposit is needed.
+
 ## Declines
 
 A maker answers a take it can't serve with a decline. Your trade then ends `aborted` with the decline reason:
@@ -316,7 +319,7 @@ A maker answers a take it can't serve with a decline. Your trade then ends `abor
 | Reason | Meaning | What to do |
 | --- | --- | --- |
 | `busy` | The offer already has 3 trades before their lock, or you have 3 with this maker. | Wait a minute and try again, or take another offer. |
-| `insufficient` | Less is left on the offer than you asked for. | Take a smaller amount from `dex_book` levels. |
+| `insufficient` | Less is left on the offer than you asked for, or your wallet cannot cover the trade and fees. | Check your balance and fees, or take a smaller amount from `dex_book` levels. |
 | `signers` | The maker sees fewer eligible signers online than a trade needs. | Wait a few minutes and try again. |
 | `expired` | The offer expired or was cancelled. | Pick another offer. |
 | `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under, or the take doesn't match the offer, the registry or the clock (makers before 0.1.18 don't answer those, and your trade times out). | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |

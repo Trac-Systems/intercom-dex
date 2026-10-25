@@ -1,5 +1,6 @@
 import { quoteAmount } from './assets.js';
 import { MIN_SOL } from '../wallets/accounting.js';
+import { validAddressProof } from '../core/address-proof.js';
 
 // Maker funds: the venue reads each maker's wallet and leaves an offer out of its published book while the maker cannot
 // fill even the pair's smallest trade (a seller without the base asset or the TNK transfer fee, a buyer without the
@@ -8,16 +9,22 @@ import { MIN_SOL } from '../wallets/accounting.js';
 export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4, FAILED_READS = 3;
 
 export class MakerFunds {
-  constructor({ solana, trac, now, log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
-    Object.assign(this, { solana, trac, now, log, ttlSec, readsAtOnce });
+  constructor({ solana, trac, now, addressProof = () => ({ required: false }), log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
+    Object.assign(this, { solana, trac, now, addressProof, log, ttlSec, readsAtOnce });
     this.wallets = new Map();   // `${chain}:${address}` -> { balances, at, failures } (balances null after a failed read)
     this.lastGood = new Map();  // chain -> time of the latest successful read on it
     this.reading = new Set();
   }
 
-  // false only when a read showed too little; true or unknown keep the offer, and so does any error here.
+  // Proof admission fails closed. Once admitted, an unknown balance or read error keeps the offer.
   funded(offer, pair) {
+    if (!this.#proven(offer)) return false;
     try { return this.#funded(offer, pair); } catch { return true; }
+  }
+
+  #proven(offer) {
+    try { return validAddressProof(offer.maker, { ...this.addressProof(), now: this.now(), validUntil: offer.expiresAt }); }
+    catch { return false; }
   }
 
   // A wallet that failed FAILED_READS reads in a row while other wallets on the same chain read fine is treated as
@@ -46,6 +53,7 @@ export class MakerFunds {
   refresh(offers) {
     const due = [];
     for (const o of offers) {
+      if (!this.#proven(o)) continue;
       const [chain, address] = o.side === 'sell' ? ['trac', o.maker.tracAddr] : ['solana', o.maker.solAddr];
       const key = `${chain}:${address}`, w = this.wallets.get(key);
       if (this.reading.has(key) || due.some(d => d.key === key) || (w && this.now() - w.at < this.ttlSec)) continue;
@@ -56,6 +64,7 @@ export class MakerFunds {
 
   // The last balances read for this offer's maker (null when unread or unreadable).
   balances(offer) {
+    if (!this.#proven(offer)) return null;
     return offer.side === 'sell' ? this.#cached('trac', offer.maker.tracAddr) : this.#cached('solana', offer.maker.solAddr);
   }
 

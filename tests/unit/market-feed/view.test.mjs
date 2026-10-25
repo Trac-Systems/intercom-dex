@@ -10,12 +10,33 @@ import { parseBody } from '../../../src/core/schemas.js';
 import { sha256Hex, stableJSON } from '../../../src/core/canonical.js';
 import { BookFeed, BookView } from '../../../src/market/book-feed.js';
 import { setup, memoryStore } from './helpers.mjs';
+import { offerIdOf } from '../../../src/roles/common.js';
+import { networkId, proveParty } from '../core/address-proof-fixture.mjs';
 
 const pair = s => s.view().pairs.find(p => p.pair === 'RESET/USDC');
 const book = (s, remaining, ts = s.clock.t, seq = 1) => ({ pair: 'RESET/USDC', registryVersion: 1, ts, seq,
   levels: [{ side: 'sell', price: '0.43', baseAmount: '1', offers: 1 }, { side: 'sell', price: '0.42', baseAmount: '1', offers: 1 },
     { side: 'buy', price: '0.40', baseAmount: '1', offers: 1 }, { side: 'buy', price: '0.41', baseAmount: '1', offers: 1 }],
   ...(remaining === undefined ? {} : { remaining }) });
+
+test('market feed hides cached unproven offers and identity mappings when proofs activate', async () => {
+  const s = setup(); s.profile.peer = { msbNetworkId: networkId }; await s.register();
+  const legacy = s.offer({ software: '0.1.33' });
+  await s.send('offer', legacy, s.f.seller, 'intercom-dex:offers');
+  assert.equal(s.view().offers.length, 1);
+  s.feed.market.parties.set('legacy', { keys: [[legacy.maker.dexKey, legacy.maker.tracAddr]] });
+  s.feed.registry.current = { ...s.f.registry, minSoftware: '0.1.34' };
+  assert.equal(s.view().offers.length, 0);
+  assert.equal(s.feed.market.address(legacy.maker.dexKey), legacy.maker.dexKey);
+  const offer = { ...legacy, software: '0.1.34', maker: proveParty(legacy.maker, { expiresAt: s.clock.t + 2000 }) };
+  offer.offerId = offerIdOf(offer);
+  await s.send('offer', offer, s.f.seller, 'intercom-dex:offers');
+  assert.equal(s.view().offers.length, 1);
+  assert.equal(s.feed.market.address(offer.maker.dexKey), offer.maker.tracAddr);
+  const forged = { ...offer, maker: { ...offer.maker, tracAddr: legacy.maker.tracAddr } };
+  forged.offerId = offerIdOf(forged);
+  assert.equal(await s.send('offer', forged, s.f.seller, 'intercom-dex:offers'), false);
+});
 
 test('whole-unit view matches the game contract, with exact decimals and unknown fields', async () => {
   const s = setup(); await s.register();
@@ -26,7 +47,7 @@ test('whole-unit view matches the game contract, with exact decimals and unknown
   assert.equal(s.view().offers[0].left, null);
   await s.send('book', book(s, [{ offerId: offer.offerId, amount: '320000000000' }]));
   const trade = s.trade(); await s.send('tradeLog', trade);
-  assert.deepEqual(s.view().offers[0], { offerId: offer.offerId, pair: offer.pair, side: 'sell', price: '0.42', amount: '5000', left: '3200',
+  assert.deepEqual(s.view().offers[0], { offerId: offer.offerId, pair: offer.pair, registryVersion: 1, side: 'sell', price: '0.42', amount: '5000', left: '3200',
     maker: { trac: offer.maker.tracAddr, sol: offer.maker.solAddr }, postedAt: s.clock.t });
   assert.deepEqual(s.view().trades[0], { id: trade.tradeId, pair: trade.pair, price: '0.42', amount: '1200', usdc: '504',
     seller: { trac: trade.seller.tracAddr, sol: trade.seller.solAddr }, buyer: { trac: trade.buyer.tracAddr, sol: trade.buyer.solAddr }, settledAt: s.clock.t });
@@ -36,6 +57,52 @@ test('whole-unit view matches the game contract, with exact decimals and unknown
   assert.equal(s.view().offers.find(o => o.pair === 'TNK/USDC').amount, '1.000000000000000001');
   const cache = s.feed.view(); s.clock.t++;
   assert.equal(s.feed.view(), cache); assert.equal(s.view().ts, s.clock.t - 1);
+});
+
+test('registry v10 to v11 keeps live old-terms offers and uses current inventory, levels and tickers', async () => {
+  const s = setup(); s.f.registry.version = 10; await s.register();
+  const old = s.offer({ registryVersion: 10 }), bid = s.offer({ registryVersion: 10, side: 'buy', price: '0.41' });
+  const cancelled = s.offer({ registryVersion: 10, price: '0.44' }), expired = s.offer({ registryVersion: 10, expiresAt: s.clock.t + 3 });
+  const removed = s.offer({ registryVersion: 10, price: '0.46' }), filled = s.offer({ registryVersion: 10, price: '0.47' });
+  const feed = new BookFeed(); let seq = 0;
+  const publish = async (version, offers) => {
+    const message = feed.next(old.pair, version, offers, s.clock.t, () => ++seq);
+    assert.ok(await s.send(message.kind, message.body));
+  };
+  for (const o of [old, bid, cancelled, expired, removed, filled]) assert.ok(await s.send('offer', o, s.f.seller, 'intercom-dex:offers'));
+  await publish(10, [old, bid, cancelled, expired, removed, filled]);
+  const tick = { pair: old.pair, registryVersion: 10, ts: s.clock.t, last: '0.42', high24h: '0.42', low24h: '0.42', volume24h: '1000000', trades24h: 1 };
+  assert.ok(await s.send('ticker', tick));
+  const postedAt = s.view().offers.find(o => o.offerId === old.offerId).postedAt;
+  s.clock.t++;
+  const next = { ...s.f.registry, version: 11, issuedAt: s.clock.t, fee: { ...s.f.registry.fee, tradeFeeBps: 75 } };
+  assert.ok(await s.send('registry', next));
+  assert.equal(s.view().offers.length, 6, 'a registry change alone does not remove offers');
+  assert.deepEqual([pair(s).bestSell, pair(s).bestBuy, pair(s).last], [null, null, null], 'old book and ticker do not drive the current market');
+  const fresh = s.offer({ registryVersion: 11, price: '0.43' });
+  assert.ok(await s.send('offer', fresh, s.f.seller, 'intercom-dex:offers'));
+  await publish(11, [{ ...old, baseAmount: '320000000000' }, bid, cancelled, expired, fresh, { ...filled, baseAmount: '0' }]);
+  assert.ok(await s.send('ticker', { ...tick, registryVersion: 11, ts: s.clock.t, volume24h: '2000000', trades24h: 2 }));
+  const row = s.view().offers.find(o => o.offerId === old.offerId);
+  assert.deepEqual([row.registryVersion, row.amount, row.left, row.postedAt], [10, '5000', '3200', postedAt]);
+  assert.equal(s.view().offers.find(o => o.offerId === fresh.offerId).registryVersion, 11);
+  assert.deepEqual([pair(s).bestSell, pair(s).bestBuy, pair(s).volume24h], ['0.42', '0.41', '2']);
+  assert.ok(!s.view().offers.some(o => [removed.offerId, filled.offerId].includes(o.offerId)));
+  assert.ok(await s.send('cancel', { offerId: cancelled.offerId }, s.f.seller, 'intercom-dex:offers'));
+  assert.equal(await s.send('offer', cancelled, s.f.seller, 'intercom-dex:offers'), false);
+  s.clock.t += 2;
+  assert.deepEqual(new Set(s.view().offers.map(o => o.offerId)), new Set([old.offerId, bid.offerId, fresh.offerId]));
+  assert.equal(await s.send('offer', expired, s.f.seller, 'intercom-dex:offers'), false);
+  const restarted = setup({ store: s.store, clock: s.clock, f: s.f });
+  assert.ok(await restarted.send('offer', old, s.f.seller, 'intercom-dex:offers'));
+  assert.equal(restarted.view().offers[0].left, '3200', 'current inventory applies to old offers after restart');
+  s.clock.t += 60; await publish(11, [bid, fresh]);
+  assert.equal(await s.send('offer', old, s.f.seller, 'intercom-dex:offers'), false, 'a missing old offer stays removed');
+  assert.equal(pair(s).bestSell, '0.43');
+  assert.ok(await s.send('registry', { ...next, version: 12, issuedAt: s.clock.t, pairs: next.pairs.map(p => ({ ...p, status: 'paused' })) }));
+  assert.deepEqual(s.view().offers, []);
+  assert.deepEqual([pair(s).bestSell, pair(s).bestBuy], [null, null]);
+  assert.equal(await s.send('offer', bid, s.f.seller, 'intercom-dex:offers'), false);
 });
 
 test('postedAt survives disk restart and reannouncement; cancellation and expiry stay closed', async () => {

@@ -5,6 +5,7 @@ import { seal } from '../core/envelope.js';
 import { sha256Hex, stableJSON } from '../core/canonical.js';
 import { tradeId } from '../core/terms.js';
 import { SOFTWARE, meetsVersion } from '../core/software.js';
+import { addressProofRequired } from '../core/address-proof.js';
 import { RegistryView, publicReceiver, nowSec, random32, checkTermsAgainstRegistry } from './common.js';
 import { checkProfileTerms } from '../net/profile-core.js';
 import { RegistryRelays } from '../net/relays.js';
@@ -27,7 +28,8 @@ export class MarketFeed {
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.verify = publicReceiver(now);
-    this.market = new MarketView({ store, now, history });
+    this.market = new MarketView({ store, now, history, addressProof: () => ({
+      networkId: this.profile?.peer?.msbNetworkId, now: this.now(), required: addressProofRequired(this.registry.usable) }) });
     this.books = new BookView();
     this.chat = new MarketChat({ now, chatRelays: profile?.chatRelays ?? [] });
     this.epoch = randomBytes(8).toString('hex'); this.seq = 0; this.messages = [];

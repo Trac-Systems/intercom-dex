@@ -5,6 +5,12 @@ holds your funds in between: the USDC waits in a lock on Solana, and the coins g
 buyer on Trac Network. You tell your agent what you want to trade, and the agent and a small program on your own
 computer do the rest.
 
+Version 0.1.34 proves that traders control their Trac addresses, checks seller funds before confirmation and pauses
+sellers who repeatedly leave funded trades unsent. Updated apps explain refusals immediately, and makers reject
+takes whose wallets cannot cover the trade and fees. No collateral or trading deposit is added. Offers under
+still-valid older fee or registry terms remain visible. Follow the [upgrade order](docs/OPERATORS.md#activating-trac-address-proofs-0134)
+to activate address proofs; traders then update and repost open offers.
+
 ## Trade by talking to your agent
 
 Once intercom-dex is set up, you talk to your agent in plain words. Some things you can say, and what the agent

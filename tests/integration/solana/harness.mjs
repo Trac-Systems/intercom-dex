@@ -26,6 +26,8 @@ export async function startValidator({ maxLifetimeMs = 140000 } = {}) {
 export async function startIsolatedValidator({ maxLifetimeMs = 140000 } = {}) {
   for (let attempt = 0; attempt < 100; attempt++) {
     const base = 20000 + Math.floor(Math.random() * 30000), held = [];
+    // Reserved owner applications must never be probed, even for an apparently free test range.
+    if (base <= 47212 && base + 60 >= 47200) continue;
     try {
       for (const port of [base, base + 1, base + 2, base + 3, ...Array.from({ length: 51 }, (_, i) => base + 10 + i)]) {
         const tcp = net.createServer(); held.push(() => new Promise(r => tcp.close(r)));

@@ -16,6 +16,7 @@ import { openStore } from '../../../src/roles/store.js';
 import { IN_FLIGHT_SLACK_SEC, BUSY_TRADES, TICKER_SOON_SEC, SHARE_REQUESTS, Service, MAX_UNPROVEN_WATCHES, UNMATCHED_PER_SENDER } from '../../../src/roles/service.js';
 import { RegistryView, nowSec, random32, verifySummon, offerIdOf, SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, tracAddress, hex, SOL, SOL2, MINT, SIG } from '../core/helpers.mjs';
+import { proveParty, networkId } from '../core/address-proof-fixture.mjs';
 
 const KEY = randomBytes(32);
 const SIGNERS = 'intercom-dex:signers', OFFERS = 'intercom-dex:offers';
@@ -75,6 +76,27 @@ test('a reported settlement is logged once both chains prove it, and published',
   assert.equal(logged.price, '5');
   assert.deepEqual(logged.seller, { tracAddr: t.terms.seller.tracAddr, solAddr: t.terms.seller.solRecipient });
   assert.deepEqual(logged.buyer, { tracAddr: t.terms.buyer.tracAddr, solAddr: t.terms.buyer.solPayer });
+});
+
+test('venue intake requires a maker wallet proof for sell and buy offers after activation', async () => {
+  const s = setup({ immediate: true });
+  await s.service.start(); s.service.stop();
+  s.service.profile = { peer: { msbNetworkId: networkId } };
+  s.service.registry.minSoftware = '0.1.34';
+  for (const side of ['sell', 'buy']) {
+    const offer = { ...s.offer, side, software: '0.1.34' };
+    offer.offerId = offerIdOf(offer);
+    const post = o => s.emit(OFFERS, s.envelope(s.f.seller, 'offer', o, OFFERS));
+    await post(offer);
+    assert.ok(!s.service.book.snapshot(offer.pair, s.clock.t).some(o => o.offerId === offer.offerId));
+    offer.maker = proveParty(offer.maker, { expiresAt: s.clock.t + 5000 });
+    offer.offerId = offerIdOf(offer);
+    await post(offer);
+    assert.ok(s.service.book.snapshot(offer.pair, s.clock.t).some(o => o.offerId === offer.offerId));
+    const forged = { ...offer, maker: { ...offer.maker, tracAddr: s.f.terms.buyer.tracAddr } };
+    forged.offerId = offerIdOf(forged); await post(forged);
+    assert.ok(!s.service.book.snapshot(offer.pair, s.clock.t).some(o => o.offerId === forged.offerId));
+  }
 });
 
 test('a fee rotation retains old-trade settlement and signer credits, accounted separately by collector', async () => {
@@ -693,6 +715,35 @@ test('an offer whose maker cannot fund the smallest trade is left out of the pub
   await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS)); await tick(60);
   assert.deepEqual(shown(), [s.offer.offerId]);
   assert.equal(s.service.status().unfunded[s.offer.pair], 0);
+});
+
+test('fee rotation publishes old live offers in the current book with their unfilled, unreserved sizes', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  const variant = extra => { const o = { ...s.offer, ...extra }; return { ...o, offerId: offerIdOf(o) }; };
+  const cancelled = variant({ price: '6' }), expired = variant({ price: '7', expiresAt: s.clock.t + 9 });
+  for (const o of [s.offer, cancelled, expired]) await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', o, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); await new Promise(r => setImmediate(r)); };
+  const latest = () => s.bridge.sent.findLast(x => x.envelope.kind === 'book' && x.envelope.body.pair === s.offer.pair).envelope.body;
+  await tick(5); assert.equal(latest().remaining.length, 3);
+  const next = await s.service.publishFees({ ...s.service.registry.fee, tradeFeeBps: 75 });
+  const fresh = variant({ registryVersion: next.version, price: '4' });
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', fresh, OFFERS));
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'cancel', { offerId: cancelled.offerId }, OFFERS));
+  s.service.book.fill(s.offer.offerId, '1000000000000000000');
+  await s.summon(s.trade());
+  await tick(5);
+  assert.equal(latest().registryVersion, next.version);
+  assert.deepEqual(latest().remaining, [
+    { offerId: fresh.offerId, amount: fresh.baseAmount }, { offerId: s.offer.offerId, amount: '1000000000000000000' },
+  ]);
+  assert.deepEqual(latest().levels.map(l => [l.price, l.baseAmount]), [['4', fresh.baseAmount], ['5', '1000000000000000000']]);
+  assert.equal(s.service.book.get(s.offer.offerId, s.clock.t).registryVersion, 1);
+  assert.equal(s.service.registries.get(1).fee.tradeFeeBps, 50, 'the old offer keeps its fee terms');
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'cancel', { offerId: s.offer.offerId }, OFFERS));
+  await tick(60);
+  assert.deepEqual(latest().remaining, [{ offerId: fresh.offerId, amount: fresh.baseAmount }]);
 });
 
 test('a restarted venue keeps its book: offers seen in the last five minutes return, cancelled and stale ones do not', async () => {

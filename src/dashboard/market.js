@@ -32,6 +32,7 @@ export const takeOrder = () => (a, b) => a.at - b.at || (a.offerId < b.offerId ?
 // Build full depth from signed announcements; the wire book itself has only the best 50 levels per side.
 export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, heardAt = null, taken = { skip: new Set(), running: new Map() } }) {
   const base = pair.base.id, groups = new Map();
+  if (pair.status !== 'open') return { pair: pair.pair, base, at: now, asks: [], bids: [], spread: null };
   const better = takeOrder(now);
   const add = (o, firstSeen, own) => {
     if (o.pair !== pair.pair || o.expiresAt <= now || BigInt(o.baseAmount) <= 0n) return;

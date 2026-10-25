@@ -27,6 +27,51 @@ It goes out in the venue's signed `status` message, and traders see it as `servi
 announcement only: nothing downloads or installs by itself. When a release must be installed, the venue raises
 `minSoftware` in the registry.
 
+For 0.1.34, update every signer for seller balance checks, the persistent strike list, Trac address proofs and
+immediate refusal messages. Keep each signer's existing data folder. Update the venue and market feeds so offers
+under still-valid older registry or fee terms remain visible. Update trader apps for proofs, immediate explanations
+and take-time balance checks. A committee with enough old signers can still acknowledge without these checks.
+
+### Activating Trac address proofs (0.1.34)
+
+Keep the registry's minimum below `0.1.34` while upgrading. Upgrade every active committee signer first, then the
+venue and market feeds, then traders. Update the signers' advertised `software` in the registry to their installed
+version. Until activation, upgraded traders emit the same participant fields as 0.1.33 clients, so mixed versions
+continue trading. Address ownership is not enforced during this interval.
+
+After all active signers, the venue and market feeds are upgraded and traders have had time to update, set
+`minSoftware` to `0.1.34` or higher and restart the venue with its existing data directory. This publishes a new
+signed registry version. New offers and takes now include Trac wallet signatures, and signers require them before
+their first acknowledgement, including for trades that name an older registry snapshot. Old 0.1.33 clients report
+`update required`, start no new trades, and ignore proof-bearing packets that their strict schemas do not recognize.
+
+Open offers created before activation must be posted again, including offers from upgraded clients. Upgraded
+makers end these offers on their next announcement or restart and log the reason. Pending negotiations without
+proofs cannot obtain new signer acknowledgements. Already committed signer shares remain available through the
+trade's normal claim/refund lifecycle, even after upgrade or proof expiry. Do not reset role storage during rollout.
+
+Two confirmed no-send trades within seven days pause the proven seller Trac address for seven days from the second
+strike, across DEX identity changes. One strike never pauses trading. Entries recorded without proof are ignored;
+otherwise a forged address could penalize its actual holder. Only trades with proof verified before acknowledgement
+can create new strikes. A failed escrow read, a missing/mismatched lock, or any authenticated transfer attempt never
+creates a strike. Later transfer evidence cancels its strike. No collateral, deposit, bond or stake is required.
+The list is local to each signer and persists across restarts. Operators can inspect and clear it through the
+running signer's authenticated local control API:
+
+```sh
+node bin/dex.mjs strikes list --config /path/to/signer.json
+node bin/dex.mjs strikes clear --seller <Trac-address> --identity <DEX-public-key> --config /path/to/signer.json
+```
+
+Clearing applies to the address across all its DEX identities; `--identity` remains an audit field. Repeat a clear on
+each signer that recorded the seller. Clearing also prevents those overdue trades from recreating their strikes.
+Retain the data folder on rollback; older code ignores the extra ledger. Already acknowledged trades keep their
+existing settlement and recovery paths.
+
+Traders see refusal explanations in the dashboard, `dex_status` trade reasons, foreground logs, and
+`node bin/dex.mjs status --config /path/to/trader.json` for a managed trader. An unreadable seller balance is
+refused too: restore the chain reader or funds, then start a fresh trade. A paused seller should contact the venue.
+
 ## Ports and processes
 
 All local ports bind to 127.0.0.1. Each process on one machine needs its own:

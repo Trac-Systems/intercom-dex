@@ -8,6 +8,7 @@ import { selectCommittee } from '../../../src/core/committee.js';
 import { tradeId, buildTerms } from '../../../src/core/terms.js';
 import { SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, hex } from '../core/helpers.mjs';
+import { proveParty, networkId } from '../core/address-proof-fixture.mjs';
 
 async function setup() {
   const f = fixture(), now = Math.floor(Date.now() / 1000);
@@ -35,6 +36,23 @@ async function setup() {
 
 const held = (signer, key, buyer, seller) => signer.host.trades.set(key, { key, role: 'signer',
   state: { phase: 'holding', terms: { buyer: { dexKey: buyer }, seller: { dexKey: seller } } } });
+
+test('current registry rejects unproven summons naming an old snapshot; both proven parties are admitted', async () => {
+  const { signer, f, summonTerms, now } = await setup();
+  const next = { ...f.registry, version: 2, issuedAt: now - 1, minSoftware: '0.1.34',
+    signers: f.registry.signers.map(s => ({ ...s, software: '0.1.34' })) };
+  signer.registry.current = next;
+  signer.registry.snapshot = v => v === 1 ? f.registry : v === 2 ? next : null;
+  signer.profile = { mint: f.terms.mint, platformCollector: f.terms.fees.platformCollector, peer: { msbNetworkId: networkId } };
+  await summonTerms(f.terms); assert.equal(signer.host.trades.size, 0);
+  const terms = structuredClone(f.terms);
+  for (const role of ['seller', 'buyer']) {
+    terms[role] = proveParty(terms[role], { expiresAt: now + 2000 });
+    await summonTerms(terms);
+    assert.equal(signer.host.trades.size, role === 'buyer' ? 1 : 0);
+  }
+  assert.equal([...signer.host.trades.values()][0].state.requireAddressProof, true);
+});
 
 test('signers gate new summons by self version, advertised capabilities and pinned profile', async () => {
   for (const reason of ['self-version', 'asset', 'profile', 'eligible']) {

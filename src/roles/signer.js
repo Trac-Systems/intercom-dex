@@ -6,6 +6,8 @@ import { RegistryView, publicReceiver, nowSec, verifySummon } from './common.js'
 import { SOFTWARE, meetsVersion } from '../core/software.js';
 import { registryPair, pairStatus } from '../market/assets.js';
 import { checkProfileTerms } from '../net/profile.js';
+import { SellerStrikes } from './signer-strikes.js';
+import { addressProofRequired } from '../core/address-proof.js';
 
 const MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 // Unfinished trades a signer holds at once, in total and per trader key (buyer or seller). Summons beyond them are
@@ -19,9 +21,12 @@ export const OLD_REGISTRY_SEC = 31 * 86400;
 // A committee signer: joins trades it is summoned to (only when it is really in the signed terms' committee and the
 // registry it trusts lists it), holds its encrypted share, verifies the seller's transfer on its own node, publishes.
 export class Signer {
-  constructor({ bridge, identity, box, store, trac, serviceKey, profile = null, log = console.log }) {
+  constructor({ bridge, identity, box, store, trac, solana = null, serviceKey, profile = null, log = console.log }) {
     Object.assign(this, { bridge, identity, box, store, serviceKey, profile, log });
-    this.host = new TradeHost({ bridge, identity, store, solana: null, trac, profile, serviceKey, log });
+    this.strikes = new SellerStrikes({ store, log });
+    this.host = new TradeHost({ bridge, identity, store, solana: null, trac, profile, serviceKey, log,
+      addressProofRequired: () => !this.registry.usable || addressProofRequired(this.registry.usable),
+      signerStrikes: this.strikes, signerSolana: solana });
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
     this.receive = publicReceiver();
@@ -37,6 +42,9 @@ export class Signer {
   }
 
   stop() { this.host.stop(); clearInterval(this.heartbeat); }
+
+  listSellerStrikes() { return this.strikes.list(nowSec()); }
+  clearSellerStrikes(seller) { return this.host.clearSellerStrikes(seller); }
 
   // DEX_RESCUE_TRADES: comma-separated trade ids the operator rescues (see rescueTrade). Applied once per record.
   #rescue(list) {
@@ -84,7 +92,8 @@ export class Signer {
     const version = m.body.terms?.registryVersion, next = Number.isSafeInteger(version) && this.registry.snapshot(version + 1);
     if (!(version === reg.version || (version < reg.version && next && now - next.issuedAt < OLD_REGISTRY_SEC))) throw new Error('Registry version not current');
     if (version !== reg.version && m.body.terms.committee?.some(s => reg.removed?.some(r => r.dexKey === s.dexKey))) throw new Error('Committee member removed since');
-    const { terms, sigs, lifetimeSec } = verifySummon(m.body, this.registry.snapshot(version), now);
+    const { terms, sigs, lifetimeSec } = verifySummon(m.body, this.registry.snapshot(version), now,
+      { networkId: this.profile?.peer?.msbNetworkId, required: addressProofRequired(reg) });
     if (!meetsVersion(SOFTWARE, reg.minSoftware)) throw new Error('update required');
     const pair = registryPair(this.registry.snapshot(version), terms.pair);
     if (this.profile) checkProfileTerms(terms, this.profile);
@@ -100,7 +109,8 @@ export class Signer {
         throw new Error('Holding too many trades of this trader');
       }
     }
-    const state = createSigner({ terms, signerIndex: index + 1, boxSecret: this.box.secretKey, now });
+    const state = createSigner({ terms, signerIndex: index + 1, boxSecret: this.box.secretKey, now,
+      networkId: this.profile?.peer?.msbNetworkId, requireAddressProof: addressProofRequired(reg) });
     const key = `sign-${tradeId}`;
     await this.host.addTrade({ key, role: 'signer', state, lifetimeSec });
     for (const sig of sigs) await this.host.inject(key, sig);

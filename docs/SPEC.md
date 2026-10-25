@@ -82,6 +82,7 @@ string with at most 12 decimals; `trac1` is a checksummed Trac address; `sol` is
 | `working` | buyer | `tradeId`, `step: "certificate"` |
 | `deal` | buyer | `tradeId`, `k`, `committeeBoxKeys`, `H`, `commitments`, `sealedShares`, `proof` |
 | `ack` | committee signer | `tradeId`, `H`, `holdUntil` |
+| `refused` | committee signer | `tradeId`, `reason` (`seller-funds` or `seller-struck`) |
 | `transferSent` | seller | `tradeId`, `txHash` |
 | `sharePublish` | committee signer | `tradeId`, `H`, `signerIndex` (1-based), `share`, `commitments` |
 | `shareRequest` | seller, venue | `tradeId` |
@@ -101,6 +102,26 @@ string with at most 12 decimals; `trac1` is a checksummed Trac address; `sol` is
 `src/core/schemas.js` is the exact field specification, including every length and range.
 
 ### Terms
+
+From registry `minSoftware >= 0.1.34`, `maker`, `taker`, `seller` and `buyer` each carry
+`tracProof: {expiresAt, signature}`. `expiresAt` is an unsigned safe-integer Unix timestamp and `signature` is
+128 lowercase hex characters. The Trac wallet signs this 32-byte SHA-256 digest using Ed25519:
+
+```text
+SHA256(UTF8("intercom-dex/v1/trac-address-proof\n" + canonicalJSON({networkId,dexKey,tracAddr,expiresAt})))
+```
+
+`networkId` comes from the receiver's pinned `peer.msbNetworkId`; the public key is decoded from the address's
+32-byte bech32m payload. Proof-bearing addresses must be lowercase. Verification uses strict Ed25519 encodings
+(`zip215: false`). A proof must not be expired when admitted, and must cover the offer's expiry or the trade's
+`sendBy`. Makers sign through `offer.expiresAt + sendWindowSec + 120`; takers sign through `sendBy`. Both traders
+copy the same proofs into the terms, so the offer ID, trade ID and DEX signatures commit to the proof bytes.
+
+The current signed registry activates enforcement, even when terms name an older snapshot. Before activation,
+upgraded traders omit the field for compatibility with strict older schemas. After activation there is no missing
+proof fallback for new admissions. Any supplied invalid proof is rejected. Venue intake, funds filtering, trader
+admission, signer summons and the signer's first funds check enforce this rule. Already committed trades keep
+their shares and recovery paths; proof expiry never revokes an acknowledgement.
 
 ```json
 {
@@ -134,7 +155,9 @@ maker or the taker can be either side; the sequence is the same.
    answer those). Otherwise the maker declines it with `expired` when the
    offer expired; `version` when either side's software is below the registry minimum; `busy` when 3 trades on the offer
    (`MAX_TRADES_PER_OFFER`) or 3 negotiations with that taker (`MAX_NEGOTIATIONS_PER_TAKER`) have not locked yet;
-   `insufficient` when the offer's size minus filled and reserved amounts is too small; and `signers` when fewer
+   `insufficient` when the offer's size minus filled and reserved amounts is too small or a fresh balance read shows
+   the taker cannot fund this trade (seller: base amount plus TNK transfer fee; buyer: USDC including both fees plus
+   0.01 SOL). A failed or slower-than-two-second read proceeds to the signer checks. It declines `signers` when fewer
    than n eligible signers exist or fewer than k+1 of them are online. Each take envelope gets at most one
    decline, and the decline names the take's envelope nonce. Declines answer strangers, so they are bounded: at
    most one per sender per minute and 30 per minute in total (`DECLINES_PER_MINUTE`). They are stamped last
@@ -155,7 +178,7 @@ maker or the taker can be either side; the sequence is the same.
    signatures) on `intercom-dex:signers` every 20 seconds until it has k acks. The seller and each signer check the
    dealing shape and the certificate; each signer also opens its own sealed share and checks it against the
    commitments.
-8. **Acknowledge.** A signer stores its share encrypted and durably, then sends `ack` with
+8. **Acknowledge.** A signer stores its share encrypted and durably, checks seller funds and its strike list, then sends `ack` with
    `holdUntil = refundAfter`. It repeats the ack every 10 seconds until `sendBy`; after that, only a member that
    announces itself with `present` gets it again.
 9. **Lock.** With k valid acks (distinct committee members, this trade's `H`, `holdUntil >= refundAfter`) the
@@ -191,6 +214,20 @@ Locks, claims and refunds count only once finalized. Every signed Solana and Tra
 is sent, so a restart resumes the same transaction and never signs a second payment. The commit points are buyer
 `locking` (after the first lock attempt), seller `transferring` and signer `holding`; after them, network messages
 cannot end the trade.
+
+Before its first acknowledgement, each signer checks the exact seller wallet against the base amount, TNK fee and
+its durable reservations for other acknowledged trades. Short or unreadable balances fail closed. Two confirmed
+no-send trades within seven days pause new acknowledgements for that seller's proven Trac address across DEX
+identity changes for seven days from the second strike. One strike does not pause trading. Recording a strike
+requires address proofs verified before the first ack, a successful ack send, a matching finalized buyer escrow,
+and no authenticated transfer attempt after `sendBy + graceSec`. Unproven historical entries are ignored.
+Later authenticated transfer evidence cancels the corresponding strike. Existing acknowledgements remain valid.
+
+A failed balance or strike check also sends `refused` on the trade channel, signed like `ack`. Traders accept it only
+from their committee and for their trade. New apps abort preparation immediately with a plain explanation; once a
+buyer attempted a lock or a seller observed the funded escrow, refusals cannot interrupt recovery. Versions
+0.1.24–0.1.33 ignore this additional message and retain their existing acknowledgement timeout. Signers keep the
+existing ten-second check retry and deadline for those older apps. No collateral or trading deposit is required.
 
 ## 6. Lock certificate
 

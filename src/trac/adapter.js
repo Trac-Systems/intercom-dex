@@ -6,6 +6,7 @@ import { openUsedTxStore } from '../../peer/src/trac/used-tx.js';
 import { transferNonce, buildTnkTransfer, buildResetTransfer } from './transfers.js';
 import { openIntentStore } from './intents.js';
 import { supportedBase } from '../market/assets.js';
+import { createAddressProof } from '../core/address-proof.js';
 
 const isHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const isAmount = value => typeof value === 'string' && value.length <= 78 && /^[1-9][0-9]*$/.test(value);
@@ -195,6 +196,10 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
   }
 
   return {
+    proveAddress({ dexKey, expiresAt }) {
+      if (closed || !wallet || !profile) throw new Error('Trac wallet and network profile required');
+      return createAddressProof(wallet, { networkId: profile.peer.msbNetworkId, dexKey, expiresAt });
+    },
     async balances(address = wallet?.address) {
       if (closed) throw new Error('Adapter is closed');
       publicKey(address);

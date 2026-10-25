@@ -5,6 +5,8 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
     'GET /status': async () => ({ ...role.status(), ...(wallets ? { wallets: await wallets.info({ short: true }) } : {}) }),
     ...(wallets ? { 'GET /wallets': () => wallets.info(), 'POST /withdraw': b => wallets.withdraw(b) } : {}),
     ...(fees ? { 'POST /fee/set': b => fees.set(b), 'POST /fee/platform': b => fees.platform(b) } : {}),
+    ...(role.listSellerStrikes ? { 'GET /seller-strikes': () => role.listSellerStrikes(),
+      'POST /seller-strikes/clear': b => role.clearSellerStrikes(b) } : {}),
     ...(role.readChat ? { 'GET /chat': (_, url) => {
       const values = url.searchParams.getAll('since');
       if ([...url.searchParams.keys()].some(key => key !== 'since') || values.length > 1 ||

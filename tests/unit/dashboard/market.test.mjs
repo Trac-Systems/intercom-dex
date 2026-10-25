@@ -67,6 +67,28 @@ test('deltas retain last full inventory, cap an offer and its level, and remove 
   assert.deepEqual(build([a, b], { book: snapshot([]), inventory }).asks, []);
 });
 
+test('current books size old and new registry offers by id and remove missing or expired offers', () => {
+  const old = offer(1, '1'), fresh = offer(2, '2'), removed = offer(3, '3'), expired = offer(4, '4');
+  for (const s of [old, removed, expired]) s.offer.registryVersion = 10;
+  fresh.offer.registryVersion = 11; expired.offer.expiresAt = now;
+  const inventory = { ...snapshot([
+    { side: 'sell', price: '1', baseAmount: '40000000', offers: 1 },
+    { side: 'sell', price: '2', baseAmount: '60000000', offers: 1 },
+  ], [{ offerId: old.offer.offerId, amount: '40000000' }, { offerId: fresh.offer.offerId, amount: '60000000' }]), registryVersion: 11 };
+  const rows = [old, fresh, removed, expired], out = build(rows, { book: inventory });
+  assert.deepEqual(out.asks.map(l => [l.price, l.amount.units, l.take.offerId]), [
+    ['1', '40000000', old.offer.offerId], ['2', '60000000', fresh.offer.offerId],
+  ]);
+  assert.equal(availableOffer(old, inventory, inventory, now).registryVersion, 10);
+  const delta = { ...inventory, ts: now + 1, levels: [{ side: 'sell', price: '1', baseAmount: '20000000', offers: 1 }] };
+  delete delta.remaining;
+  assert.equal(build(rows, { book: delta, inventory }).asks[0].take.amount.units, '20000000');
+  assert.deepEqual(build(rows, { book: { ...delta, levels: [] }, inventory }).asks, []);
+  assert.deepEqual(build(rows, { book: { ...inventory, remaining: [] } }).asks, []);
+  assert.deepEqual(build(rows, { pair: { ...pair, status: 'paused' }, book: inventory, mine: [{ ...old.offer, available: '100000000' }] }).asks, []);
+  assert.equal(old.offer.baseAmount, '100000000', 'signed offer remains unchanged');
+});
+
 test("another maker's offer shows only after a venue book heard after it, unless the venue went silent", () => {
   // Seen at 990; the venue's last book arrived at 980 and does not list it yet (an unfunded maker's offer never gets listed).
   const fresh = offer(1, '1', 'buy', '100000000', 990);

@@ -105,6 +105,7 @@ DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs reset-sell refund
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs relay
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs relay-none
 DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs fee-change
+DEX_PROOF_ZKEY=/absolute/lockkey.zkey node tests/e2e/stack.mjs address-proof reset-sell tnk-buy
 ```
 
 Without arguments it runs `wallets`, `reset-sell`, `tnk-buy`, `cheating-dealer`, `cheating-certificate`,
@@ -112,6 +113,11 @@ Without arguments it runs `wallets`, `reset-sell`, `tnk-buy`, `cheating-dealer`,
 `relay` and `relay-none` on their own, each with fresh peers. The stack prints its run folder at start; the logs of
 every process are in its `logs` folder. `DEX_DEBUG=1` adds message and adapter logs. It stops every process it
 started on exit.
+
+`address-proof` requires a registry minimum of at least `0.1.34`. It sends a correctly DEX-signed offer naming a
+funded third-party Trac address without proof, then a take with a substituted address. The venue and counterparty
+reject them before an escrow can lock. `reset-sell` and `tnk-buy` exercise both maker sides with real wallet proofs
+when that minimum is active. Mixed-release runs keep the minimum below activation until the listed nodes upgrade.
 
 ## The local network profile
 

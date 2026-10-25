@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { lockProofSchema } from './lock-certificate.js';
 import { isTracAddress, isSolanaAddress } from './addresses.js';
 import { softwareSchema } from './software.js';
+import { addressProofSchema } from './address-proof.js';
 
 export const hexKey = z.string().length(64).regex(/^[0-9a-f]{64}$/);
 export const amount = z.string().regex(/^(0|[1-9][0-9]{0,30})$(?![\s\S])/);
@@ -27,7 +28,8 @@ const solSignature = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{64,88}$(?![\s\S])/)
 // Registry texts are printable ASCII without quotes or backslashes, so their serialized size is exactly their length.
 const plainText = max => z.string().min(1).max(max).regex(/^[ !#-\[\]-~]+$/);
 const reason = plainText(160);
-const participant = z.object({ dexKey: hexKey, tracAddr: tracAddress, solAddr: solanaAddress }).strict();
+const tracParticipant = { dexKey: hexKey, tracAddr: tracAddress, tracProof: addressProofSchema.optional() };
+const participant = z.object({ ...tracParticipant, solAddr: solanaAddress }).strict();
 const member = z.object({ dexKey: hexKey, boxKey: hexKey }).strict();
 const signer = member.extend({ label: plainText(80), limitUsdc: amount, status: z.enum(['active', 'inactive']),
   assets: z.array(assetIdSchema).min(1).max(64).refine(a => new Set(a).size === a.length), software: softwareSchema, relayKey: hexKey.optional() }).strict();
@@ -37,8 +39,8 @@ export const feesSchema = z.object({
 }).strict().refine(f => f.tradeFeeBps + f.platformFeeBps <= 1500, 'Total fees exceed limit');
 export const termsSchema = z.object({
   offerId: hexKey, pair, base: baseSchema, baseAmount: positive, quoteAmount: positive, mint: solanaAddress,
-  seller: z.object({ dexKey: hexKey, tracAddr: tracAddress, solRecipient: solanaAddress }).strict(),
-  buyer: z.object({ dexKey: hexKey, tracAddr: tracAddress, solPayer: solanaAddress }).strict(),
+  seller: z.object({ ...tracParticipant, solRecipient: solanaAddress }).strict(),
+  buyer: z.object({ ...tracParticipant, solPayer: solanaAddress }).strict(),
   registryVersion: uint.min(1), committee: z.array(member).min(1).max(16), k: uint.min(1).max(16),
   fees: feesSchema, sendBy: uint, refundAfter: uint, graceSec: uint,
   R: hexKey,
@@ -117,6 +119,7 @@ export const bodySchemas = Object.freeze({
   working: z.object({ tradeId: hexKey, step: z.literal('certificate') }).strict(),
   deal: dealSchema,
   ack: z.object({ tradeId: hexKey, H: hexKey, holdUntil: uint }).strict(),
+  refused: z.object({ tradeId: hexKey, reason: z.enum(['seller-funds', 'seller-struck']) }).strict(),
   transferSent: z.object({ tradeId: hexKey, txHash: hexKey }).strict(),
   sharePublish: z.object({ tradeId: hexKey, H: hexKey, signerIndex: uint.min(1).max(16), share: hexKey,
     commitments: z.array(hexKey).min(1).max(16) }).strict(),

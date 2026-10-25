@@ -4,7 +4,7 @@ import { checkDealShape, lockStatement } from './dealing.js';
 import { hexKey } from './schemas.js';
 import { reconstruct, verifyShare } from './vss.js';
 import { transferNonce } from './terms.js';
-import { abortTransition, createTrader, negotiationStep, resumeActions, runStep, sendAction } from './trade-common.js';
+import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusalReason, resumeActions, runStep, sendAction } from './trade-common.js';
 
 export function createSeller(config) { return createTrader('seller', config); }
 
@@ -122,7 +122,9 @@ export function step(state, event) {
       }
       return !committed && e.definite === true ? abortTransition(s, e.reason || 'Definite adapter failure') : null;
     }
-    if (m?.kind === 'abort') return committed ? null : abortTransition(s, 'Peer aborted: ' + m.body.reason);
+    if (m?.kind === 'abort') return committed ? null : abortTransition(s, peerAbortReason(s, m.body.reason));
+    if (m?.kind === 'refused') return committed || s.escrowOk || s.phase === 'reservingEscrow'
+      ? null : abortTransition(s, refusalReason(s, m.body.reason));
     if (m?.kind === 'working' && s.phase === 'awaitDeal') {
       s.dealBudgetMs = Math.min(STEP_BUDGET_MS.certificate, (s.dealBudgetMs ?? STEP_BUDGET_MS.deal) + STEP_BUDGET_MS.deal);
       return { state: s, actions: [] };

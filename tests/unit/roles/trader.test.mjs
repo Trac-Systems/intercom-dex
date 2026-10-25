@@ -18,6 +18,8 @@ import { registryPair } from '../../../src/market/assets.js';
 import { sha256Hex, hexToBytes } from '../../../src/core/canonical.js';
 import { WalletManager } from '../../../src/wallets/manager.js';
 import { controlHandler } from '../../../src/roles/control.js';
+import { createAddressProof } from '../../../src/core/address-proof.js';
+import { proofWallet, networkId } from '../core/address-proof-fixture.mjs';
 
 const OFFERS = 'intercom-dex:offers';
 
@@ -64,6 +66,38 @@ test('an offer id is bound to its content; a different offer under the same id i
   const forged = { ...swapped, offerId: offerIdOf(swapped) };
   await post(bridge, mallory, 'offer', { ...forged, price: '2' });
   assert.equal(taker.offers.has(forged.offerId), false, 'an id that does not match the content is dropped');
+});
+
+test('trader rollout emits legacy shapes before activation and carries wallet proofs through offer, take and draft', async () => {
+  const f = fixture(), alice = party(), bob = party();
+  const a = await trader(alice, { registry: f.registry }), b = await trader(bob, { registry: f.registry });
+  const old = await a.t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  assert.equal(old.maker.tracProof, undefined);
+  await post(b.bridge, alice, 'offer', old);
+  const registry = { ...f.registry, minSoftware: '0.1.34', signers: f.registry.signers.map(s => ({ ...s, software: '0.1.34' })) };
+  for (const { t } of [a, b]) {
+    t.registry.current = registry;
+    for (const s of registry.signers) t.heartbeats.set(s.dexKey, { at: performance.now(), software: '0.1.34' });
+    const wallet = proofWallet(); t.me = { ...t.me, tracAddr: wallet.address };
+    t.profile = { peer: { msbNetworkId: networkId }, mint: MINT, platformCollector: SOL2 };
+    t.host.trac = { proveAddress: input => createAddressProof(wallet, { ...input, networkId }) };
+  }
+  assert.equal(b.t.availableOffer(old.offerId), null, 'cached legacy offer cannot be taken after activation');
+  const offer = await a.t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  const second = await a.t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  assert.notEqual(offer.offerId, second.offerId, 'proof-bearing offers retain collision protection');
+  assert.ok(offer.maker.tracProof);
+  await post(b.bridge, alice, 'offer', offer);
+  const taken = await b.t.takeOffer(offer.offerId, offer.baseAmount, '1');
+  const draft = b.t.host.trades.get(taken.key).state.draft;
+  assert.deepEqual(draft.seller.tracProof, offer.maker.tracProof);
+  assert.ok(draft.buyer.tracProof);
+  const take = b.bridge.sent.find(x => x.envelope.kind === 'take').envelope;
+  assert.deepEqual(take.body.taker.tracProof, draft.buyer.tracProof);
+  assert.equal(b.t.host.trades.get(taken.key).state.requireAddressProof, true);
+  await a.t.host.hooks.unrouted[0](take.ch, take); await a.t.takeQueue;
+  const maker = [...a.t.host.trades.values()][0];
+  assert.deepEqual(maker.state.draft, draft, 'maker uses the signed offer proof when building the same terms');
 });
 
 test('a take must name the offer price and stay within the offer size', async () => {
@@ -167,6 +201,47 @@ async function channelPost(t, bridge, from, kind, body, ch) {
   for (let i = 0; i < 5; i++) { await new Promise(r => setImmediate(r)); await t.takeQueue; await Promise.all([...t.host.trades.values()].map(x => x.queue)); }
   return nonce;
 }
+
+test('maker declines an unfunded buyer or seller immediately; failed reads still admit the take', async () => {
+  for (const side of ['buy', 'sell']) for (const failure of [false, true]) {
+    const { registry } = fixture(), peer = party(), { t, bridge } = await trader(party(), { registry });
+    const offer = await t.makeOffer({ pair: 'TNK/USDC', side, baseAmount: '1000000000000000000', price: '1' });
+    const read = async address => {
+      assert.equal(address, side === 'buy' ? peer.me.tracAddr : peer.me.solAddr);
+      if (failure) throw new Error('reader unavailable');
+      return { TNK: '0', feeTnk: '3', USDC: '0', SOL: '10000000' };
+    };
+    t.host.trac = { balances: read }; t.host.solana = { walletBalances: read };
+    await channelPost(t, bridge, peer, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion,
+      software: '0.1.0', taker: peer.me, commitment: random32(), baseAmount: offer.baseAmount,
+      sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, 'intercom-dex:t:' + offer.offerId);
+    assert.equal(t.host.trades.size, failure ? 1 : 0);
+    assert.deepEqual(bridge.sent.filter(x => x.envelope.kind === 'decline').map(x => x.envelope.body.reason), failure ? [] : ['insufficient']);
+  }
+});
+
+test('address proofs precede maker balance admission for both buy and sell offers', async () => {
+  for (const side of ['buy', 'sell']) for (const forged of [false, true]) {
+    const { registry } = fixture(), peer = party(), wallet = proofWallet();
+    registry.minSoftware = '0.1.34'; registry.signers.forEach(s => { s.software = '0.1.34'; });
+    const { t, bridge } = await trader(party(), { registry });
+    t.me = { ...t.me, tracAddr: wallet.address };
+    t.profile = { peer: { msbNetworkId: networkId }, mint: MINT, platformCollector: SOL2 };
+    let reads = 0;
+    const read = async () => { reads++; return { TNK: '999999999999999999999999', feeTnk: '3', USDC: '999999999', SOL: '999999999' }; };
+    t.host.trac = { proveAddress: input => createAddressProof(wallet, { ...input, networkId }), balances: read };
+    t.host.solana = { walletBalances: read };
+    const offer = await t.makeOffer({ pair: 'TNK/USDC', side, baseAmount: '1000000000000000000', price: '1' });
+    const taker = { ...peer.me, tracAddr: proofWallet().address,
+      ...(forged ? { tracProof: { expiresAt: nowSec() + 10000, signature: '00'.repeat(64) } } : {}) };
+    await channelPost(t, bridge, peer, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion,
+      software: '0.1.34', taker, commitment: random32(), baseAmount: offer.baseAmount,
+      sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, 'intercom-dex:t:' + offer.offerId);
+    assert.equal(reads, 0, 'neither Trac nor Solana balances can admit an unproven taker');
+    assert.equal(t.host.trades.size, 0);
+    assert.deepEqual(bridge.sent.filter(x => x.envelope.kind === 'decline').map(x => x.envelope.body.reason), ['invalid']);
+  }
+});
 
 test('traders accept only authenticated listed active heartbeats, use receive time and expire after 90 seconds', async ctx => {
   let ms = 100000; ctx.mock.method(performance, 'now', () => ms);
@@ -569,6 +644,49 @@ test('full-book remainder survives deltas, limits takes and disappears from cont
   await channelPost(taker, bridge, service, 'book', { ...full, seq: 11, ts: ts + 3, levels: [], remaining: [] }, 'intercom-dex');
   await post(bridge, alice, 'offer', offer);
   assert.deepEqual(taker.status().offers, [], 'reannouncing the original signed amount cannot undo a known fill');
+});
+
+test('control/MCP status keeps old live offers at current book sizes after a fee change', async ctx => {
+  let ms = Date.now(); ctx.mock.method(Date, 'now', () => ms);
+  const { registry } = fixture(); registry.version = 10;
+  const alice = party(), service = party();
+  const { t: maker, bridge: makerBridge } = await trader(alice, { registry, serviceKey: service.me.dexKey });
+  const { t: taker, bridge } = await trader(party(), { registry, serviceKey: service.me.dexKey });
+  const old = await maker.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '2000000000000000000', price: '1' });
+  await post(bridge, alice, 'offer', old);
+  const next = { ...registry, version: 11, issuedAt: nowSec(), fee: { ...registry.fee, tradeFeeBps: 75 } };
+  for (const [role, wire] of [[maker, makerBridge], [taker, bridge]]) {
+    role.store.put('registry-v10', registry);
+    await channelPost(role, wire, service, 'registry', next, 'intercom-dex');
+  }
+  const fresh = await maker.makeOffer({ pair: old.pair, side: 'sell', baseAmount: old.baseAmount, price: '2' });
+  await post(bridge, alice, 'offer', fresh);
+  ms += 10000;
+  const remaining = '500000000000000000', full = { pair: old.pair, registryVersion: 11, seq: 10, ts: nowSec(), levels: [
+    { side: 'sell', price: old.price, baseAmount: remaining, offers: 1 },
+    { side: 'sell', price: fresh.price, baseAmount: fresh.baseAmount, offers: 1 },
+  ], remaining: [{ offerId: old.offerId, amount: remaining }, { offerId: fresh.offerId, amount: fresh.baseAmount }] };
+  await channelPost(taker, bridge, service, 'book', full, 'intercom-dex');
+  await channelPost(maker, makerBridge, service, 'book', full, 'intercom-dex');
+  assert.deepEqual(taker.status().offers.map(o => [o.offerId, o.registryVersion, o.baseAmount]), [
+    [old.offerId, 10, remaining], [fresh.offerId, 11, fresh.baseAmount],
+  ]);
+  assert.equal(maker.status().mine.find(o => o.offerId === old.offerId).listed, true);
+  await assert.rejects(taker.takeOffer(old.offerId, old.baseAmount, old.price), /offer size/);
+  const taken = await taker.takeOffer(old.offerId, undefined, old.price);
+  assert.equal(taken.baseAmount, remaining);
+  const draft = [...taker.host.trades.values()][0].state.draft;
+  assert.equal(draft.registryVersion, 10); assert.equal(draft.fees.tradeFeeBps, 50);
+  ms += 1000;
+  const gone = { ...full, ts: nowSec(), seq: 11, levels: full.levels.slice(1), remaining: full.remaining.slice(1) };
+  await channelPost(taker, bridge, service, 'book', gone, 'intercom-dex');
+  await channelPost(maker, makerBridge, service, 'book', gone, 'intercom-dex');
+  await post(bridge, alice, 'offer', old);
+  assert.deepEqual(taker.status().offers.map(o => o.offerId), [fresh.offerId]);
+  assert.equal(maker.status().mine.find(o => o.offerId === old.offerId).listed, false);
+  const paused = { ...next, version: 12, issuedAt: nowSec(), pairs: next.pairs.map(p => ({ ...p, status: 'paused' })) };
+  await channelPost(taker, bridge, service, 'registry', paused, 'intercom-dex');
+  assert.deepEqual(taker.status().offers, []); assert.deepEqual(taker.status().book, {}); assert.deepEqual(taker.status().tickers, {});
 });
 
 test('freshness and size are checked again after a slow wallet check, before a trade starts', async () => {
