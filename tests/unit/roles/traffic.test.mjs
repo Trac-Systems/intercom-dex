@@ -6,6 +6,8 @@ import { simulation } from '../core/simulation.mjs';
 import { seal } from '../../../src/core/envelope.js';
 import { encodeKey } from '../../../src/core/keys.js';
 import { hex } from '../core/helpers.mjs';
+import Sidechannel from '../../../peer/features/sidechannel/index.js';
+import { dexTransport } from '../../../peer/features/dex-transport.js';
 
 const sim = simulation({ capturePhases: true });
 async function host(t, role, state, identity) {
@@ -27,6 +29,129 @@ async function host(t, role, state, identity) {
   };
   return { h, tr, clock, sent, tick, receive, records };
 }
+
+function outbox(transcript, role, identity) {
+  const result = {};
+  for (const { name, action: a } of transcript.log) {
+    if (name !== role || a.type !== 'send' || ['claimed', 'refunded', 'abort'].includes(a.kind)) continue;
+    (result[a.ch] ??= []).push(seal({ kind: a.kind, ch: a.ch, body: a.body }, identity.secretKey,
+      { ts: 100, nonce: hex() }));
+  }
+  return result;
+}
+
+for (const phase of ['locking', 'locked']) test(`buyer ${phase} stops automatic outbox sends at sendBy but still answers present`, async t => {
+  const state = sim.snapshots.get(`buyer:${phase}`), f = await host(t, 'buyer', state, sim.f.buyer);
+  f.h.solana = { checkEscrow: async ({ hashHex }) => ({ ok: true, hashHex, status: 'active' }) };
+  f.tr.outbox = outbox(sim, 'buyer', sim.f.buyer);
+  const ch = tradeChannel(state.tradeId), batch = Object.values(f.tr.outbox).flat().length;
+  assert.ok(f.tr.outbox[ch].some(e => e.kind === 'deal'));
+  f.clock.now = state.terms.sendBy - 20;
+  await f.tick(0); await f.tick(10);
+  assert.equal(f.sent.length, batch, 'normal ten-second repeats continue before sendBy');
+  f.sent.length = 0;
+  await f.tick(10); await f.tick(10); await f.tick(3600);
+  assert.equal(f.tr.state.phase, phase);
+  assert.equal(f.sent.length, 0, 'no periodic sends at or after sendBy');
+  for (const requester of [sim.f.seller, sim.nodes.get('signer1').identity]) {
+    f.sent.length = 0;
+    await f.receive(requester, 'present', { ref: state.tradeId });
+    assert.deepEqual(f.sent.map(x => x.envelope), f.tr.outbox[ch], 'explicit recovery returns the unchanged outbox');
+  }
+});
+
+test('buyer refund processing and retries continue after automatic outbox sends stop', async t => {
+  const state = sim.snapshots.get('buyer:locked'), f = await host(t, 'buyer', state, sim.f.buyer);
+  f.tr.outbox = outbox(sim, 'buyer', sim.f.buyer);
+  let refunds = 0, checks = 0;
+  f.h.solana = {
+    refund: async () => { refunds++; return { ok: false, unknown: true }; },
+    checkEscrow: async ({ hashHex }) => { checks++; return { ok: true, hashHex, status: 'active' }; },
+  };
+  f.clock.now = state.terms.sendBy;
+  await f.tick(0);
+  f.clock.now = state.terms.refundAfter;
+  await f.tick(0); await f.tick(15); await f.tick(3600);
+  assert.equal(f.tr.state.phase, 'refunding');
+  assert.ok(refunds >= 2, 'refunds still retry');
+  assert.ok(checks >= 1, 'settlement still reconciles');
+  assert.equal(f.sent.length, 0, 'refund waits do not repeat the dealing');
+  await f.receive(sim.f.seller, 'present', { ref: state.tradeId });
+  assert.deepEqual(f.sent.map(x => x.envelope), f.tr.outbox[tradeChannel(state.tradeId)]);
+});
+
+for (const phase of ['transferring', 'awaitShares', 'claiming']) test(`seller ${phase} stops automatic outbox sends at the transfer verification cutoff`, async t => {
+  const state = sim.snapshots.get(`seller:${phase}`), f = await host(t, 'seller', state, sim.f.seller);
+  // A submitted transfer may remain in transferring while its finality is unknown.
+  f.tr.state.txHash = sim.snapshots.get('seller:awaitShares').txHash;
+  f.tr.outbox = outbox(sim, 'seller', sim.f.seller);
+  f.h.solana = { checkEscrow: async ({ hashHex }) => ({ ok: true, hashHex, status: 'active' }) };
+  const notices = () => f.sent.filter(x => x.envelope.kind !== 'shareRequest');
+  const batch = Object.values(f.tr.outbox).flat().length;
+  f.clock.now = state.terms.sendBy;
+  await f.tick(0); await f.tick(10);
+  assert.equal(notices().length, batch, 'transfer evidence still repeats during grace');
+  f.clock.now = state.terms.sendBy + state.terms.graceSec - 10;
+  await f.tick(0);
+  assert.equal(notices().length, 2 * batch, 'the last repeat before the cutoff still allows recovery');
+  f.sent.length = 0;
+  await f.tick(10); await f.tick(10); await f.tick(3600);
+  assert.equal(f.tr.state.phase, phase);
+  assert.equal(notices().length, 0, 'old transfer and negotiation messages stop after grace');
+  assert.equal(f.sent.some(x => x.envelope.kind === 'shareRequest'), phase === 'awaitShares', 'missing shares still get requested');
+  f.sent.length = 0;
+  await f.receive(sim.f.buyer, 'present', { ref: state.tradeId });
+  assert.deepEqual(f.sent.map(x => x.envelope), f.tr.outbox[tradeChannel(state.tradeId)]);
+  f.sent.length = 0;
+  f.clock.now = state.terms.refundAfter;
+  await f.tick(0); await f.tick(60);
+  assert.equal(f.sent.length, 0, 'settlement waits remain quiet after refundAfter');
+});
+
+test('six stale locked buyers add no PoW jobs over ten minutes of ticks alongside fresh negotiations', async t => {
+  const transcripts = Array.from({ length: 6 }, () => {
+    const offerId = hex();
+    return simulation({ neverSend: true, fixture: { ...sim.f, offerId, terms: { ...sim.f.terms, offerId } } });
+  });
+  const f = await host(t, 'buyer', transcripts[0].state('buyer'), sim.f.buyer);
+  for (const [i, transcript] of transcripts.entries()) {
+    const key = i === 0 ? 'trade' : `stale-${i}`;
+    if (i > 0) await f.h.addTrade({ key, role: 'buyer', state: structuredClone(transcript.state('buyer')), lifetimeSec: 176400 });
+    f.h.trades.get(key).outbox = outbox(transcript, 'buyer', sim.f.buyer);
+  }
+  await new Promise(r => setImmediate(r));
+  f.h.solana = { checkEscrow: async ({ hashHex }) => ({ ok: true, hashHex, status: 'active' }) };
+  f.clock.now = f.tr.state.terms.sendBy;
+  const policy = dexTransport({ role: 'trader', servicePeerKey: encodeKey(sim.f.service.publicKey) }).sidechannel;
+  const sc = new Sidechannel({}, policy), pending = [];
+  sc._now = () => f.clock.now * 1000;
+  const work = t.mock.method(sc, '_attachPow', sc._attachPow.bind(sc));
+  f.sent.length = 0;
+  f.h.bridge.send = (ch, envelope) => {
+    f.sent.push({ ch, envelope });
+    const job = sc._stampedPayload(ch, envelope);
+    pending.push(job);
+    return job;
+  };
+  const freshChannel = tradeChannel(hex());
+  for (let second = 0; second <= 600; second++) {
+    await f.tick(second === 0 ? 0 : 1);
+    await Promise.all([...f.h.trades.values()].map(tr => tr.queue));
+    if (second % 300 === 0) {
+      for (const kind of ['accept', 'reveal']) {
+        const payload = await sc._stampedPayload(freshChannel, { kind, round: second });
+        assert.equal(sc._checkPow(payload, freshChannel), true, 'fresh negotiation gets a valid 20-bit stamp');
+      }
+    }
+  }
+  // Drain even when this regression fails, so no PoW work outlives the test.
+  await Promise.all(pending);
+  assert.equal(f.sent.length, 0, 'stale outboxes never reach the stamping queue');
+  assert.equal(work.mock.callCount(), 6, 'only the six fresh negotiation messages require work');
+  assert.ok(sc.powPending.every(n => n === 0));
+  assert.ok([...f.h.trades.values()].every(tr => tr.state.phase === 'locked'));
+  t.diagnostic('6 stale trades, 601 ticks, 0 stale sends/PoW jobs; 6 fresh messages stamped at 20 bits');
+});
 
 test('published signer repeats only publications at 10,20,40 ... 640 seconds, persists schedule, then only answers requests', async t => {
   const node = sim.nodes.get('signer1'), f = await host(t, 'signer', node.state, node.identity);

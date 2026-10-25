@@ -747,7 +747,9 @@ export class TradeHost {
         this.sendPublic(tradeChannel(s.tradeId), 'shareRequest', { tradeId: s.tradeId }).catch(() => {});
       }
       // Messages on sidechannels are not stored anywhere: while a trade waits, repeat what this side already said.
-      // A signer's ack only matters until sendBy; after it, the ack goes only to members that announce themselves.
+      // Buyer dealings and signer acks only help until sendBy. Sellers keep repeating transfer evidence through
+      // grace, while signers can still accept it. Later settlement/refund waits must not keep stamping old outboxes;
+      // explicit present replies and share requests remain available.
       // A signer still missing the dealing asks again every 30 s until sendBy (joining announced it once): every trader answers
       // 'present' by repeating what it said on that channel.
       if (trade.role === 'signer' && s.phase === 'awaitDeal' && now < s.terms.sendBy) {
@@ -760,8 +762,10 @@ export class TradeHost {
       // While both sides wait for a reveal, the reveal cutoff leaves seconds, so a lost accept or reveal is repeated
       // every 2 s; every other wait repeats every 10 s.
       const every = s.phase === 'awaitReveal' ? REVEAL_RESEND_SEC : 10;
+      const terms = s.terms ?? s.draft;
+      const resendUntil = terms.sendBy + (trade.role === 'seller' ? terms.graceSec : 0);
       if (trade.phaseSeen !== s.phase) { trade.phaseSeen = s.phase; trade.phaseSince = now; }
-      else if (now - trade.phaseSince >= every && now - (trade.autoResendAt ?? 0) >= every && !(trade.role === 'signer' && now >= s.terms.sendBy)) {
+      else if (now < resendUntil && now - trade.phaseSince >= every && now - (trade.autoResendAt ?? 0) >= every) {
         trade.autoResendAt = now;
         this.#resendAll(trade);
       }

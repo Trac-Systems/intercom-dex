@@ -867,9 +867,12 @@ balances after either no lock or a refund.
   refundAfter. The service asks for a logged trade's missing shares at most
   three times (`SHARE_REQUESTS`), 600 s apart. Seller requests use the trade channel; service requests use
   `intercom-dex:signers`. Published signers resend only their publication at
-  10/20/40/80/160/320/600 seconds, then every 600 seconds. `present` retains its
-  separate 3-second requester limit. Waiting outboxes retain the 10-second cadence,
-  except a signer's ack from sendBy on.
+  10/20/40/80/160/320/640-second delays, then only answer requests. `present` retains its
+  separate 3-second requester limit. Waiting outboxes repeat every 10 seconds (every
+  2 seconds in `awaitReveal`), only before sendBy for buyers/signers and before
+  sendBy + graceSec for sellers, whose transfer evidence can still reach signers
+  during grace. Later settlement/refund waits send no automatic outbox repeats;
+  explicit `present` replies and missing-share requests keep working.
 - Only the buyer sends summons containing both terms signatures, every 20 seconds
   while waiting for k acks. This avoids two public copies of the same summons.
 - `verifySummon(body, registry, now)` (roles/common.js) also requires
@@ -926,7 +929,9 @@ balances after either no lock or a refund.
   `powLowKinds`, refused with `Stamp queue busy` while `powLowPending` (default 4) of them are pending. A stamp
   yields to any pending more urgent stamp at its next chunk, for at most `powYieldMs` (default 2,000 ms) in total;
   after that it shares the worker with them, so a stream of urgent stamps cannot starve offers. The dex uses
-  `DEX_POW_CLASSES` and `DEX_POW_LOW` (`['decline']`) from dex-transport.js.
+  `DEX_POW_CLASSES` and `DEX_POW_LOW` (`['decline']`) from dex-transport.js: heartbeats
+  and safety messages first, negotiation next, dealings after negotiation, then
+  unlisted kinds and declines. Deal stamps yield to pending accept/reveal stamps.
   The dex uses one difficulty, 20 bits, on offers, signers and trade channels.
 ## Locks
 

@@ -149,7 +149,33 @@ test('safety and negotiation stamps interrupt running background work, overtake 
     assert.equal(sc._checkPow(p, p.channel), true);
     assert.equal(sc._verifySig(p, p.from), true);
   }
-  assert.deepEqual(sc.powPending, [0, 0, 0, 0]);
+  assert.deepEqual(sc.powPending, [0, 0, 0, 0, 0]);
+});
+
+test('accept and reveal interrupt a running deal stamp and overtake queued deal repeats', async t => {
+  const policy = dexTransport({ role: 'trader', servicePeerKey: 'a'.repeat(64) }).sidechannel;
+  const sc = new Sidechannel({ wallet: wallet() }, { ...policy, powDifficulty: 4 });
+  const ch = 'intercom-dex:t:' + 'b'.repeat(64), order = [];
+  const slice = powWorker.slice.bind(powWorker);
+  let held = true, started;
+  const running = new Promise(resolve => { started = resolve; });
+  t.mock.method(powWorker, 'slice', job => {
+    started();
+    return held ? Promise.resolve({ nonce: -1 }) : slice(job);
+  });
+  const stamp = (kind, n = 0) => sc._stampedPayload(ch, { kind, n }).then(p => { order.push(kind); return p; });
+  const first = stamp('deal');
+  await running;
+  const repeats = [1, 2, 3, 4, 5].map(n => stamp('deal', n));
+  const accept = stamp('accept'), reveal = stamp('reveal'), heartbeat = stamp('heartbeat');
+  held = false;
+  const payloads = await Promise.all([first, ...repeats, accept, reveal, heartbeat]);
+  assert.deepEqual(order, ['heartbeat', 'accept', 'reveal', ...Array(6).fill('deal')]);
+  for (const payload of payloads) {
+    assert.equal(sc._checkPow(payload, ch), true);
+    assert.equal(sc._verifySig(payload, payload.from), true);
+  }
+  assert.ok(sc.powPending.every(n => n === 0));
 });
 
 test('a stranger take flood above the stamping rate does not delay transferSent past a small bound', async () => {
@@ -181,7 +207,7 @@ test('a stranger take flood above the stamping rate does not delay transferSent 
   assert.equal(sc._checkPow(sent, ch), true);
   assert.ok(refused > 0); assert.ok(sc.powPending.at(-1) <= sc.powLowPending, 'at most a few declines wait');
   await Promise.all(work);
-  assert.deepEqual(sc.powPending, [0, 0, 0, 0]);
+  assert.deepEqual(sc.powPending, [0, 0, 0, 0, 0]);
 });
 
 test('the stamp cache never drops a pending stamp; re-sends share it and expire only after it finished', async t => {
@@ -228,7 +254,9 @@ test('dex config pins the owner operationally, enables one difficulty, defaults 
     assert.equal(policy.sidechannel.ownerKeys['intercom-dex'], key);
     assert.equal(policy.sidechannel.powDifficulty, DEX_POW_BITS);
     assert.deepEqual(policy.sidechannel.powClasses, DEX_POW_CLASSES); assert.deepEqual(policy.sidechannel.powLowKinds, DEX_POW_LOW);
-    for (const kind of ['heartbeat', 'transferSent', 'ack', 'sharePublish', 'deal', 'claimed', 'refunded', 'summon']) assert.ok(DEX_POW_CLASSES[0].includes(kind), kind);
+    for (const kind of ['heartbeat', 'transferSent', 'ack', 'sharePublish', 'claimed', 'refunded', 'summon']) assert.ok(DEX_POW_CLASSES[0].includes(kind), kind);
+    assert.ok(DEX_POW_CLASSES[1].includes('accept')); assert.ok(DEX_POW_CLASSES[1].includes('reveal'));
+    assert.deepEqual(DEX_POW_CLASSES[2], ['deal']);
     assert.deepEqual(DEX_POW_LOW, ['decline']);
     assert.deepEqual(policy.sidechannel.powRequiredPrefixes, ['intercom-dex:t:']);
     // Servers carry the whole network's traffic per connection; traders keep the strict limit.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.35
+
+- Trades waiting for a refund no longer repeat old messages, so their proof-of-work no longer slows new trades
+  ("Reveal arrived too late", "Accept slot outside the freshness window").
+- New trade negotiations are stamped before repeated trade dealings.
+- Sellers stop repeating transfer messages once the verification window has closed.
+- Reconnect recovery, missing-share requests and automatic refunds are unchanged. Works with 0.1.32 and later;
+  no minimum-version change.
+
 ## 0.1.34
 
 - Traders prove control of their Trac addresses before new trades are admitted.

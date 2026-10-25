@@ -8,10 +8,11 @@ const DEX_CHANNELS = ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signe
 
 export const DEX_POW_BITS = 20;
 // Stamping order: heartbeats and post-lock safety messages, then negotiation with a trade's counterparty, then
-// everything else. A signer whose heartbeat waited behind its trade messages looked offline to traders (90 s), and
+// dealings, then everything else. Repeated dealings must yield to accept/reveal's short freshness window.
+// A signer whose heartbeat waited behind its trade messages looked offline to traders (90 s), and
 // every trade needs the whole committee. Declines answer strangers: stamped last, and dropped while one is waiting.
-export const DEX_POW_CLASSES = [['heartbeat', 'transferSent', 'ack', 'sharePublish', 'shareRequest', 'deal', 'claimed', 'refunded', 'summon'],
-  ['take', 'accept', 'reveal', 'terms', 'termsSig', 'working', 'abort']];
+export const DEX_POW_CLASSES = [['heartbeat', 'transferSent', 'ack', 'sharePublish', 'shareRequest', 'claimed', 'refunded', 'summon'],
+  ['take', 'accept', 'reveal', 'terms', 'termsSig', 'working', 'abort'], ['deal']];
 export const DEX_POW_LOW = ['decline'];
 // Per-connection inbound limit. A signer or venue receives the whole network's traffic over a few connections (offers,
 // the venue's book, chat and every trade); at 64 kB/s those connections were blocked for 30 s at a time and the
