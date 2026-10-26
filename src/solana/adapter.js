@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import bs58 from 'bs58';
 import { PublicKey, Transaction, SystemProgram, SYSVAR_CLOCK_PUBKEY } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, unpackAccount } from '@solana/spl-token';
+import { ACCOUNT_SIZE, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, unpackAccount } from '@solana/spl-token';
 import { PROGRAM_ID, USDC_MINT } from './constants.js';
 import {
   deriveEscrowPda, deriveConfigPda, deriveTradeConfigPda, deriveVaultAta, calculateFees,
@@ -510,6 +510,32 @@ export function createSolanaAdapter({
     return { ok: true, hashHex, signature };
   }
 
+  function claimInstructions(input, preimageHex) {
+    const destination = deriveVaultAta(input.recipient, input.mint);
+    return [createAssociatedTokenAccountIdempotentInstruction(input.recipient, destination, input.recipient, input.mint),
+      buildClaimInstruction({ ...input, preimageHex, recipientTokenAccount: destination })];
+  }
+
+  // Read-only admission check. Before a deal exists its hash/preimage are placeholders: the real claim has the
+  // same instructions, one signature and no priority-fee instruction. Quote that message through our RPC quorum.
+  async function claimFunds({ address, mint = serviceMint, collector }) {
+    const recipient = new PublicKey(address), tokenMint = new PublicKey(mint);
+    const [sol, ata, latest] = await Promise.all([account(recipient, { commitment: finality }),
+      token(deriveVaultAta(recipient, tokenMint), recipient, tokenMint), latestBlockhash()]);
+    const balance = BigInt(slotNumber(sol?.lamports ?? 0));
+    const instructions = claimInstructions({ recipient, mint: tokenMint, tradeFeeCollector: new PublicKey(collector),
+      paymentHashHex: '00'.repeat(32), programId: program }, '00'.repeat(32));
+    const message = new Transaction({ feePayer: recipient, recentBlockhash: latest.blockhash }).add(...instructions)
+      .serializeMessage().toString('base64');
+    const [fee, rent] = await Promise.all([
+      quorum('getFeeForMessage', [message, { commitment }], result => slotNumber(result?.value)),
+      ata ? 0 : quorum('getMinimumBalanceForRentExemption', [ACCOUNT_SIZE, { commitment: finality }], slotNumber),
+    ]);
+    const required = BigInt(fee) + BigInt(rent);
+    return { ok: balance >= required, balance: balance.toString(), fee: String(fee), rent: String(rent),
+      required: required.toString(), shortfall: (balance < required ? required - balance : 0n).toString() };
+  }
+
   async function settle(kind, { terms, hashHex, preimageHex }) {
     const claim = kind === 'claim';
     const authority = signer(claim ? terms.seller.solRecipient : terms.buyer.solPayer);
@@ -529,15 +555,16 @@ export function createSolanaAdapter({
     if (claim && createHash('sha256').update(Buffer.from(hex32(preimageHex), 'hex')).digest('hex') !== hashHex) throw new Error('Preimage does not match payment hash');
     const destination = deriveVaultAta(authority, input.mint);
     const create = createAssociatedTokenAccountIdempotentInstruction(authority, destination, authority, input.mint);
-    const ix = claim ? buildClaimInstruction({ ...input, preimageHex, recipientTokenAccount: destination }) : buildRefundInstruction({ ...input, refundTokenAccount: destination });
+    const instructions = claim ? claimInstructions(input, preimageHex) :
+      [create, buildRefundInstruction({ ...input, refundTokenAccount: destination })];
     const intent = tradeIntent(kind, terms, hashHex);
-    if (pending.has(`${kind}:${hashHex}`)) return { ok: true, [field]: await submit(`${kind}:${hashHex}`, [create, ix], intent) };
+    if (pending.has(`${kind}:${hashHex}`)) return { ok: true, [field]: await submit(`${kind}:${hashHex}`, instructions, intent) };
     if (!checked.ok || checked.status !== 'active') throw new Error(`Cannot ${kind} escrow: ${checked.status}`);
     if (!claim) {
       const clock = await account(SYSVAR_CLOCK_PUBKEY, { commitment: finality });
       if (clockTime(clock) < terms.refundAfter) throw new Error('Too early to refund according to chain Clock');
     }
-    return { ok: true, [field]: await submit(`${kind}:${hashHex}`, [create, ix], intent) };
+    return { ok: true, [field]: await submit(`${kind}:${hashHex}`, instructions, intent) };
   }
 
   function clockTime(clock) {
@@ -856,7 +883,7 @@ export function createSolanaAdapter({
     createCollectorConfig: input => guarded(`collector:${input?.collectorKeypair?.publicKey}`, () => createCollectorConfig(input)),
     setPlatformConfig: input => guarded(`platform:${input?.id}`, () => setPlatformConfig(input)),
     withdrawTradeFees: input => guarded(`withdraw:${input?.amount}:${input?.to}`, () => withdrawTradeFees(input)),
-    walletBalances,
+    walletBalances, claimFunds,
     walletWithdraw: input => guarded(`wallet:${input?.id}`, () => walletWithdraw(input)),
     walletWithdrawalStatus: id => guarded(`wallet:${id}`, () => walletWithdrawalStatus(id)),
     withdrawPlatformFees: input => guarded(`platform-withdraw:${input?.id}`, () => withdrawPlatformFees(input)),

@@ -17,6 +17,8 @@ import { sha256Hex } from '../core/canonical.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
 import { createLocksClient } from '../locks/client.js';
 import { takerFunded } from './taker-funds.js';
+import { requireSellerClaimFunds } from './seller-claim-funds.js';
+import { claimWarning } from '../core/claim-warning.js';
 import { addressProofRequired, validAddressProof } from '../core/address-proof.js';
 import { releasesOfferAmount } from '../core/offer-inventory.js';
 
@@ -301,6 +303,16 @@ export class Trader {
     const role = offer.side === 'sell' ? 'seller' : 'buyer';
     if (await takerFunded({ terms: draft, role: role === 'seller' ? 'buyer' : 'seller',
       trac: this.host.trac, solana: this.host.solana }) === false) return decline('insufficient');
+    if (role === 'seller') {
+      const name = `offer-${offer.offerId}`, record = this.store.get(name);
+      try { await this.#requireClaimFunds(draft.mint, draft.fees.collector); }
+      catch (error) {
+        this.store.put(name, { ...record, claimFundingWarning: error.message });
+        if (record.claimFundingWarning !== error.message) this.log('take refused', error.message);
+        return decline('insufficient');
+      }
+      if (record.claimFundingWarning) this.store.put(name, { ...record, claimFundingWarning: null });
+    }
     const create = role === 'seller' ? createSeller : createBuyer;
     const state = create({ mode: 'maker', offerId: offer.offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now,
       networkId: policy.networkId, requireAddressProof: policy.required });
@@ -324,6 +336,10 @@ export class Trader {
     return this.wallets ? this.wallets.exclusive(() => this.#makeOffer(input)) : this.#makeOffer(input);
   }
 
+  #requireClaimFunds(mint, collector) {
+    return requireSellerClaimFunds({ solana: this.host.solana, address: this.me.solAddr, mint, collector });
+  }
+
   async #makeOffer({ pair, side, baseAmount, price, ttlSec = 3600 }) {
     if (!Number.isSafeInteger(ttlSec) || ttlSec < 60 || ttlSec > 30 * 86400) throw new Error('ttlSec must be 60 s to 30 days');
     const reg = this.registry.usable;
@@ -341,6 +357,7 @@ export class Trader {
     parseBody('offer', offer);
     if (this.wallets) await this.wallets.requireFunds({ role: side === 'sell' ? 'seller' : 'buyer', base: entry.base,
       baseAmount, quoteAmount: quoteAmount(entry, baseAmount, price), fees: { platformFeeBps: reg.fee.platformFeeBps, tradeFeeBps: reg.fee.tradeFeeBps } });
+    if (side === 'sell') await this.#requireClaimFunds(this.mint, reg.fee.collector);
     this.store.put(`offer-${offer.offerId}`, { offer, cancelled: false });
     this.mine.set(offer.offerId, offer);
     await this.bridge.join(tradeChannel(offer.offerId));
@@ -466,6 +483,7 @@ export class Trader {
     if (this.profile) checkProfileTerms(draft, this.profile);
     const role = offer.side === 'sell' ? 'buyer' : 'seller';
     if (this.wallets) await this.wallets.requireFunds({ role, ...draft });
+    if (role === 'seller') await this.#requireClaimFunds(draft.mint, draft.fees.collector);
     const current = this.availableOffer(offerId);
     if (!current) throw new Error(STALE_OFFER_MESSAGE);
     if (BigInt(amount) > BigInt(current.baseAmount)) throw new Error('Amount must be 1 to the offer size in base units');
@@ -570,8 +588,10 @@ export class Trader {
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
       offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
-        return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv) }; }),
+        return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv),
+          warning: this.store.get(`offer-${o.offerId}`)?.claimFundingWarning ?? null }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
+        claimFailure: t.state.claimFailure ?? null, warning: claimWarning(t.state),
         tradeId: t.state.tradeId, H: t.state.H ?? null, committee: t.state.terms?.committee.map(c => c.dexKey) ?? [],
         pair: t.state.draft?.pair, baseAmount: t.state.draft?.baseAmount, quoteAmount: t.state.draft?.quoteAmount })),
       book: Object.fromEntries([...this.book].filter(([pair]) => open.has(pair))),

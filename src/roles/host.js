@@ -12,6 +12,7 @@ import { checkProfileRegistry, checkProfileTerms } from '../net/profile.js';
 import { sellerFunds } from './signer-funds.js';
 import { strikeCandidate, validateSeller } from './signer-strikes.js';
 import { validTermsAddressProofs } from '../core/address-proof.js';
+import { claimWarning } from '../core/claim-warning.js';
 
 const STEPS = { buyer: buyerStep, seller: sellerStep, signer: signerStep };
 // How long a maker waits for a recent Solana view before ending a negotiation it cannot answer.
@@ -571,6 +572,9 @@ export class TradeHost {
       if (event.type !== 'tick' || actions.length || state.phase !== before.phase || state.stepElapsedMs !== before.stepElapsedMs) this.#save(trade);
     }
     catch (error) { trade.state = before; throw error; }
+    if (state.claimFailure && !before.claimFailureReasons?.includes(state.claimFailure.reason)) {
+      this.log('claim warning', trade.key.slice(0, 12), claimWarning(state));
+    }
     if (event.type === 'transferFound' && before.phase === 'holding' && state.phase === 'verifyingTransfer') {
       this.log(`found transfer ${state.txHash.slice(0, 12)} for ${state.tradeId.slice(0, 12)} on the explorer`);
     }
@@ -694,10 +698,14 @@ export class TradeHost {
         this.#findTransfer(trade, action);
         return;
       case 'claim':
-        return this.#background(trade, 'claim', () => this.solana.claim({ terms: action.terms, hashHex: action.hashHex, preimageHex: action.preimageHex }), r => {
-          if (r.ok) return { type: 'claimed', ok: true, claimSignature: r.claimSignature };
-          if (r.reason === 'escrow_refunded' && !r.unknown) return { type: 'claimed', ok: false, status: 'refunded', reason: r.reason };
-          return { type: 'claimed', ok: false, unknown: r.unknown === true, reason: r.reason };
+        return this.#background(trade, 'claim', async () => {
+          try { return await this.solana.claim({ terms: action.terms, hashHex: action.hashHex, preimageHex: action.preimageHex }); }
+          // Every failed attempt becomes a durable warning. The seller's existing 15 s retry handles exceptions too.
+          catch (error) { return { ok: false, reason: String(error?.message ?? error) }; }
+        }, r => {
+          if (r?.ok) return { type: 'claimed', ok: true, claimSignature: r.claimSignature };
+          if (r?.reason === 'escrow_refunded' && !r.unknown) return { type: 'claimed', ok: false, status: 'refunded', reason: r.reason };
+          return { type: 'claimed', ok: false, unknown: r?.unknown === true, reason: r?.reason };
         });
       case 'refund':
         return this.#background(trade, 'refund', () => this.solana.refund({ terms: action.terms, hashHex: action.hashHex }),

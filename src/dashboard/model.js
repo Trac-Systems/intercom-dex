@@ -1,4 +1,5 @@
 import { inTheMoney } from '../locks/client.js';
+import { claimWarning } from '../core/claim-warning.js';
 import { existsSync } from 'node:fs';
 import { isFinished } from '../roles/host.js';
 import { releasesOfferAmount } from '../core/offer-inventory.js';
@@ -62,7 +63,7 @@ function tradeFacts(trade) {
   const s = trade.state, t = s.terms ?? s.draft, base = t.base.id;
   return { key: trade.key.slice(0, 16), tradeId: s.tradeId ?? null, pair: t.pair, side: trade.role === 'buyer' ? 'buy' : 'sell', mode: s.mode ?? null,
     base: amount(t.baseAmount, base), quote: amount(t.quoteAmount, 'USDC'), price: tradePrice({ base: t.base }, t.baseAmount, t.quoteAmount),
-    peer: shortKey(s.peer), phase: s.phase, at: s.now };
+    peer: shortKey(s.peer), phase: s.phase, at: s.now, warning: claimWarning(s) };
 }
 
 // One plain line for a running trade: what happens now, who we wait for, the next deadline and what happens
@@ -188,6 +189,12 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
   for (const t of running) if (t.state.phase === 'refunding') {
     attention.push({ kind: 'refund', at: t.state.now, text: `A refund became available for your ${t.state.draft.pair} trade: your USDC is being taken back automatically.` });
   }
+  for (const t of running) {
+    const warning = claimWarning(t.state);
+    if (warning) attention.push({ kind: 'claim', at: t.state.claimFailure.at,
+      text: `Your ${tradeFacts(t).pair} trade (${shortKey(t.state.tradeId)}): ${warning}` });
+  }
+  for (const o of status.mine) if (o.warning) attention.push({ kind: 'claim', text: o.warning });
   for (const o of expired) {
     const left = offerSizes(o, trades).left;
     if (left > 0n) attention.push({ kind: 'expired', at: o.expiresAt, text: `Your offer to ${offerLine(o)} expired; ${amount(left, o.pair.split('/')[0]).text} ${o.pair.split('/')[0]} were not traded.` });

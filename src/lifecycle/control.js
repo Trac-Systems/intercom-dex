@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { SOFTWARE } from '../core/software.js';
 import { isFinished } from '../roles/host.js';
+import { claimWarning } from '../core/claim-warning.js';
 
 export function stopBlockers(role, wallets) {
   const blockers = [...(role.host?.trades.values() ?? [])].filter(t => !isFinished(t)).map(t => ({
@@ -27,7 +28,8 @@ export function lifecycleHandler({ id, config, role, wallets, dashboard, stop, f
           id, dataDir: realpathSync(config.dataDir), pid: process.pid, software: SOFTWARE, node: process.version,
           signers: role.onlineSigners(), dashboard: dashboard(), blockers: stopBlockers(role, wallets), stopping,
           trades: [...(role.host?.trades.values() ?? [])].map(t => ({ key: t.key, tradeId: t.state.tradeId ?? null,
-            role: t.role, phase: t.state.phase, reason: t.state.reason ?? null })),
+            role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
+            claimFailure: t.state.claimFailure ?? null, warning: claimWarning(t.state) })),
         });
         if (req.method !== 'POST' || req.url !== '/lifecycle/stop') return reply(404, { error: 'not found' });
         const input = JSON.parse(body || '{}');

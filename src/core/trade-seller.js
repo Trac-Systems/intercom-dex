@@ -4,6 +4,7 @@ import { checkDealShape, lockStatement } from './dealing.js';
 import { hexKey } from './schemas.js';
 import { reconstruct, verifyShare } from './vss.js';
 import { transferNonce } from './terms.js';
+import { recordClaimFailure } from './claim-warning.js';
 import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusalReason, resumeActions, runStep, sendAction } from './trade-common.js';
 
 export function createSeller(config) { return createTrader('seller', config); }
@@ -117,6 +118,7 @@ export function step(state, event) {
         return { state: s, actions: [] };
       }
       if (s.phase === 'claiming') {
+        recordClaimFailure(s, e.reason);
         s.claimRetryAt = e.now + 15;
         return { state: s, actions: [] };
       }
@@ -191,7 +193,7 @@ export function step(state, event) {
         e.tradeId === s.tradeId && e.hashHex === s.H && e.purpose === 'settlement') {
       if (typeof e.ok !== 'boolean') return null;
       s.settlementPending = false;
-      if (e.ok === true && e.status === 'claimed') s.phase = 'complete';
+      if (e.ok === true && e.status === 'claimed') { s.phase = 'complete'; delete s.claimFailure; }
       if (e.ok === true && e.status === 'refunded') s.phase = 'lost';
       return { state: s, actions: [] };
     }
@@ -228,6 +230,7 @@ export function step(state, event) {
     }
     if (e.type === 'claimed' && s.phase === 'claiming' && e.tradeId === s.tradeId) {
       if (e.status === 'refunded' && e.ok === false && e.unknown !== true) {
+        recordClaimFailure(s, e.reason);
         s.phase = 'lost';
         return { state: s, actions: [] };
       }
@@ -235,9 +238,11 @@ export function step(state, event) {
         if (e.status !== undefined && e.status !== 'claimed') return null;
         const notification = sendAction(s, 'claimed', { tradeId: s.tradeId, claimSignature: e.claimSignature });
         s.phase = 'complete';
+        delete s.claimFailure;
         return { state: s, actions: [notification] };
       }
       if (e.ok === false) {
+        recordClaimFailure(s, e.reason);
         s.claimRetryAt = e.now + 15;
         return { state: s, actions: [] };
       }

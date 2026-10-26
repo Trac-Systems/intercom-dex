@@ -9,6 +9,20 @@ import { traderFixture, signerFixture, serviceFixture, walletInfo, nowSec } from
 
 const model = (fx, clock) => createModel({ config: fx.config, role: fx.role, wallets: fx.wallets ?? null, bridge: fx.bridge, ...(clock ? { clock } : {}) });
 
+test('claim failures appear on the trade row and in existing alerts, then disappear after success', async () => {
+  const fx = traderFixture(), m = model(fx), trade = fx.role.host.trades.get('t-sell');
+  trade.state.phase = 'claiming'; trade.state.claimFailure = { reason: 'insufficient SOL', at: fx.now };
+  const row = (await m.list('trader.running')).rows.find(x => x.key === trade.key);
+  assert.match(row.warning, /USDC claim failed: insufficient SOL/);
+  assert.ok(row.warning.includes(trade.state.terms.seller.solRecipient));
+  assert.match(row.warning, /SOL.*rent.*retries automatically/);
+  const alerts = (await m.list('trader.attention')).rows.filter(x => x.kind === 'claim');
+  assert.equal(alerts.length, 1); assert.ok(alerts[0].text.includes(row.warning));
+  trade.state.phase = 'complete'; delete trade.state.claimFailure;
+  assert.equal((await m.list('trader.attention')).rows.filter(x => x.kind === 'claim').length, 0);
+  assert.equal((await m.list('trader.history')).rows.find(x => x.key === trade.key).warning, null);
+});
+
 test('amounts are formatted from base units without rounding up; keys are shortened', () => {
   assert.equal(formatUnits('1234567890123456789', 18), '1.234567');
   assert.equal(formatUnits('1000000', 6), '1');

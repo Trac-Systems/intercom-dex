@@ -24,6 +24,7 @@ import { createModel } from '../../../src/dashboard/model.js';
 import { accountBalances } from '../../../src/wallets/accounting.js';
 
 const OFFERS = 'intercom-dex:offers';
+const noClaimFunds = { ok: false, balance: '0', fee: '5000', rent: '2039280', required: '2044280', shortfall: '2044280' };
 
 function party() {
   const id = generateIdentity(), dexKey = encodeKey(id.publicKey);
@@ -42,10 +43,12 @@ class FakeBridge extends EventEmitter {
 
 async function trader(p, { dir = mkdtempSync(join(tmpdir(), 'dex-trader-')), registry, serviceKey = random32() } = {}) {
   const bridge = new FakeBridge();
-  const t = new Trader({ proof: { zkey: "/unit-test-unused.zkey" }, bridge, identity: p.identity, store: openStore(dir, KEY), solana: null, trac: null, me: p.me,
+  const t = new Trader({ proof: { zkey: "/unit-test-unused.zkey" }, bridge, identity: p.identity, store: openStore(dir, KEY),
+    solana: null, trac: null, me: p.me,
     serviceKey, mint: MINT, platformCollector: SOL2, log: () => {} });
   await t.start();
   t.stop();
+  t.host.solana = { claimFunds: async () => ({ ok: true }) };
   if (registry) { t.registry.current = registry; for (const s of registry.signers) t.heartbeats.set(s.dexKey, { at: performance.now(), software: '0.1.0' }); }
   return { t, bridge, dir };
 }
@@ -309,7 +312,7 @@ test('maker declines an unfunded buyer or seller immediately; failed reads still
       if (failure) throw new Error('reader unavailable');
       return { TNK: '0', feeTnk: '3', USDC: '0', SOL: '10000000' };
     };
-    t.host.trac = { balances: read }; t.host.solana = { walletBalances: read };
+    t.host.trac = { balances: read }; t.host.solana = { ...t.host.solana, walletBalances: read };
     await channelPost(t, bridge, peer, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion,
       software: '0.1.0', taker: peer.me, commitment: random32(), baseAmount: offer.baseAmount,
       sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, 'intercom-dex:t:' + offer.offerId);
@@ -328,7 +331,7 @@ test('address proofs precede maker balance admission for both buy and sell offer
     let reads = 0;
     const read = async () => { reads++; return { TNK: '999999999999999999999999', feeTnk: '3', USDC: '999999999', SOL: '999999999' }; };
     t.host.trac = { proveAddress: input => createAddressProof(wallet, { ...input, networkId }), balances: read };
-    t.host.solana = { walletBalances: read };
+    t.host.solana = { ...t.host.solana, walletBalances: read };
     const offer = await t.makeOffer({ pair: 'TNK/USDC', side, baseAmount: '1000000000000000000', price: '1' });
     const taker = { ...peer.me, tracAddr: proofWallet().address,
       ...(forged ? { tracProof: { expiresAt: nowSec() + 10000, signature: '00'.repeat(64) } } : {}) };
@@ -971,4 +974,51 @@ test('a decline refused while the stamp queue is busy is sent again', async () =
   await new Promise(r => setTimeout(r, 2300));
   const declines = bridge.sent.filter(x => x.envelope.kind === 'decline' && x.envelope.body.takeNonce === nonce);
   assert.equal(refused, 2); assert.equal(declines.length, 1); assert.equal(declines[0].envelope.body.reason, 'insufficient');
+});
+
+test('posting a sell and taking a buy require SOL before storing or sending any commitment', async () => {
+  const { registry } = fixture(), seller = party(), buyer = party();
+  const a = await trader(seller, { registry }), b = await trader(buyer, { registry });
+  let reads = 0;
+  a.t.host.solana.claimFunds = async input => {
+    reads++; assert.equal(input.address, seller.me.solAddr); assert.equal(input.mint, MINT);
+    assert.equal(input.collector, registry.fee.collector); return noClaimFunds;
+  };
+  const input = { pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' };
+  await assert.rejects(a.t.makeOffer(input), /Add at least 0\.00204428 SOL .*to receive USDC/);
+  assert.equal(a.t.mine.size, 0); assert.equal(a.t.store.list('offer-').length, 0);
+  assert.equal(a.bridge.sent.filter(x => x.envelope.kind === 'offer').length, 0);
+  const buy = await b.t.makeOffer({ ...input, side: 'buy' }); await post(a.bridge, buyer, 'offer', buy);
+  await assert.rejects(a.t.takeOffer(buy.offerId, buy.baseAmount, buy.price), /Add at least 0\.00204428 SOL/);
+  assert.equal(reads, 2); assert.equal(a.t.host.trades.size, 0); assert.equal(a.t.store.list('trade-').length, 0);
+  assert.equal(a.bridge.sent.filter(x => x.envelope.kind === 'take').length, 0);
+  a.t.host.solana.claimFunds = async () => ({ ok: true });
+  await a.t.takeOffer(buy.offerId, buy.baseAmount, buy.price);
+  assert.equal(a.t.host.trades.size, 1);
+});
+
+test('seller maker rechecks SOL before accepting, exposes the refusal, and admits a later funded take', async () => {
+  const { registry } = fixture(), seller = party(), buyer = party(), { t, bridge } = await trader(seller, { registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  let reads = 0;
+  t.host.solana.claimFunds = async input => { reads++; assert.equal(input.address, seller.me.solAddr); return noClaimFunds; };
+  const take = () => channelPost(t, bridge, buyer, 'take', { offerId: offer.offerId, pair: offer.pair,
+    registryVersion: offer.registryVersion, software: '0.1.0', taker: buyer.me, commitment: random32(),
+    baseAmount: offer.baseAmount, sendBy: nowSec() + 900, refundAfter: nowSec() + 86400 }, 'intercom-dex:t:' + offer.offerId);
+  await take(); assert.equal(reads, 1); assert.equal(t.host.trades.size, 0);
+  assert.equal(bridge.sent.filter(x => x.envelope.kind === 'accept').length, 0);
+  assert.equal(bridge.sent.find(x => x.envelope.kind === 'decline').envelope.body.reason, 'insufficient');
+  assert.match(t.status().mine[0].warning, /Add at least 0\.00204428 SOL/);
+  const model = createModel({ config: { role: 'trader' }, role: t, bridge });
+  assert.ok((await model.list('trader.attention')).rows.some(x => /Add at least 0\.00204428 SOL/.test(x.text)));
+  t.host.solana.claimFunds = async () => ({ ok: true });
+  await take(); assert.equal(t.host.trades.size, 1); assert.equal(t.status().mine[0].warning, null);
+});
+
+test('an unavailable local SOL check refuses a sell before announcing it', async () => {
+  const { registry } = fixture(), { t, bridge } = await trader(party(), { registry });
+  t.host.solana.claimFunds = async () => { throw Error('RPC unavailable'); };
+  await assert.rejects(t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000', price: '1' }),
+    /Cannot check SOL needed to receive USDC.*RPC unavailable.*Try again/);
+  assert.equal(t.mine.size, 0); assert.equal(bridge.sent.filter(x => x.envelope.kind === 'offer').length, 0);
 });

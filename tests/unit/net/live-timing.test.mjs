@@ -64,7 +64,8 @@ function harness(f, profile, store = memory()) {
   return { bridge, store, sent, logs,
     service: () => new Service({ firstLaunch: true, ...common, identity: identity(f.service), registryInput: f.registry, solana,
       trac: { verifyTransfer: async () => ({ ok: true, final: true }) } }),
-    trader: (id = f.buyer) => new Trader({ ...common, identity: identity(id), solana: null, trac: null,
+    trader: (id = f.buyer) => new Trader({ ...common, identity: identity(id), solana: { claimFunds: async () => ({ ok: true }),
+      finalizedSlot: async () => { throw Error('No test slot'); }, tipSlot: async () => { throw Error('No test slot'); } }, trac: null,
       me: id === f.buyer ? { dexKey: f.terms.buyer.dexKey, tracAddr: f.terms.buyer.tracAddr, solAddr: f.terms.buyer.solPayer } : f.offer.maker,
       proof: { zkey: '/unit-test-unused.zkey', pool: 0 } }),
     signer: () => {

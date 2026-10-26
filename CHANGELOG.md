@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.39
+
+- Sellers need a little SOL to claim their USDC on Solana. Before a sell offer is posted, a buy offer is taken or a
+  take is accepted, the app now checks the seller's Solana wallet holds enough SOL for the claim (plus the USDC
+  account if the wallet never held USDC) and otherwise says exactly how much SOL to add and where.
+- A claim that fails is shown on the trade row, in the alerts and in `status`, with the reason and what to do, and
+  logged once per reason instead of failing silently. The claim keeps retrying every 15 seconds and succeeds as soon
+  as the wallet is funded.
+- Works with 0.1.32 and later; no minimum-version change.
+
 ## 0.1.38
 
 - Signers find the seller's transfer themselves: if a trade has waited 30 seconds without the seller's "transfer

@@ -191,6 +191,22 @@ test('managed CLI status exposes trade refusal reasons without private trade sta
   assert.ok(!JSON.stringify(result).includes('private-state'));
 });
 
+test('CLI status carries actionable claim warnings without private trade state and clears them on success', async t => {
+  const f = fixture(t), record = acquireLock(f.dir);
+  record.traderPid = process.pid; record.peerPid = process.pid; record.phase = 'running'; saveLock(record);
+  const state = { phase: 'claiming', tradeId: 'a'.repeat(64), preimageHex: 'private-preimage',
+    terms: { seller: { solRecipient: 'seller-sol-wallet' } }, claimFailure: { reason: 'insufficient SOL', at: 100 } };
+  const role = { onlineSigners: () => [], host: { trades: new Map([['t', { key: 't', role: 'seller', state }]]) } };
+  const handler = lifecycleHandler({ id: record.id, config: f.config, role, dashboard: () => null, fallback: () => {} });
+  const status = () => statusDex(f.configFile, { request: async () => (await invoke(handler, 'GET', '/lifecycle')).body });
+  const result = await status();
+  assert.deepEqual(result.trades[0].claimFailure, state.claimFailure);
+  assert.match(result.trades[0].warning, /insufficient SOL.*seller-sol-wallet.*retries automatically/);
+  assert.ok(!JSON.stringify(result).includes('private-preimage'));
+  state.phase = 'complete'; delete state.claimFailure;
+  assert.equal((await status()).trades[0].warning, null);
+});
+
 test('live stop guard names every unfinished trade, checks buyer lock state, and force is explicit', async t => {
   const f = fixture(t), role = { host: { trades: new Map([['t', { key: 'trade-1', role: 'buyer', state: { phase: 'aborted', locked: true } }]]) }, onlineSigners: () => ['s'] };
   assert.equal(stopBlockers(role).length, 1);

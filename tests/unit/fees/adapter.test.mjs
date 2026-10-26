@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { Keypair, SystemProgram } from '@solana/web3.js';
+import { ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { deriveConfigPda, deriveTradeConfigPda, deriveVaultAta } from '../../../src/solana/escrow.js';
 import { chainFixture } from './chain.mjs';
 
@@ -58,7 +59,11 @@ test('old and new terms lock and claim into distinct collectors after rotation w
     const input = { terms: agreed, hashHex, preimageHex };
     const locked = await f.adapter(f.buyer).lockEscrow(input); assert.equal(locked.ok, true, locked.reason);
     assert.equal((await f.adapter().checkEscrow(input)).ok, true);
+    if (i === 0) f.accounts.delete(deriveVaultAta(f.seller.publicKey, f.mint).toBase58());
     const claimed = await f.adapter(f.seller).claim(input); assert.equal(claimed.ok, true, claimed.reason);
+    const create = f.chain.sends.at(-1).tx.instructions[0];
+    assert.ok(create.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID)); assert.equal(create.data[0], 1);
+    assert.ok(create.keys[2].pubkey.equals(f.seller.publicKey));
     assert.equal((await f.adapter().checkEscrow({ ...input, purpose: 'settlement' })).status, 'claimed');
   }
   assert.equal(f.configBalance(f.main.publicKey), 5000n); assert.equal(f.configBalance(collector.publicKey), 7500n);

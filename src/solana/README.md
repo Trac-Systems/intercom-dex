@@ -48,7 +48,9 @@ Config authority must equal its collector; a trade config is seeded by that coll
 SetConfig/SetTradeConfig can change bps but cannot rotate the collector. Withdrawal
 requires that collector's signature and a destination token account owned by it, of
 the same mint. Amount 0 means withdraw the entire fee-vault balance. No automatic ATA
-creation is done for claim, refund, or withdrawals; callers supply existing accounts.
+creation is done by the on-chain claim, refund, or withdrawal instructions; callers
+supply existing accounts. The adapter prepends idempotent ATA creation to claim and
+refund transactions, paid by the seller and buyer respectively.
 
 ## Public API
 
@@ -183,6 +185,11 @@ await adapter.checkEscrow({terms, hashHex, purpose = 'lock'})
 // {ok, hashHex, purpose, status, reasons?}
 await adapter.claim({terms, hashHex, preimageHex})
 // {ok:true, claimSignature} | {ok:false, reason}
+await adapter.claimFunds({address, mint, collector})
+// {ok, balance, fee, rent, required, shortfall}; lamport decimal strings except ok
+// Read-only: quotes the same claim + idempotent ATA instructions via getFeeForMessage,
+// adding getMinimumBalanceForRentExemption(ACCOUNT_SIZE) if the recipient's ATA is missing.
+// Uses the configured RPC quorum; unavailable/invalid reads throw. No keypair or signing needed.
 await adapter.refund({terms, hashHex})
 // {ok:true, refundSignature} | {ok:false, reason}
 // All three mutation methods can instead return an unresolved submission:
