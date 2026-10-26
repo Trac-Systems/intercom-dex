@@ -40,6 +40,51 @@ function fixture() {
   return { wallet, bridge, context, resetContext, calls, tradeId, terms, request, toKey, intentFolder: folder() };
 }
 
+for (const asset of ['RESET', 'TNK']) test(`${asset} explorer candidates use one newest page, seller/time/type filters, reservations and a five-hash cap`, async t => {
+  const f = fixture(), adapter = createTracAdapter({ ...f, usedTxFolder: folder(), explorerUrl: 'https://explorer.example' });
+  t.after(() => adapter.close());
+  const since = now() - 120, hash = n => n.toString(16).padStart(64, '0');
+  const row = (n, patch = {}) => ({ tx: hash(n), address: f.request.from, to: f.request.to, type: asset === 'RESET' ? '12' : '13',
+    am: '42', createdAt: new Date(since * 1000).toISOString(), ...patch });
+  adapter.reserveTx({ txHash: hash(1), tradeId: '99'.repeat(32) });
+  adapter.reserveTx({ txHash: hash(2), tradeId: f.tradeId });
+  const rows = [null, row(10, { tx: 'bad' }), row(11, { address: f.request.to }), row(12, { type: '99' }),
+    row(13, { createdAt: new Date((since - 1) * 1000).toISOString() }), row(14, { createdAt: 'not a date' }),
+    row(15, { type: asset === 'RESET' ? '13' : '12' }), row(1), row(2), row(2),
+    row(3, { to: f.request.from }), ...Array.from({ length: 8 }, (_, i) => row(i + 4))];
+  const requests = [], timeouts = [], timeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, 'timeout', ms => { timeouts.push(ms); return timeout(ms); });
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push({ url: String(url), options });
+    return Response.json({ transactions: JSON.stringify(rows), nextOffset: 20, count: 1000 });
+  });
+  const result = await adapter.recentTransferCandidates({ ...f.request, asset, since });
+  assert.deepEqual(result, (asset === 'RESET' ? [2, 3, 4, 5, 6] : [2, 4, 5, 6, 7]).map(hash));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://explorer.example/api/transactions?address=' + f.request.from);
+  assert.equal(requests[0].options.redirect, 'error'); assert.deepEqual(timeouts, [5000]);
+  assert.deepEqual(f.calls, [], 'listing candidates never asks the peer to verify or trusts explorer amount');
+});
+
+test('explorer defaults, invalid origins, HTTP/parse/timeout errors and closed adapter', async t => {
+  const f = fixture();
+  for (const explorerUrl of ['file:///tmp', 'https://user:password@example.com', 'https://example.com/path', 'https://example.com/?x=1', 'https://example.com/#x']) {
+    assert.throws(() => createTracAdapter({ ...f, explorerUrl }), /explorer origin/);
+  }
+  const adapter = createTracAdapter({ ...f, usedTxFolder: folder() }); t.after(() => adapter.close());
+  const request = { ...f.request, since: now() - 120 };
+  let response = () => Response.json({ transactions: '[]', nextOffset: 5, count: 100 });
+  t.mock.method(globalThis, 'fetch', async url => { assert.equal(new URL(url).origin, 'https://explorer.trac.network'); return response(); });
+  assert.deepEqual(await adapter.recentTransferCandidates(request), []);
+  for (const fail of [() => new Response('', { status: 503 }), () => Response.json({ transactions: '{' }),
+    () => Response.json({ transactions: '{}' }), () => { throw new DOMException('timed out', 'TimeoutError'); }]) {
+    response = fail; await assert.rejects(adapter.recentTransferCandidates(request));
+  }
+  response = () => Response.json({ transactions: '[]' });
+  assert.deepEqual(await adapter.recentTransferCandidates(request), []);
+  adapter.close(); await assert.rejects(adapter.recentTransferCandidates(request), /adapter_closed/);
+});
+
 test('adapter sends TNK with bound nonce and runner result fields', async () => {
   const f = fixture();
   const adapter = createTracAdapter(f);
@@ -99,6 +144,7 @@ test('verified observations and reservations persist across restart with exact r
   const observation = fs.readFileSync(path.join(usedTxFolder, 'finality.jsonl'), 'utf8');
   assert.equal(observation.split('\n').filter(Boolean).length, 1);
   assert.deepEqual(adapter.reserveTx(f.request), { ok: true, reservedFor: f.tradeId });
+  assert.deepEqual(adapter.reserveTx(f.request), { ok: true, reservedFor: f.tradeId }, 'a repeated notice reserves for the same trade');
   assert.deepEqual(adapter.reserveTx({ ...f.request, tradeId: '66'.repeat(32) }), { ok: false, reservedFor: f.tradeId });
   assert.equal((await adapter.verifyTransfer({ ...f.request, tradeId: '66'.repeat(32) })).reason, 'tx_already_used');
   adapter.close(); adapter = createTracAdapter({ ...f, usedTxFolder });
@@ -106,6 +152,7 @@ test('verified observations and reservations persist across restart with exact r
     const again = await adapter.verifyTransfer(f.request);
     assert.equal(again.finalizedAt, first.finalizedAt);
     assert.equal(again.usedBy, f.tradeId);
+    assert.deepEqual(adapter.reserveTx(f.request), { ok: true, reservedFor: f.tradeId }, 'same-trade reservation survives restart');
     assert.equal(fs.readFileSync(path.join(usedTxFolder, 'finality.jsonl'), 'utf8'), observation);
     assert.equal(fs.statSync(path.join(usedTxFolder, 'finality.jsonl')).mode & 0o777, 0o600);
   } finally { adapter.close(); }

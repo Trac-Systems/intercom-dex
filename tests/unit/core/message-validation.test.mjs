@@ -131,7 +131,8 @@ test('resume restores every outstanding action and retransmits the last protocol
     if (type === 'sendTransfer') assert.equal(action.resume, true);
     if (type === 'claim') assert.ok(action.preimageHex === s.preimageHex);
     if (type === 'checkEscrow') { assert.equal(result.state.checkInFlight, true); assert.equal(result.state.escrowOk, false); }
-    if (s.phase !== 'published') assert.deepEqual(result.actions.filter(a => a.type === 'send'), s.lastMessages ?? []);
+    if (s.phase !== 'published') assert.deepEqual(result.actions.filter(a => a.type === 'send'),
+      (s.lastMessages ?? []).filter(a => !(s.role === 'seller' && s.phase === 'claiming' && a.kind === 'transferSent')));
     else assert.deepEqual(action.channels, ['intercom-dex:t:' + s.tradeId, 'intercom-dex:signers']);
   }
   for (const [name, phase] of [['buyer', 'awaitAccept'], ['seller', 'awaitReveal'], ['buyer', 'awaitTermsSig'],

@@ -225,7 +225,9 @@ if (locksRole) {
     }) : null,
     // A lock, claim or refund counts as done only once finalized; until then the trade keeps waiting or retrying.
     commitment: 'finalized', finality: 'finalized', confirmationTimeoutMs: 90000, mint: profile.mint, programId: profile.programId }) : null;
-  const trac = createTracAdapter({ bridge, wallet, profile, resetGatewayUrl: config.trac?.resetGatewayUrl ?? null, usedTxFolder: join(config.dataDir, 'used-tx'), intentFolder: join(config.dataDir, 'trac-intents') });
+  const trac = createTracAdapter({ bridge, wallet, profile, resetGatewayUrl: config.trac?.resetGatewayUrl ?? null,
+    explorerUrl: config.role === 'signer' ? config.trac?.explorerUrl : undefined,
+    usedTxFolder: join(config.dataDir, 'used-tx'), intentFolder: join(config.dataDir, 'trac-intents') });
 
   let role, wallets;
   if (config.role === 'service') {

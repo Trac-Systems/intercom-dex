@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.38
+
+- Signers find the seller's transfer themselves: if a trade has waited 30 seconds without the seller's "transfer
+  sent" message, each signer looks up the seller's newest transactions on the Trac explorer every 15 seconds and
+  checks any match on its own peer. The explorer only suggests transaction ids; nothing is trusted from it.
+- The seller's app repeats its "transfer sent" message until the signers respond (after 10 s, 20 s, 40 s, at most
+  every 2 minutes, only inside the transfer window).
+- A seller trade whose USDC lock was refunded ends as lost instead of waiting for shares forever, also for trades
+  saved by older versions; a claimed lock ends as complete.
+- Works with 0.1.32 and later; no minimum-version change.
+
 ## 0.1.37
 
 - Balances no longer hang for 30 seconds when the RESET chain data a balance needs has not arrived yet: each read

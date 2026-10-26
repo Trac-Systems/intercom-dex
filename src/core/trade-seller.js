@@ -8,6 +8,9 @@ import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusa
 
 export function createSeller(config) { return createTrader('seller', config); }
 
+// Same ten-second cadence as the host's acks and SELLER_FUNDS_RETRY_SEC.
+export const TRANSFER_NOTICE_RETRY_SEC = 10;
+
 // Runtime seller flow. Retain the original reducer for callers replaying older event journals.
 export function stepFinalized(state, event) {
   if (!event || !Number.isSafeInteger(event.now) || event.now < state.now ||
@@ -16,7 +19,6 @@ export function stepFinalized(state, event) {
     state = { ...state, phase: 'transferring', transferUnknown: true };
   }
   if (state.phase !== 'transferring') return step(state, event);
-  if (event.type === 'resume' && state.settlementPending) state = { ...state, settlementPending: false };
   if (event.type === 'transferSent' && hexKey.safeParse(event.txHash).success) {
     return runStep(state, event, (s, e) => {
       if (s.txHash && s.txHash !== e.txHash) return null;
@@ -33,27 +35,10 @@ export function stepFinalized(state, event) {
       s.txHash = e.txHash;
       s.transferUnknown = true;
       s.transferRetryAt = e.now + 10;
-      return { state: s, actions: announce ? [sendAction(s, 'transferSent', { tradeId: s.tradeId, txHash: s.txHash })] : [] };
+      return { state: s, actions: announce && canAnnounceTransfer(s) ? [transferNotice(s)] : [] };
     });
   }
-  // A submission with unknown outcome still needs settlement reconciliation after the refund time.
-  if (event.type === 'escrowChecked' && state.settlementPending) {
-    return runStep(state, event, (s, e) => {
-      if (e.hashHex !== s.H || e.purpose !== 'settlement' || typeof e.ok !== 'boolean') return null;
-      s.settlementPending = false;
-      if (e.ok === true && e.status === 'claimed') s.phase = 'complete';
-      if (e.ok === true && e.status === 'refunded') s.phase = 'lost';
-      return { state: s, actions: [] };
-    });
-  }
-  const result = step(state, event), s = result.state;
-  if (s.phase === 'transferring' && event.type === 'tick' && event.now >= s.terms.refundAfter &&
-      !s.settlementPending && event.now >= (s.nextSettlementCheck ?? 0)) {
-    result.state = { ...s, settlementPending: true, nextSettlementCheck: event.now + 60 };
-    result.actions.push(settlementAction(s));
-  }
-  if (s.phase === 'transferring' && event.type === 'error' && event.purpose === 'settlement') result.state = { ...s, settlementPending: false };
-  return result;
+  return step(state, event);
 }
 
 const proofAction = s => ({ type: 'checkProof', tradeId: s.tradeId, statement: lockStatement(s.deal), proof: s.deal.proof });
@@ -63,6 +48,24 @@ const settlementAction = s => ({ ...checkAction(s), purpose: 'settlement' });
 const claimAction = s => ({ type: 'claim', tradeId: s.tradeId, terms: s.terms, hashHex: s.H, preimageHex: s.preimageHex });
 const transferAction = s => ({ type: 'sendTransfer', tradeId: s.tradeId, asset: s.terms.base.id,
   from: s.terms.seller.tracAddr, to: s.terms.buyer.tracAddr, amount: s.terms.baseAmount, nonce: transferNonce(s.tradeId), sendBy: s.terms.sendBy });
+const awaitingSettlement = s => ['transferring', 'awaitShares', 'claiming'].includes(s.phase);
+const canAnnounceTransfer = s => ['transferring', 'awaitShares'].includes(s.phase) && hexKey.safeParse(s.txHash).success &&
+  s.shares.length < s.terms.k && s.now < s.terms.sendBy + s.terms.graceSec;
+// Each repeat waits twice as long (10 s, 20 s, 40 s, … at most 2 min): a handful of notices per trade, never a stream.
+export const TRANSFER_NOTICE_MAX_SEC = 120;
+const transferNotice = s => {
+  s.transferNotices = (s.transferNotices ?? 0) + 1;
+  s.transferNoticeAt = s.now + Math.min(TRANSFER_NOTICE_RETRY_SEC * 2 ** (s.transferNotices - 1), TRANSFER_NOTICE_MAX_SEC);
+  return sendAction(s, 'transferSent', { tradeId: s.tradeId, txHash: s.txHash });
+};
+
+function resumeSeller(s, outstanding = []) {
+  const result = resumeActions(s, outstanding);
+  // Old journals may lack lastMessages, or retain a transfer notice after collecting k shares.
+  result.actions = result.actions.filter(a => a.kind !== 'transferSent');
+  if (canAnnounceTransfer(s)) result.actions.unshift(transferNotice(s));
+  return result;
+}
 
 function maybeSend(s) {
   const actions = [];
@@ -91,14 +94,16 @@ export function step(state, event) {
         s.reserveRetryAt = null;
         return resumeActions(s, [reservationAction(s)]);
       }
-      if (s.phase === 'transferring') return resumeActions(s, [{ ...transferAction(s), resume: true }]);
-      const outstanding = s.settlementPending && ['awaitShares', 'claiming'].includes(s.phase) ? [settlementAction(s)] : [];
-      if (outstanding.length) s.nextSettlementCheck = e.now + 60;
+      // Restarted checks no longer have a live adapter call. Reconcile immediately, even if an old journal never
+      // scheduled a check, and independently of a resumed transfer's finality lookup.
+      const outstanding = awaitingSettlement(s) && (s.settlementPending || e.now >= s.terms.refundAfter) ? [settlementAction(s)] : [];
+      if (outstanding.length) { s.settlementPending = true; s.nextSettlementCheck = e.now + 60; }
+      if (s.phase === 'transferring') return resumeSeller(s, [...outstanding, { ...transferAction(s), resume: true }]);
       if (s.phase === 'claiming') {
         s.claimRetryAt = null;
-        return resumeActions(s, [...outstanding, claimAction(s)]);
+        return resumeSeller(s, [...outstanding, claimAction(s)]);
       }
-      return resumeActions(s, outstanding);
+      return resumeSeller(s, outstanding);
     }
     if (['complete', 'lost', 'aborted'].includes(s.phase)) return null;
     if (e.type === 'error') {
@@ -182,7 +187,7 @@ export function step(state, event) {
       s.reserveRetryAt = e.now + 10;
       return { state: s, actions: [] };
     }
-    if (e.type === 'escrowChecked' && ['awaitShares', 'claiming'].includes(s.phase) && s.settlementPending &&
+    if (e.type === 'escrowChecked' && awaitingSettlement(s) && s.settlementPending &&
         e.tradeId === s.tradeId && e.hashHex === s.H && e.purpose === 'settlement') {
       if (typeof e.ok !== 'boolean') return null;
       s.settlementPending = false;
@@ -204,7 +209,7 @@ export function step(state, event) {
       s.txHash = e.txHash;
       s.transferUnknown = e.ok !== true;
       s.phase = 'awaitShares';
-      return { state: s, actions: [sendAction(s, 'transferSent', { tradeId: s.tradeId, txHash: s.txHash })] };
+      return { state: s, actions: canAnnounceTransfer(s) ? [transferNotice(s)] : [] };
     }
     if (m?.kind === 'sharePublish' && s.phase === 'awaitShares') {
       const b = m.body, share = fromLe32(hexToBytes(b.share, 32));
@@ -239,16 +244,19 @@ export function step(state, event) {
       return null;
     }
     if (e.type === 'tick') {
+      const actions = [];
       if (s.phase === 'reservingEscrow' && s.reserveRetryAt && e.now >= s.reserveRetryAt) {
         s.reserveRetryAt = null;
         return { state: s, actions: [reservationAction(s)] };
       }
       if (s.phase === 'transferring' && s.transferRetryAt && e.now >= s.transferRetryAt) {
         s.transferRetryAt = null;
-        return { state: s, actions: [{ ...transferAction(s), resume: true }] };
+        actions.push({ ...transferAction(s), resume: true });
       }
-      const actions = [];
-      if (['awaitShares', 'claiming'].includes(s.phase) && e.now >= s.terms.refundAfter &&
+      if (s.phase === 'awaitShares' && canAnnounceTransfer(s) && e.now >= (s.transferNoticeAt ?? 0)) {
+        actions.push(transferNotice(s));
+      }
+      if (awaitingSettlement(s) && e.now >= s.terms.refundAfter &&
           !s.settlementPending && e.now >= (s.nextSettlementCheck ?? 0)) {
         s.settlementPending = true;
         s.nextSettlementCheck = e.now + 60;

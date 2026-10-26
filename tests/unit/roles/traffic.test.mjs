@@ -84,16 +84,19 @@ for (const phase of ['transferring', 'awaitShares', 'claiming']) test(`seller ${
   const state = sim.snapshots.get(`seller:${phase}`), f = await host(t, 'seller', state, sim.f.seller);
   // A submitted transfer may remain in transferring while its finality is unknown.
   f.tr.state.txHash = sim.snapshots.get('seller:awaitShares').txHash;
+  // An overdue notice (no repeat scheduled yet): the backoff starts from the first repeat.
+  delete f.tr.state.transferNoticeAt; delete f.tr.state.transferNotices;
   f.tr.outbox = outbox(sim, 'seller', sim.f.seller);
   f.h.solana = { checkEscrow: async ({ hashHex }) => ({ ok: true, hashHex, status: 'active' }) };
   const notices = () => f.sent.filter(x => x.envelope.kind !== 'shareRequest');
   const batch = Object.values(f.tr.outbox).flat().length;
   f.clock.now = state.terms.sendBy;
   await f.tick(0); await f.tick(10);
-  assert.equal(notices().length, batch, 'transfer evidence still repeats during grace');
+  const adjustment = phase === 'awaitShares' ? 1 : phase === 'claiming' ? -1 : 0;
+  assert.equal(notices().length, batch + adjustment, 'awaitShares refreshes immediately when overdue; claiming no longer announces');
   f.clock.now = state.terms.sendBy + state.terms.graceSec - 10;
   await f.tick(0);
-  assert.equal(notices().length, 2 * batch, 'the last repeat before the cutoff still allows recovery');
+  assert.equal(notices().length, 2 * batch + (phase === 'claiming' ? -2 : adjustment), 'the last repeat before the cutoff still allows recovery');
   f.sent.length = 0;
   await f.tick(10); await f.tick(10); await f.tick(3600);
   assert.equal(f.tr.state.phase, phase);
@@ -186,15 +189,21 @@ test('publication recovery authenticates seller/service, rate limits each reques
   await f.receive(sim.f.seller, 'shareRequest', { tradeId: id }); assert.equal(f.sent.length, 4);
 });
 
-test('seller requests missing valid shares every thirty seconds, stops at k or refund, and waiting outbox still repeats at ten seconds', async t => {
+test('seller requests missing valid shares every thirty seconds and refreshes one transfer notice every ten seconds until k', async t => {
   const state = sim.snapshots.get('seller:awaitShares'), f = await host(t, 'seller', state, sim.f.seller);
   f.tr.outbox[tradeChannel(state.tradeId)] = [seal({ kind: 'transferSent', ch: tradeChannel(state.tradeId), body: { tradeId: state.tradeId, txHash: state.txHash } }, sim.f.seller.secretKey, { ts: f.clock.now, nonce: hex() })];
   await f.tick(0); await f.tick(10);
   assert.equal(f.sent.filter(x => x.envelope.kind === 'shareRequest').length, 1);
   assert.equal(f.sent.filter(x => x.envelope.kind === 'transferSent').length, 1);
+  const first = f.sent.find(x => x.envelope.kind === 'transferSent').envelope;
   await f.tick(20); assert.equal(f.sent.filter(x => x.envelope.kind === 'shareRequest').length, 2);
+  const transfers = f.sent.filter(x => x.envelope.kind === 'transferSent');
+  assert.equal(transfers.length, 2);
+  assert.notEqual(transfers[1].envelope.nonce, first.nonce, 'each notice is freshly signed');
+  assert.equal(f.tr.outbox[tradeChannel(state.tradeId)].filter(e => e.kind === 'transferSent').length, 1);
   f.tr.state.shares = Array.from({ length: state.terms.k }, (_, i) => ({ id: i + 1, share: hex() }));
   await f.tick(30); assert.equal(f.sent.filter(x => x.envelope.kind === 'shareRequest').length, 2);
+  assert.equal(f.sent.filter(x => x.envelope.kind === 'transferSent').length, 2);
 });
 
 test('a restarted signer re-publishes only trades still inside the repeat schedule, and still answers requests', async t => {

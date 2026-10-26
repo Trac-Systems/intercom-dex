@@ -24,6 +24,7 @@ const transferDeadline = s => s.rescueUntil ?? s.terms.sendBy + s.terms.graceSec
 export const RESCUE_MARGIN_SEC = 600;
 // The host repeats acks every ten seconds. Failed balance checks use that same cadence.
 export const SELLER_FUNDS_RETRY_SEC = 10;
+export const TRANSFER_FIND_DELAY_SEC = 30, TRANSFER_FIND_RETRY_SEC = 15;
 
 // An operator rescue for a trade that expired only because the seller's transfer became final late: the signer
 // checks the transfer again, exactly as before, with a deadline RESCUE_MARGIN_SEC before the buyer's refund time.
@@ -55,6 +56,8 @@ export function step(state, event) {
   return runStep(state, event, (s, e, m) => {
     const committed = ['holding', 'verifyingTransfer', 'persistingTransfer', 'published'].includes(s.phase);
     if (['aborted', 'expired'].includes(s.phase)) return null;
+    // Older saved holding states predate this timestamp; keep their last saved time across ticks/resume.
+    if (s.phase === 'holding') s.holdingSince ??= state.now;
     if (['persistingShare', 'checkingSellerFunds'].includes(s.phase) &&
         e.now >= Math.min(s.terms.sendBy, s.sellerFundsDeadline ?? s.terms.sendBy)) return abortTransition(s, 'Signers did not confirm');
     if (s.phase === 'checkingProof' && e.now >= s.terms.sendBy + s.terms.graceSec) return abortTransition(s, 'Transfer verification window expired');
@@ -136,12 +139,14 @@ export function step(state, event) {
       s.sellerFundsReservation = { feeTnk: e.feeTnk };
       s.sellerAddressProven = e.sellerAddressProven === true;
       s.phase = 'holding';
+      s.holdingSince = e.now;
       return { state: s, actions: [sendAction(s, 'ack', { tradeId: s.tradeId, H: s.H, holdUntil: s.terms.refundAfter })] };
     }
-    if (m?.kind === 'transferSent' && s.phase === 'holding') {
+    if ((m?.kind === 'transferSent' || (e.type === 'transferFound' && e.tradeId === s.tradeId)) && s.phase === 'holding') {
+      const txHash = hexKey.parse(m?.body.txHash ?? e.txHash);
       if (e.now >= s.terms.sendBy + s.terms.graceSec ||
-          (s.usedTx[m.body.txHash] && s.usedTx[m.body.txHash] !== s.tradeId)) return null;
-      s.txHash = m.body.txHash;
+          (s.usedTx[txHash] && s.usedTx[txHash] !== s.tradeId)) return null;
+      s.txHash = txHash;
       s.phase = 'verifyingTransfer';
       return { state: s, actions: [verifyAction(s)] };
     }
@@ -174,6 +179,10 @@ export function step(state, event) {
       return { state: s, actions: [publicationAction(s)] };
     }
     if (e.type === 'tick') {
+      if (s.phase === 'holding' && e.now >= (s.findTransferAt ?? s.holdingSince + TRANSFER_FIND_DELAY_SEC)) {
+        s.findTransferAt = e.now + TRANSFER_FIND_RETRY_SEC;
+        return { state: s, actions: [{ ...verifyAction(s), type: 'findTransfer', since: s.holdingSince - 120 }] };
+      }
       if (s.phase === 'checkingSellerFunds' && e.now >= s.sellerFundsRetryAt) return checkFunds(s);
       if (s.phase === 'persistingTransfer' && s.reserveRetryAt && e.now >= s.reserveRetryAt) {
         s.reserveRetryAt = null;

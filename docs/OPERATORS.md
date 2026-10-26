@@ -159,6 +159,11 @@ Role config (`signer.json`):
 }
 ```
 
+If a seller's transfer notice is lost, signers start checking the seller's newest Trac explorer page after
+30 seconds in `holding`, then every 15 seconds until `sendBy + graceSec`. Each request has a 5 second timeout;
+at most five candidate hashes are checked by the signer's own peer before the usual reservation and share publication.
+The optional signer setting `"trac": { "explorerUrl": "https://explorer.trac.network" }` changes the explorer origin.
+
 ### Keys
 
 The first start creates `dataDir/keyring.json` with the signer's dex identity, its box key and its store key,

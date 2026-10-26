@@ -165,6 +165,7 @@ export class TradeHost {
     this.#checkState(record.state);
     const trade = { ...record, serviceKey: this.serviceKey, seen: createReplayCache({ maxEntries: 8192 }), queue: Promise.resolve(), busy: new Set(),
       lastResend: new Map(), perSender: new Map(), presentSent: [], budgetAt: performance.now(), makerConnectedAt: null };
+    if (trade.role === 'signer' && trade.state.phase === 'holding') trade.state.holdingSince ??= trade.signerAckedAt ?? trade.state.now;
     if (resume) { trade.state.stepElapsedMs = 0; trade.state.connectedAtMs = null; }
     this.trades.set(trade.key, trade);
     this.#save(trade);
@@ -242,7 +243,7 @@ export class TradeHost {
   }
 
   #save(trade) {
-    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, forwarded, ...record } = trade;
+    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, forwarded, discoveryCheck, ...record } = trade;
     this.store.put(`trade-${trade.key}`, record);
   }
 
@@ -285,6 +286,8 @@ export class TradeHost {
     const envelope = this.#seal(ch, kind, body);
     if (keep && trade) {
       if (kind === 'take') trade.state.takeNonce = envelope.nonce;
+      // The reducer refreshes transfer notices every ten seconds. Keep one current envelope for presence replies.
+      if (kind === 'transferSent') trade.outbox[ch] = (trade.outbox[ch] ?? []).filter(e => e.kind !== 'transferSent');
       (trade.outbox[ch] ??= []).push(envelope);
       this.#save(trade);
     }
@@ -477,9 +480,11 @@ export class TradeHost {
     }
   }
 
-  #resendAll(trade) {
+  #resendAll(trade, { automatic = false } = {}) {
     for (const [ch, list] of Object.entries(trade.outbox)) for (const e of list) {
       if (this.#serving(trade) && e.kind !== 'sharePublish') continue;
+      // awaitShares has a fresh reducer notice; after k shares there is no need to announce the transfer again.
+      if (automatic && trade.role === 'seller' && e.kind === 'transferSent' && trade.state.phase !== 'transferring') continue;
       this.sendEnvelope(trade, ch, e).catch(() => {});
     }
   }
@@ -566,6 +571,9 @@ export class TradeHost {
       if (event.type !== 'tick' || actions.length || state.phase !== before.phase || state.stepElapsedMs !== before.stepElapsedMs) this.#save(trade);
     }
     catch (error) { trade.state = before; throw error; }
+    if (event.type === 'transferFound' && before.phase === 'holding' && state.phase === 'verifyingTransfer') {
+      this.log(`found transfer ${state.txHash.slice(0, 12)} for ${state.tradeId.slice(0, 12)} on the explorer`);
+    }
     if (isFinished(trade)) this.#releaseMakerPins();
     if (state.stepStage !== before.stepStage || event.type === 'resume') trade.budgetAt = observedAt;
     if (state.tradeId && !before.tradeId) this.#joinChannels(trade).catch(e => this.log('join', e.message));
@@ -576,7 +584,7 @@ export class TradeHost {
   }
 
   // Adapter calls run outside the trade's queue; their results come back as events.
-  #background(trade, label, fn, toEvent, { retries = 3, retryMs = 3000, steady = false } = {}) {
+  #background(trade, label, fn, toEvent, { retries = 3, retryMs = 3000, steady = false, errorEvent = {} } = {}) {
     if (trade.busy.has(label)) return;
     trade.busy.add(label);
     if (process.env.DEX_DEBUG) this.log('start', label, trade.key.slice(0, 12));
@@ -586,7 +594,7 @@ export class TradeHost {
         try { return toEvent(await fn()); }
         catch (error) {
           this.log('retry', label, trade.key.slice(0, 12), `${attempt}/${retries}`, error.message);
-          if (attempt >= retries) return { type: 'error', reason: `${label}: ${error.message}` };
+          if (attempt >= retries) return { type: 'error', ...errorEvent, reason: `${label}: ${error.message}` };
           await new Promise(r => setTimeout(r, steady ? retryMs : retryMs * attempt));
         }
       }
@@ -673,14 +681,18 @@ export class TradeHost {
       case 'checkEscrow':
         return this.#background(trade, `check-${action.purpose ?? 'lock'}`,
           () => this.solana.checkEscrow({ terms: action.terms, hashHex: action.hashHex, purpose: action.purpose ?? 'lock' }),
-          r => ({ type: 'escrowChecked', purpose: action.purpose, ...r }));
+          r => ({ type: 'escrowChecked', purpose: action.purpose, ...r }),
+          { errorEvent: { purpose: action.purpose ?? 'lock', hashHex: action.hashHex } });
       case 'sendTransfer':
         // The adapter's own result says whether a transfer may have gone out (unknown + txHash) or surely did not.
         return this.#background(trade, 'transfer', () => sendFinalTransfer(this.trac, { terms: s.terms, tradeId, resume: action.resume === true }),
           r => ({ type: 'transferSent', ok: r.ok === true, final: r.final === true, finalizedAt: r.finalizedAt,
             unknown: r.unknown === true, txHash: r.txHash, sentAt: r.sentAt, reason: r.reason }), { retries: 1 });
       case 'verifyTransfer':
-        return this.#background(trade, 'verify', () => this.#pollTransfer(action), r => ({ type: 'transferVerified', ...r }), { retries: 1 });
+        return this.#background(trade, 'verify', () => this.#pollTransfer(action, trade), r => ({ type: 'transferVerified', ...r }), { retries: 1 });
+      case 'findTransfer':
+        this.#findTransfer(trade, action);
+        return;
       case 'claim':
         return this.#background(trade, 'claim', () => this.solana.claim({ terms: action.terms, hashHex: action.hashHex, preimageHex: action.preimageHex }), r => {
           if (r.ok) return { type: 'claimed', ok: true, claimSignature: r.claimSignature };
@@ -704,11 +716,37 @@ export class TradeHost {
     }
   }
 
+  // Discovery failures never reach the reducer: an unrelated transaction cannot end this trade.
+  #findTransfer(trade, action) {
+    const active = () => !this.stopped && trade.role === 'signer' && trade.state.phase === 'holding' && this.now() < action.finalBefore;
+    if (!active() || trade.busy.has('find-transfer')) return;
+    trade.busy.add('find-transfer');
+    (async () => {
+      const candidates = await this.trac.recentTransferCandidates(action);
+      for (const txHash of candidates.slice(0, 5)) {
+        if (!active()) return;
+        if (trade.state.usedTx[txHash] && trade.state.usedTx[txHash] !== action.tradeId) continue;
+        // A real notice for this hash can reuse the in-flight check, including its successful result.
+        const check = { txHash, promise: Promise.resolve().then(() => this.trac.verifyTransfer({ ...action, type: 'verifyTransfer', txHash })) };
+        trade.discoveryCheck = check;
+        try {
+          const proof = await check.promise;
+          if (!active()) return;
+          if (proof?.ok === true && proof.final === true) {
+            await this.deliver(trade.key, { type: 'transferFound', tradeId: action.tradeId, txHash });
+            return;
+          }
+        } catch { /* Try another candidate; explorer/peer errors are retried next round. */ }
+        finally { if (trade.discoveryCheck === check) trade.discoveryCheck = null; }
+      }
+    })().catch(() => {}).finally(() => trade.busy.delete('find-transfer'));
+  }
+
   // Polls the own node until the transfer is final, definitively wrong, or the window closed.
-  async #pollTransfer(action) {
+  async #pollTransfer(action, trade) {
     for (;;) {
       let r;
-      try { r = await this.trac.verifyTransfer(action); }
+      try { r = await (trade.discoveryCheck?.txHash === action.txHash ? trade.discoveryCheck.promise : this.trac.verifyTransfer(action)); }
       catch (error) { r = { ok: false, final: false, reason: error.message }; }
       if (r.ok && r.final) return r;
       if (r.final || this.now() >= action.finalBefore) return { ...r, ok: false };
@@ -767,7 +805,7 @@ export class TradeHost {
       if (trade.phaseSeen !== s.phase) { trade.phaseSeen = s.phase; trade.phaseSince = now; }
       else if (now < resendUntil && now - trade.phaseSince >= every && now - (trade.autoResendAt ?? 0) >= every) {
         trade.autoResendAt = now;
-        this.#resendAll(trade);
+        this.#resendAll(trade, { automatic: true });
       }
       // The randomness block is looked up once the pushed chain view shows it finalized, so waiting for it costs no
       // requests and both sides see it within a second of each other. Without a fresh pushed view, and when a node

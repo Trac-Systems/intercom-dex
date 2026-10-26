@@ -91,8 +91,11 @@ async function gatewayCall(origin, route, body) {
   catch { reject('invalid_gateway_response'); }
 }
 
-export function createTracAdapter({ bridge, wallet = null, profile = null, resetGatewayUrl = null, usedTxFolder = null, intentFolder = null }) {
+export function createTracAdapter({ bridge, wallet = null, profile = null, resetGatewayUrl = null,
+  explorerUrl = 'https://explorer.trac.network', usedTxFolder = null, intentFolder = null }) {
   if (typeof bridge?.call !== 'function') throw new Error('Bridge.call is required');
+  const explorer = new URL(explorerUrl);
+  if (!['http:', 'https:'].includes(explorer.protocol) || explorer.username || explorer.password || explorer.search || explorer.hash || explorer.pathname !== '/') throw new Error('Expected a Trac explorer origin');
   let origin = null;
   if (resetGatewayUrl !== null) {
     origin = new URL(resetGatewayUrl);
@@ -230,6 +233,31 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       const pending = (sends.get(tradeId) ?? Promise.resolve()).then(() => send(request));
       sends.set(tradeId, pending);
       return pending.finally(() => { if (sends.get(tradeId) === pending) sends.delete(tradeId); });
+    },
+
+    // The explorer only supplies candidate hashes. The caller must verify each one on its own peer.
+    async recentTransferCandidates({ asset, from, to, tradeId, since } = {}) {
+      if (closed) reject('adapter_closed');
+      if (!used) reject('used_tx_store_required');
+      if (!['TNK', 'RESET'].includes(asset) || !isHash(tradeId) || !Number.isSafeInteger(since)) reject('invalid_request');
+      publicKey(from); publicKey(to);
+      const url = new URL('/api/transactions', explorer);
+      url.searchParams.set('address', from);
+      const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) });
+      if (!response.ok) { await response.body?.cancel(); reject('explorer_rejected'); }
+      const body = await response.json();
+      const rows = JSON.parse(body.transactions);
+      if (!Array.isArray(rows)) reject('invalid_explorer_response');
+      const candidates = new Set();
+      for (const row of rows) {
+        if (!row || !isHash(row.tx) || row.address !== from || row.type !== (asset === 'RESET' ? '12' : '13') ||
+            (asset === 'TNK' && row.to !== to) || typeof row.createdAt !== 'string' || !(Date.parse(row.createdAt) >= since * 1000)) continue;
+        const reservedFor = used.get(row.tx);
+        if (reservedFor && reservedFor !== tradeId) continue;
+        candidates.add(row.tx);
+        if (candidates.size === 5) break;
+      }
+      return [...candidates];
     },
 
     async verifyTransfer({ asset, txHash, from, to, minAmount, nonce, tradeId, finalBefore } = {}) {
