@@ -16,12 +16,22 @@ export function h(tag, attrs, ...kids) {
 // replaceChildren for nested lists that may hold null or false.
 export const fill = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false));
 
-export async function api(path, payload) {
-  const res = await fetch(path, payload === undefined ? { credentials: 'same-origin' }
-    : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
-  const value = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  if (!res.ok) throw new Error(value.error ?? `HTTP ${res.status}`);
-  return value;
+export async function api(path, payload, { timeoutMs = 0 } = {}) {
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const options = payload === undefined ? { credentials: 'same-origin' }
+      : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) };
+    if (controller) options.signal = controller.signal;
+    const res = await fetch(path, options);
+    const value = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    if (controller?.signal.aborted) throw new Error('Request timed out');
+    if (!res.ok) throw new Error(value.error ?? `HTTP ${res.status}`);
+    return value;
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error('Request timed out');
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
 // Times: local clock time (weekday or date when not today), with the relative time on hover or beside it.

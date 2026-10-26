@@ -29,7 +29,7 @@ test('cached reads run at most once per window, share a running call and keep th
   assert.equal(calls.n, 1); assert.equal(a, b); assert.deepEqual(a, { ok: true, value: 1, at: 0 });
   clock.t = 29999; assert.equal((await read()).value, 1); assert.equal(calls.n, 1);
   clock.t = 30000; fail.now = true;
-  assert.deepEqual(await read(), { ok: false, error: 'rpc down', value: 1, at: 30000 });
+  assert.deepEqual(await read(), { ok: false, error: 'rpc down', value: 1, at: 0 });
   clock.t = 40000; assert.equal(calls.n, 2, 'a failure also waits for the next window');
   await read(); assert.equal(calls.n, 2);
   clock.t = 60000; fail.now = false; assert.equal((await read()).value, 3);
@@ -187,8 +187,35 @@ test('refreshing returns the last result at once while the next read runs, and w
   clock.t = 30000;
   const started = Date.now(), stale = await read();
   assert.equal(stale.value, 1); assert.ok(Date.now() - started < 15, 'a due refresh does not hold the caller');
+  assert.equal(stale.ok, false); assert.match(stale.error, /being refreshed/); assert.equal(stale.at, 0);
   assert.equal(n, 2); gate.open(); await new Promise(r => setTimeout(r, 0));
   assert.equal((await read()).value, 2);
+});
+
+test('a slow or failed wallet refresh retains values with their successful read time and an explicit warning', async () => {
+  const fx = traderFixture(), clock = { t: Date.now() }, m = model(fx, () => clock.t);
+  const first = await m.state(), info = await fx.wallets.info();
+  let finish;
+  fx.wallets.info = () => new Promise(resolve => { finish = resolve; });
+  clock.t += BALANCE_CACHE_MS;
+  const pending = await m.state();
+  assert.deepEqual(pending.wallets.assets, first.wallets.assets);
+  assert.equal(pending.wallets.readAt, first.wallets.readAt);
+  assert.match(pending.wallets.error, /being refreshed/);
+  assert.equal(pending.trader.balances, null, 'the trade ticket does not present stale balances as spendable');
+  finish({ ...info, balances: null, balanceError: 'RESET balance unavailable: read timed out' });
+  await new Promise(resolve => setImmediate(resolve));
+  const failed = await m.state();
+  assert.deepEqual(failed.wallets.assets, first.wallets.assets);
+  assert.equal(failed.wallets.readAt, first.wallets.readAt);
+  assert.match(failed.wallets.error, /RESET.*timed out/);
+  assert.equal(failed.trader.balances, null);
+  clock.t += BALANCE_CACHE_MS;
+  fx.wallets.info = async () => info;
+  await m.state(); await new Promise(resolve => setImmediate(resolve));
+  const recovered = await m.state();
+  assert.equal(recovered.wallets.error, null);
+  assert.ok(recovered.wallets.readAt > first.wallets.readAt);
 });
 
 test('state stays available when the chains cannot be read: balances null, the read error shown, nothing throws', async () => {

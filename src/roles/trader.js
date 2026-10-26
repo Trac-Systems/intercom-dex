@@ -134,7 +134,8 @@ export class Trader {
         if (!o) reason = 'offer not found';
         else if (!o.peerKey) reason = 'missing peerKey';
         else if (o.maker.dexKey === this.identity.publicKey) reason = 'own offer';
-        else if (now - (seen.lastSeen ?? 0) > WARM_LIVE_SEC) reason = 'maker not heard within 70s';
+        else if (now - (seen.lastSeen ?? 0) > WARM_LIVE_SEC) reason =
+          `maker not heard within 70s (${pair}, viewed offer ${id.slice(0, 12)}, last heard ${seen.lastSeen == null ? 'never' : `${now - seen.lastSeen}s ago`})`;
         else try { if (!meetsVersion(o.software, WARM_SOFTWARE)) reason = 'maker software too old'; }
         catch { reason = 'invalid maker software'; }
         if (reason) { skipped.add(reason); continue; }

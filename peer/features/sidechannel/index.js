@@ -72,6 +72,8 @@ const toProtocol = (name) => `sidechannel/${name}`;
 // Upper bound on any single swarm.flush() wait (announce/leave). Degraded
 // networks can leave a flush pending indefinitely; the node must keep running.
 const FLUSH_TIMEOUT_MS = 10_000;
+export const PUBLIC_REPAIR_MS = 15_000;
+const PUBLIC_OPEN_TIMEOUT_MS = 30_000;
 
 const stableStringify = (value) => {
   if (value === null || value === undefined) return 'null';
@@ -1171,7 +1173,7 @@ class Sidechannel extends Feature {
       })
     });
 
-    record = { channel, message, connection, authSent: false };
+    record = { channel, message, connection, authSent: false, openedAt: this._now() };
     perConn.set(entry.name, record);
     const attempt = { count: perConn._openRetries.get(entry.name)?.count ?? 0, lastAt: perConn._openRetries.get(entry.name)?.lastAt ?? 0 };
     perConn._openRetries.set(entry.name, attempt);
@@ -1466,6 +1468,27 @@ class Sidechannel extends Feature {
     return this._startPromise;
   }
 
+  // A leaf may only listen (no offers/chat to send). A closed venue protocol, exhausted open burst,
+  // or late mux must therefore recover without relying on broadcast() or a new TCP connection.
+  _repairPublicChannels() {
+    if (!this.started || !this.publicDelivery?.venueOnly) return;
+    for (const connection of this.peer.swarm.connections ?? []) {
+      if (connection.destroyed || this._getRemoteKey(connection) !== this.publicDelivery.venueKey) continue;
+      for (const name of this.publicChannels) {
+        const entry = this.channels.get(name);
+        if (!entry) continue;
+        const perConn = this.connections.get(connection), record = perConn?.get(name);
+        if (this._usableRecord(connection, name, record)) continue;
+        if (record && !record.channel.closed && !record.channel.destroyed) {
+          if (this._now() - record.openedAt < PUBLIC_OPEN_TIMEOUT_MS) continue;
+          record.channel.close();
+          if (perConn.get(name) === record) perConn.delete(name);
+        }
+        this._openChannelForConnection(connection, entry);
+      }
+    }
+  }
+
   async _start() {
     if (!this.peer?.swarm) {
       throw new Error('Sidechannel requires peer.swarm to be initialized.');
@@ -1513,6 +1536,13 @@ class Sidechannel extends Feature {
     // registrations announce through addChannel; this synchronous scan covers
     // entries created while the flush was pending.
     this.started = true;
+    if (this.publicDelivery?.venueOnly && !this._publicRepairTimer) {
+      this._publicRepairTimer = setInterval(() => {
+        try { this._repairPublicChannels(); }
+        catch (error) { if (this.debug) console.log('public channel repair', error.message); }
+      }, PUBLIC_REPAIR_MS);
+      this._publicRepairTimer.unref?.();
+    }
 
     const stragglers = [];
     for (const entry of this.channels.values()) {
@@ -1533,6 +1563,7 @@ class Sidechannel extends Feature {
   }
 
   async stop() {
+    clearInterval(this._publicRepairTimer); this._publicRepairTimer = null;
     this.publicSend?.close();
     this.publicSendVerified = new WeakMap();
     this.started = false;

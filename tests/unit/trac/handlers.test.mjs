@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { makeHandlers } from '../../../peer/src/trac/handlers.js';
 import { openResetReader } from '../../../peer/src/trac/reset-reader.js';
 import PeerWallet from '../../../peer/node_modules/trac-wallet/index.js';
+import nodeEntry from '../../../peer/node_modules/trac-msb/src/core/state/utils/nodeEntry.js';
 
 function fixture() {
   return { config: { addressPrefix: 'trac', bootstrap: Buffer.alloc(32, 1), networkId: 918 },
@@ -56,7 +57,13 @@ test('a RESET reader still opening answers not ready, TNK checks work at once, a
 test('balances read signed MSB and RESET views and reject invalid address checksums', async () => {
   const bus = fixture(), address = PeerWallet.encodeBech32m('trac', Buffer.alloc(32, 7));
   let closed = 0, balanceKey;
-  bus.state.getNodeEntry = async actual => { assert.equal(actual, address); return { balance: Buffer.from('0000000000000000006a94d74f430000', 'hex') }; };
+  bus.state.base = { view: { core: { signedLength: 8 }, checkout(length) {
+    assert.equal(length, 8);
+    return { get: async (actual, options) => {
+      assert.equal(actual, address); assert.equal(options.timeout, 5000); assert.equal(options.update, false);
+      return { value: nodeEntry.init(Buffer.alloc(32), 0, Buffer.from('0000000000000000006a94d74f430000', 'hex')) };
+    }, close: async () => {} };
+  } } };
   const resetPeer = { base: { key: Buffer.alloc(32, 3), view: { core: { signedLength: 12 }, checkout(length) {
     assert.equal(length, 12); return { get: async key => { balanceKey = key; return { value: '123' }; }, close: async () => { closed++; } };
   } } } };

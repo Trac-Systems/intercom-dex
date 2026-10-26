@@ -18,6 +18,7 @@ import { verifyResetSource } from '../src/trac/source.js';
 import { subnetChannel } from './subnet-channel.js';
 import { fanOutValidatorSends } from './fanout.js';
 import { Bandwidth } from './bandwidth.js';
+import { summarizeApplyLogs } from './reader-scheduling.js';
 import { resolveProfile } from '../../src/net/profile-core.js';
 
 const hex32 = /^[0-9a-f]{64}$/;
@@ -84,11 +85,12 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
   if (token.length < 32) throw new Error('Bridge token too short');
   let bus, peer, resetPeer, relay, sidechannel, bridge, closing, finish;
   const bandwidth = new Bandwidth();
+  const restoreLogs = summarizeApplyLogs();
   const lifetime = new Promise(resolve => { finish = resolve; });
   const close = () => closing ??= (async () => {
     let failure;
     for (const stop of [() => bridge?.stop(), () => sidechannel?.stop(), () => relay?.stop(), () => peer?.close(),
-      () => peer?.store.close(), () => resetPeer?.close(), () => resetPeer?.store.close(), () => bus?.close(), () => bandwidth.close()]) {
+      () => peer?.store.close(), () => resetPeer?.close(), () => resetPeer?.store.close(), () => bus?.close(), () => bandwidth.close(), restoreLogs]) {
       try { await stop(); } catch (error) { failure ??= error; }
     }
     finish();

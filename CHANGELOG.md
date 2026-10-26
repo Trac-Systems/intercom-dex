@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.37
+
+- Balances no longer hang for 30 seconds when the RESET chain data a balance needs has not arrived yet: each read
+  gives up after five seconds with a clear message, and the peer reconnects to the RESET data by itself.
+- A failed balance read never shows as zero. The dashboard keeps the last good balances with the time they were
+  read and a visible warning, and leaves them out of trade amounts until a fresh read succeeds.
+- A pair whose trade list was empty when opened now keeps checking and shows new trades as they happen. Order book,
+  chart and trade history show when a refresh fails instead of silently showing old data.
+- Busy RESET catch-up no longer holds up the peer: chain entries are applied in short slices and the per-entry
+  log lines are summarized every 30 seconds.
+- The peer re-opens its connection to the venue by itself if that connection stops answering.
+- The "maker not heard" warning names the offer it refers to.
+- Works with 0.1.32 and later; no minimum-version change.
+
 ## 0.1.36
 
 - When a buyer refunds and the seller never sent tokens, the amount returns to the seller's open offer,

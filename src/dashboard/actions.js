@@ -33,7 +33,7 @@ export function createConfirmations({ secret = randomBytes(32), clock = () => Da
 // The dashboard's actions call the same role and wallet functions as the control API, the CLI and the MCP tools.
 export function createActions({ config, role, wallets = null, balances = null, nextOffer = null }) {
   const kind = config.role, registry = () => ('usable' in role.registry ? role.registry.usable : role.registry);
-  const freeOf = async asset => { const r = balances ? await balances() : null; return r?.value?.balances ? BigInt(r.value.balances[asset].free) : null; };
+  const freeOf = async asset => { const r = balances ? await balances() : null; return r?.ok && !r.value?.balanceError && r.value?.balances ? BigInt(r.value.balances[asset].free) : null; };
   const shortfall = async (asset, units) => {
     const free = await freeOf(asset);
     return free !== null && units > free ? `You have ${amount(free, asset).text} ${asset} free; this needs ${amount(units, asset).text} ${asset}.` : null;

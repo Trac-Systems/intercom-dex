@@ -1,6 +1,18 @@
 import { verifyResetSource } from './source.js';
 import { Peer, Wallet, createConfig, ENV } from 'trac-peer';
 import { replicateReader } from '../../runtime/reader-network.js';
+import { cooperativeApply } from '../../runtime/reader-scheduling.js';
+
+class ResetReader extends Peer {
+  _boot() {
+    const boot = super._boot();
+    // The pinned trac-peer builds its Autobase synchronously here, before opening/replication starts.
+    // Fail visibly if a dependency upgrade changes this hook.
+    if (typeof this.base?._handlers?.apply !== 'function') throw new Error('RESET reader apply hook unavailable');
+    this.base._handlers.apply = cooperativeApply(this.base._handlers.apply);
+    return boot;
+  }
+}
 
 export async function openResetReader({ bus, config, walletAt, bandwidth }) {
   if (config.trac === undefined) return null;
@@ -19,7 +31,7 @@ export async function openResetReader({ bus, config, walletAt, bandwidth }) {
   });
   if (reset.beaconOptions != null) pc.beaconOptions = reset.beaconOptions;
   const wallet = await walletAt(pc.keyPairPath, Wallet, { networkPrefix: bus.config.addressPrefix, derivationPath: bus.config.derivationPath });
-  const reader = new Peer({ config: pc, msb: bus, wallet, protocol: Protocol, contract: Contract });
+  const reader = new ResetReader({ config: pc, msb: bus, wallet, protocol: Protocol, contract: Contract });
   bandwidth?.trackStore(reader.store, 'reset');
   reader._replicate = () => replicateReader(reader, bandwidth);
   try {

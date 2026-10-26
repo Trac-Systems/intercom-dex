@@ -23,7 +23,7 @@ export function cached(fn, ms, clock = () => Date.now()) {
     if (pending) return pending;
     if (clock() - at < ms) return Promise.resolve(last);
     at = clock();
-    pending = Promise.resolve().then(fn).then(value => ({ ok: true, value, at }), error => ({ ok: false, error: error.message, value: last?.value ?? null, at }))
+    pending = Promise.resolve().then(fn).then(value => ({ ok: true, value, at: clock() }), error => ({ ok: false, error: error.message, value: last?.value ?? null, at: last?.at ?? null }))
       .then(result => { last = result; pending = null; return result; });
     return pending;
   };
@@ -36,7 +36,8 @@ export function refreshing(fn, ms, clock = () => Date.now(), firstWaitMs = 2000)
   let last = null;
   return () => {
     const next = read().then(result => (last = result));
-    if (last) return Promise.resolve(last);
+    if (last) return Promise.resolve(clock() - last.at >= ms && last.ok
+      ? { ...last, ok: false, error: 'Balances are being refreshed; the displayed values may be out of date' } : last);
     let timer;
     const waited = new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, error: 'still being read', value: null, at: null }), firstWaitMs); });
     return Promise.race([next, waited]).finally(() => clearTimeout(timer));
@@ -315,7 +316,15 @@ function summary(view, kind) {
 // memory; chain balances go through a 30-second cache, peer readings through short caches.
 export function createModel({ config, role, wallets = null, bridge, nextOffer = null, clock = () => Date.now() }) {
   const kind = config.role, now = () => Math.floor(clock() / 1000);
-  const balances = wallets ? refreshing(() => wallets.info(), BALANCE_CACHE_MS, clock) : null;
+  let lastBalances = null, balanceReadAt = null;
+  const balances = wallets ? refreshing(async () => {
+    const info = await wallets.info();
+    if (!info.balanceError && info.balances) {
+      lastBalances = info.balances;
+      balanceReadAt = info.balanceReadAt ?? clock();
+    }
+    return { ...info, balances: info.balanceError ? lastBalances : info.balances, balanceReadAt };
+  }, BALANCE_CACHE_MS, clock) : null;
   const stats = cached(() => bridge.stats(), 10000, clock);
   const readers = cached(async () => {
     const [trac, reset] = await Promise.allSettled([bridge.call('dex_msb_info', {}, 5000), bridge.call('dex_reset_context', {}, 5000)]);
@@ -380,8 +389,9 @@ export function createModel({ config, role, wallets = null, bridge, nextOffer = 
       const peerConnected = bridge.ws?.readyState === 1;
       const out = { role: kind, network: config.network, generatedAt: sec,
         wallets: wallet ? { ...(walletView(wallet.value, { network: config.network, role: kind }) ?? { assets: [], notes: [], withdrawals: [], storage: null, backup: null }),
-          error: wallet.ok ? wallet.value?.balanceError ?? null : wallet.error, readAt: wallet.at ? Math.floor(wallet.at / 1000) : null } : null };
-      if (kind === 'trader') out.trader = summary(await view(sec, wallet?.value), kind);
+          error: wallet.ok ? wallet.value?.balanceError ?? null : wallet.error,
+          readAt: wallet.value?.balanceReadAt != null ? Math.floor(wallet.value.balanceReadAt / 1000) : null } : null };
+      if (kind === 'trader') out.trader = summary(await view(sec, wallet?.ok && !wallet.value?.balanceError ? wallet.value : null), kind);
       if (kind === 'signer') {
         const r = await readers();
         out.signer = summary(await view(sec, null, { peerConnected, trac: !!r.value?.trac, reset: !!r.value?.reset, checkedAt: Math.floor(r.at / 1000) }), kind);

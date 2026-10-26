@@ -1,0 +1,25 @@
+import { cooperativeApply, summarizeApplyLogs } from '../../../peer/runtime/reader-scheduling.js';
+import { signedBalanceRead } from '../../../peer/src/trac/balances.js';
+
+let responsive = false;
+setTimeout(() => { responsive = true; }, 0);
+const values = [];
+const apply = cooperativeApply(async (_nodes, view) => {
+  const batch = view.batch();
+  await batch.put('a', '1'); await batch.put('b', '2'); await batch.flush(); await batch.close();
+}, { sliceMs: 0 });
+await apply([], { batch: () => ({ put: async (...args) => values.push(args), flush: async () => {}, close: async () => {} }) });
+if (!responsive || JSON.stringify(values) !== '[["a","1"],["b","2"]]') throw new Error('Reader scheduling mismatch');
+let closed = 0;
+const base = { view: { core: { signedLength: 2 }, checkout: () => ({
+  get: async (_key, options) => { if (options.timeout !== 20 || options.update !== false) throw new Error('Read options mismatch'); return { value: '12' }; },
+  close: async () => { closed++; },
+}) } };
+if ((await signedBalanceRead(base, 'balance', 'RESET', 20)).value !== '12') throw new Error('Read mismatch');
+await new Promise(resolve => setTimeout(resolve, 0));
+if (closed !== 1) throw new Error('Snapshot not closed');
+const lines = [], logger = { log: value => lines.push(value) }, restore = summarizeApplyLogs(logger);
+logger.log('#1 | ' + 'a'.repeat(64) + ': {}'); restore();
+if (lines.length !== 1 || lines[0] !== 'RESET reader applied 1 messages') throw new Error('Log summary mismatch');
+console.log('Bare reader scheduling, signed reads and log summary passed');
+Bare.exit();

@@ -134,7 +134,14 @@ export function serverList({ fetchBlock, size = 100, onPage = () => {}, ...optio
 // Rows read newest first with a cursor (/api/trades). Older pages load when the end comes into view; refresh()
 // puts newer rows on top without moving what the reader is looking at.
 export function cursorList({ fetchPage, key, ...options }) {
-  let rows = [], next = null, done = false, busy = false, epoch = 0;
+  let rows = [], next = null, done = false, busy = false, epoch = 0, readAt = null;
+  const status = h('p', { class: 'error', role: 'status', hidden: true });
+  const succeeded = () => { readAt = Date.now(); status.hidden = true; };
+  const failed = error => {
+    status.hidden = false;
+    status.textContent = `${options.label ?? 'Data'} could not refresh: ${error.message}. ` +
+      (readAt === null ? 'No successful read yet.' : `Last successful read: ${new Date(readAt).toLocaleTimeString()}.`);
+  };
   const list = virtualList({ ...options, key, onRange: (from, to) => { if (to >= rows.length - 20) more(); } });
   const show = prepended => list.set(rows.length, i => rows[i], { prepended });
 
@@ -145,29 +152,34 @@ export function cursorList({ fetchPage, key, ...options }) {
     try {
       const page = await fetchPage(rows.length ? next : null);
       if (e !== epoch) return;
+      succeeded();
       const seen = new Set(rows.map(r => key(r)));
       rows = rows.concat(page.rows.filter(r => !seen.has(key(r))));
       next = page.next; done = !next;
       show(0);
-    } catch { /* tried again on the next scroll or refresh */ } finally { if (e === epoch) busy = false; }
+    } catch (error) { if (e === epoch) failed(error); } finally { if (e === epoch) busy = false; }
   }
   async function refresh() {
-    if (!rows.length) return more();
+    // `done` only means there is no older page. Even an empty first page must poll for new trades.
+    if (busy) return;
     const e = epoch;
+    busy = true;
     try {
       const page = await fetchPage(null);
       if (e !== epoch) return;
+      succeeded();
       const seen = new Set(rows.map(r => key(r))), fresh = [];
       for (const r of page.rows) { if (seen.has(key(r))) break; fresh.push(r); }
+      if (!rows.length) { rows = page.rows; next = page.next; done = !next; show(0); return; }
       if (!fresh.length) return;
       if (fresh.length === page.rows.length) { rows = page.rows; next = page.next; done = !next; show(0); return; }
       rows = fresh.concat(rows);
       show(fresh.length);
-    } catch { /* kept as it is */ }
+    } catch (error) { if (e === epoch) failed(error); } finally { if (e === epoch) busy = false; }
   }
   more();
   return {
-    el: list.el, list, refresh,
-    reset() { epoch++; rows = []; next = null; done = false; busy = false; list.clear(); more(); },
+    el: list.el, list, status, refresh,
+    reset() { epoch++; rows = []; next = null; done = false; busy = false; readAt = null; status.hidden = true; list.clear(); more(); },
   };
 }

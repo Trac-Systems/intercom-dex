@@ -268,6 +268,16 @@ the signing capability. `openWallet(file, password)` also opens legacy v1 files.
 The adapter adds `balances(address?) -> {TNK, RESET, feeTnk}` through
 `dex_balances {address}`. Reads use signed MSB node entries and the pinned RESET
 reader's signed `bal/<pubkey>` view, never gateway balance claims.
+The two signed reads run concurrently with a five-second deadline each; timed-out
+checkouts close and failures identify MSB or RESET. Concurrent requests for one
+address share a pending read, but completed balance results are not reused for
+trading or withdrawal checks. Missing signed blocks are unavailable data, not a
+zero balance. A RESET read timeout refreshes replica discovery and frees one
+reader connection, at most once per 30 seconds, without restarting the reader.
+Dashboard values may be retained for display after a failed refresh, with a
+warning and the original successful-read timestamp; the trade ticket does not
+use those stale values as available funds.
+
 `withdrawalStatus({id, asset, to, amount}) -> {ok, unknown, txHash?, reason?}`
 checks the matching durable intent and signed finality. Without a journaled intent
 the withdrawal was never sent (`unknown:false`). A final mismatch is definite

@@ -8,6 +8,7 @@ import { serverList, cursorList } from './vlist.js';
 import { review } from './dialogs.js';
 
 const ROW = 32, LIVE_MS = 5000;
+const marketRead = path => api(path, undefined, { timeoutMs: 10000 });
 const q = params => new URLSearchParams(params).toString();
 const plain = text => String(text).replaceAll(',', '');
 const side = s => h('span', { class: s === 'sell' ? 'down' : s === 'buy' ? 'up' : 'muted' }, s === 'sell' ? 'Sell' : s === 'buy' ? 'Buy' : '—');
@@ -16,7 +17,7 @@ const expander = (cls, open, toggle, kids, detail) => h('div', { class: `vl-row 
   h('div', { class: 'cells', tabindex: '0', role: 'button', 'aria-expanded': String(open), onclick: toggle,
     onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } }, kids, h('span', { class: 'chev', 'aria-hidden': 'true' }, open ? '▾' : '▸')),
   open ? h('div', { class: 'detail' }, detail) : null);
-const table = (cls, heads, list) => h('div', { class: `table ${cls}` }, h('div', { class: 'thead' }, heads.map(([t, c]) => h('span', { class: c ?? null }, t))), list.el);
+const table = (cls, heads, list) => h('div', { class: `table ${cls}` }, h('div', { class: 'thead' }, heads.map(([t, c]) => h('span', { class: c ?? null }, t))), list.status, list.el);
 
 // ---- Chart: 16 timeframes, gap-filled candles, older pages on scroll left, the newest candle refreshed live.
 function chartPanel() {
@@ -25,9 +26,10 @@ function chartPanel() {
   const buttons = TIMEFRAMES.map(tf => h('button', { type: 'button', class: 'tf', 'aria-pressed': String(tf.interval === interval), onclick: () => pick(tf.interval) }, tf.label));
   const readout = h('div', { class: 'readout' }), host = h('div', { class: 'chart-host', role: 'img', 'aria-label': 'Price chart' });
   const quiet = h('div', { class: 'chart-empty', hidden: true }, 'No trades yet');
+  const warning = h('p', { class: 'error', role: 'status', hidden: true });
   const el = h('section', { class: 'panel chart' },
     h('div', { class: 'chart-bar' }, h('div', { class: 'tfs', role: 'group', 'aria-label': 'Timeframe' }, buttons)),
-    h('div', { class: 'chart-body' }, host, readout, quiet),
+    h('div', { class: 'chart-body' }, host, readout, quiet), warning,
     h('p', { class: 'credit' }, 'Chart by ', h('a', { href: 'https://www.tradingview.com/', target: '_blank', rel: 'noopener noreferrer' }, 'TradingView'), ' Lightweight Charts™'));
   const chart = priceChart(host, { onOlder: older, onHover: t => { hover = t; showReadout(); } });
   chart.interval(interval);
@@ -45,6 +47,8 @@ function chartPanel() {
     dense = denseCandles(stored, interval, Date.now() / 1000, cap);
     quiet.hidden = loading || stored.length > 0;
     quiet.textContent = failed ? `Chart data unavailable: ${failed}` : 'No trades yet';
+    warning.hidden = !failed || !stored.length;
+    warning.textContent = failed ? `Chart could not refresh: ${failed}. Showing the last received data.` : '';
     chart.set(dense.map(toPoint), mode);
     showReadout();
   }
@@ -53,7 +57,7 @@ function chartPanel() {
     stored = []; cap = DENSE_CAP; oldest = false; paging = false; loading = true; lastLive = Date.now();
     draw('fit');
     try {
-      const page = await api(url({ limit: PAGE }));
+      const page = await marketRead(url({ limit: PAGE }));
       if (e !== epoch) return;
       stored = page.candles; failed = null;
     } catch (error) { if (e === epoch) failed = error.message; /* the live refresh reads it again */ }
@@ -65,7 +69,7 @@ function chartPanel() {
     const e = epoch;
     paging = true;
     try {
-      const page = await api(url({ limit: PAGE, before: stored[0].t }));
+      const page = await marketRead(url({ limit: PAGE, before: stored[0].t }));
       if (e !== epoch) return;
       if (!page.candles.length) oldest = true;
       else { stored = mergeCandles(page.candles, stored); draw('keep'); }
@@ -75,12 +79,12 @@ function chartPanel() {
     const e = epoch;
     lastLive = Date.now();
     try {
-      const page = await api(url({ limit: 3 }));
+      const page = await marketRead(url({ limit: 3 }));
       if (e !== epoch) return;
       const had = stored.length;
       stored = mergeCandles(stored, page.candles); failed = null;
       draw(had ? 'live' : 'fit');
-    } catch (error) { if (e === epoch && !stored.length) { failed = error.message; draw('live'); } }
+    } catch (error) { if (e === epoch) { failed = error.message; draw('live'); } }
   }
   function pick(next) {
     interval = next; localStorage.setItem('interval', next);
@@ -218,7 +222,7 @@ function bottomPanel(getPlaces) {
       [h('p', null, x.outcome.text), h('p', { class: 'muted' }, `${x.side === 'buy' ? 'Bought' : 'Sold'} ${x.base.text} ${x.base.unit} for ${x.quote.text} USDC at ${x.price} · with ${x.peer}`,
         x.tradeId ? ` · trade ${x.tradeId}` : null, ' · ', whenLong(x.at))]) }),
     trades: () => cursorList({ key: t => t.id, rowHeight: ROW, label: 'Market trades', emptyText: 'No trades on this pair yet.',
-      fetchPage: cursor => api(`/api/trades?${q({ pair: tradesPair, limit: 200, ...(cursor ? { before: cursor } : {}) })}`),
+      fetchPage: cursor => marketRead(`/api/trades?${q({ pair: tradesPair, limit: 200, ...(cursor ? { before: cursor } : {}) })}`),
       row: t => h('div', { class: 'vl-row', role: 'listitem' }, h('div', { class: 'cells' }, cell('', when(t.t)), cell(`num ${t.side === 'sell' ? 'down' : t.side === 'buy' ? 'up' : ''}`, h('span', { title: t.price }, p(tradesPair, t.price))),
         cell('num', amt(t.amount)), cell('num', amt(t.usdc)), cell('hide-s', side(t.side)))) }),
     attention: () => serverList({ fetchBlock: list('trader.attention'), rowHeight: ROW, key: (a, i) => `${a.kind}:${a.at}:${a.text}` || i, label: 'Alerts', emptyText: 'Nothing needs your attention.',
@@ -288,37 +292,46 @@ function pairBar(onPick) {
 }
 
 export function tradingView() {
-  let current = localStorage.getItem('pair'), shown = null, pairs = [], book = null, state = null, bookEpoch = 0;
+  let current = localStorage.getItem('pair'), shown = null, pairs = [], book = null, state = null, bookEpoch = 0, bookReadAt = null, bookPending = null;
   const places = new Map(), bookPlaces = new Map();
   const placesOf = name => places.get(name) ?? 2;
   const bar = pairBar(name => choose(name));
   const chart = chartPanel(), entry = entryPanel(), bottom = bottomPanel(placesOf);
   const books = bookPanel({ onTake: level => entry.take(level) });
   const waiting = h('div', { class: 'waiting', hidden: true }, empty('The pairs, book and chart appear once the venue’s signer list arrives.'));
-  const el = h('div', { class: 'trading' }, bar.el, waiting, h('div', { class: 'market' }, chart.el, books.el, entry.el), bottom.el);
+  const bookWarning = h('p', { class: 'error', role: 'status', hidden: true });
+  const el = h('div', { class: 'trading' }, bar.el, waiting, bookWarning, h('div', { class: 'market' }, chart.el, books.el, entry.el), bottom.el);
 
   function choose(name) {
     if (name === shown) return;
     const first = !shown;
     current = shown = name; localStorage.setItem('pair', name);
-    book = null; books.clear(); bookEpoch++;
+    book = null; bookReadAt = null; bookWarning.hidden = true; books.clear(); bookEpoch++;
     chart.pair(name); bottom.pair(name);
     if (first) bottom.start();
     refreshBook();
     update(state);
   }
   async function refreshBook() {
+    if (bookPending === bookEpoch) return;
     const e = bookEpoch, name = current;
+    bookPending = e;
     try {
-      const b = await api(`/api/book?${q({ pair: name })}`);
+      const b = await marketRead(`/api/book?${q({ pair: name })}`);
       if (e !== bookEpoch) return;
       book = b;
+      bookReadAt = Date.now(); bookWarning.hidden = true;
       bookPlaces.set(name, precisionOf([...b.asks, ...b.bids].map(l => l.price)));
       const p = pricePlaces(pairs.find(x => x.pair === name));
       chart.precision(p);
       books.set(b, p);
       entry.data(b, state?.balances ?? null);
-    } catch { /* kept until the next poll */ }
+    } catch (error) {
+      if (e !== bookEpoch) return;
+      bookWarning.hidden = false;
+      bookWarning.textContent = `Order book could not refresh: ${error.message}. ` +
+        (bookReadAt === null ? 'No order book received yet.' : `Showing the book read at ${new Date(bookReadAt).toLocaleTimeString()}.`);
+    } finally { if (bookPending === e) bookPending = null; }
   }
   // Price decimals per pair: what its book's prices carry, or its best prices and last price before the book is read.
   function pricePlaces(p) {

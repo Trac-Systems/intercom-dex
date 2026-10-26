@@ -102,7 +102,7 @@ export class WalletManager {
     const key = JSON.stringify([this.state(), this.store.list('withdraw-').map(n => [n, this.store.get(n)?.status])]);
     if (this.shown?.key === key && performance.now() - this.shown.at < DISPLAY_CACHE_MS) return this.shown.value;
     const value = await this.balances();
-    this.shown = { at: performance.now(), key, value };
+    this.shown = { at: performance.now(), readAt: Date.now(), key, value };
     return value;
   }
 
@@ -110,7 +110,8 @@ export class WalletManager {
     // Addresses and storage stay available when the chains cannot be read right now.
     let balances = null, balanceError;
     try { await this.recover(); balances = await this.displayBalances(); } catch (e) { balanceError = `Balances unavailable right now: ${e.message}`; }
-    const result = { addresses: this.addresses, balances, ...(balanceError ? { balanceError } : {}), minimumFees: { SOL: MIN_SOL, TNK: this.addresses.trac ? MIN_TNK : '0', units: 'base units' },
+    const result = { addresses: this.addresses, balances, balanceReadAt: this.shown?.readAt ?? null,
+      ...(balanceError ? { balanceError } : {}), minimumFees: { SOL: MIN_SOL, TNK: this.addresses.trac ? MIN_TNK : '0', units: 'base units' },
       payout: this.config.payout ?? {}, withdrawals: this.pending().map(w => this.publicWithdrawal(w)), ...rpcAdvice(this.config) };
     if (short) return result;
     const bin = fileURLToPath(new URL('../../bin/dex.mjs', import.meta.url));
