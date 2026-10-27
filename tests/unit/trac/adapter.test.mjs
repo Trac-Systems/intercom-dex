@@ -10,6 +10,10 @@ import { createTracAdapter } from '../../../src/trac/adapter.js';
 import { buildTnkTransfer, buildResetTransfer, transferNonce } from '../../../src/trac/transfers.js';
 import { openIntentStore } from '../../../src/trac/intents.js';
 import { validAddressProof } from '../../../src/core/address-proof.js';
+import { RESET_PAUSED_MESSAGE } from '../../../src/market/gateway-status.js';
+import { stepFinalized } from '../../../src/core/trade-seller.js';
+import { simulation } from '../core/simulation.mjs';
+import { accountBalances } from '../../../src/wallets/accounting.js';
 
 const root = process.env.TMPDIR ?? fileURLToPath(new URL('../../../.test-tmp/trac/', import.meta.url));
 fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -256,6 +260,7 @@ test('RESET gateway preparation is verified before signing and submitting the ch
   const gateway = async (url, options) => {
     assert.equal(new URL(url).origin, 'http://127.0.0.1:47103');
     assert.equal(options.redirect, 'error');
+    if (new URL(url).pathname === '/v1/state') return Response.json({ validators: { eligible: 3 } });
     const body = JSON.parse(options.body);
     if (new URL(url).pathname === '/v1/tx/prepare') {
       assert.deepEqual(body, { address: f.wallet.publicKey, to: f.toKey, amount: '42', nonce: prepared.nonce });
@@ -272,16 +277,89 @@ test('RESET gateway preparation is verified before signing and submitting the ch
       assert.equal((await adapter.sendTransfer(request)).ok, false);
       assert.equal(signed, 0); assert.equal(submitted, 0);
     }
-    globalThis.fetch = async () => new Response('rejected', { status: 400 });
+    const healthy = response => async url => new URL(url).pathname === '/v1/state' ? Response.json({ validators: { eligible: 3 } }) : response();
+    globalThis.fetch = healthy(() => new Response('rejected', { status: 400 }));
     assert.equal((await adapter.sendTransfer(request)).reason, 'gateway_rejected');
-    globalThis.fetch = async () => new Response('{');
+    globalThis.fetch = healthy(() => new Response('{'));
     assert.equal((await adapter.sendTransfer(request)).reason, 'invalid_gateway_response');
-    globalThis.fetch = async () => { throw Error('offline'); };
+    globalThis.fetch = healthy(() => { throw Error('offline'); });
     assert.equal((await adapter.sendTransfer(request)).reason, 'send_failed');
     packet = prepared; globalThis.fetch = gateway;
     assert.equal((await adapter.sendTransfer(request)).ok, true);
     assert.equal(signed, 1); assert.equal(submitted, 1);
   } finally { adapter.close(); globalThis.fetch = originalFetch; }
+});
+
+test('RESET health refusal leaves no signature, prepare, submission or intent; retries and deadline abort release the reservation', async t => {
+  const sim = simulation({ capturePhases: true, pair: 'RESET/USDC' });
+  let state = structuredClone(sim.snapshots.get('seller:transferring')), clock = state.now * 1000;
+  t.mock.method(Date, 'now', () => clock);
+  const f = fixture();
+  state.terms.seller.tracAddr = f.wallet.address; state.terms.buyer.tracAddr = f.terms.buyer.tracAddr;
+  state.terms.baseAmount = '42'; state.draft = structuredClone(state.terms);
+  const request = { terms: state.terms, tradeId: state.tradeId };
+  let signatures = 0, reads = 0, eligible = 3;
+  f.wallet.sign = () => { signatures++; throw Error('must not sign'); };
+  t.mock.method(globalThis, 'fetch', async url => {
+    assert.equal(new URL(url).pathname, '/v1/state', 'no prepare or submission'); reads++;
+    return Response.json({ validators: { eligible } });
+  });
+  let adapter = createTracAdapter({ ...f, resetGatewayUrl: 'https://reset.example' });
+  t.after(() => adapter.close());
+  assert.equal((await adapter.gatewayHealth()).ok, true);
+  eligible = 2;
+  const failure = await adapter.sendTransfer(request);
+  assert.equal(reads, 2, 'pre-send bypasses the healthy admission cache');
+  assert.deepEqual([failure.ok, failure.unknown, failure.txHash, failure.reason], [false, undefined, undefined, RESET_PAUSED_MESSAGE]);
+  state = stepFinalized(state, failure).state;
+  assert.equal(state.gatewayPaused, true); assert.equal(state.phase, 'transferring');
+  const trade = () => ({ role: 'seller', state });
+  const reserved = () => accountBalances({ balances: { RESET: '100' }, trades: [trade()], registry: () => sim.f.registry }).RESET.breakdown.trades;
+  assert.equal(reserved(), '42');
+  assert.deepEqual(stepFinalized(state, { type: 'tick', now: state.now + 9 }).actions, []);
+  clock += 10000;
+  const retry = stepFinalized(state, { type: 'tick', now: clock / 1000 }); state = retry.state;
+  assert.equal(retry.actions[0].type, 'sendTransfer'); assert.equal(retry.actions[0].resume, true);
+  assert.equal(state.gatewayPaused, undefined, 'clear the no-intent evidence durably before starting a new attempt');
+  state = stepFinalized(state, await adapter.sendTransfer({ ...request, resume: true })).state;
+  assert.equal(reads, 3, 'each retry samples again');
+  assert.equal(signatures, 0); assert.deepEqual(f.calls, []);
+  adapter.close();
+  const journal = openIntentStore(f.intentFolder);
+  assert.equal(journal.get(state.tradeId), null, 'no intent exists even after reopening the durable store'); journal.close();
+  adapter = createTracAdapter({ ...f, resetGatewayUrl: 'https://reset.example' });
+  const restored = stepFinalized(structuredClone(state), { type: 'resume', now: state.terms.refundAfter });
+  assert.equal(restored.state.phase, 'aborted', 'restart after the refund time still never becomes lost');
+  assert.ok(restored.actions.every(a => a.type !== 'checkEscrow' && a.type !== 'sendTransfer'));
+  clock = state.terms.sendBy * 1000;
+  const ended = stepFinalized(state, { type: 'tick', now: clock / 1000 }); state = ended.state;
+  assert.equal(state.phase, 'aborted'); assert.match(state.reason, /^Transfer not sent before the deadline/);
+  assert.equal(reserved(), '0'); assert.equal(ended.actions[0].type, 'abort');
+  assert.equal((await adapter.sendTransfer({ ...request, resume: true })).reason, 'send_deadline');
+  assert.equal(signatures, 0); assert.equal(reads, 3);
+});
+
+for (const failure of ['health', 'deadline']) test(`slow RESET preparation rechecks ${failure} before signing`, async t => {
+  let clock = Date.now(); t.mock.method(Date, 'now', () => clock);
+  const f = fixture(); f.terms.pair = 'RESET/USDC'; f.terms.base = BASES.RESET;
+  const built = await buildResetTransfer({ ...f.resetContext, writer: '77'.repeat(32), from: f.wallet.publicKey, to: f.toKey,
+    amount: '42', tradeId: f.tradeId, sign: bytes => f.wallet.sign(bytes) });
+  const op = built.payload.txo;
+  const prepared = { address: f.wallet.publicKey, to: f.toKey, amount: '42', prepared_command: built.submission.prepared_command,
+    tx: op.tx, nonce: op.in, context: { network_id: 918, txv: op.txv, writer: op.iw, content_hash: op.ch, subnet: op.bs, msb: op.mbs } };
+  let signatures = 0, reads = 0;
+  f.wallet.sign = () => { signatures++; throw Error('must not sign'); };
+  t.mock.method(globalThis, 'fetch', async url => {
+    if (new URL(url).pathname === '/v1/state') return Response.json({ validators: { eligible: ++reads === 1 || failure === 'deadline' ? 3 : 2 } });
+    assert.equal(new URL(url).pathname, '/v1/tx/prepare');
+    clock = failure === 'health' ? clock + 15000 : f.terms.sendBy * 1000;
+    return Response.json(prepared);
+  });
+  const adapter = createTracAdapter({ ...f, resetGatewayUrl: 'https://reset.example' });
+  const result = await adapter.sendTransfer(f); adapter.close();
+  assert.equal(result.reason, failure === 'health' ? RESET_PAUSED_MESSAGE : 'send_deadline');
+  assert.equal(result.unknown, undefined); assert.equal(signatures, 0); assert.equal(reads, failure === 'health' ? 2 : 1);
+  const journal = openIntentStore(f.intentFolder); assert.equal(journal.get(f.tradeId), null); journal.close();
 });
 
 test('lost TNK response preserves a flushed intent; restart and expired txv never sign another transfer', async () => {
@@ -372,10 +450,11 @@ test('RESET submission retries reuse the durable gateway packet without another 
   const op = built.payload.txo;
   const prepared = { address: f.wallet.publicKey, to: f.toKey, amount: '42', prepared_command: built.submission.prepared_command,
     tx: op.tx, nonce: op.in, context: { network_id: 918, txv: op.txv, writer: op.iw, content_hash: op.ch, subnet: op.bs, msb: op.mbs } };
-  let preparations = 0, submissions = 0, final = false;
+  let preparations = 0, submissions = 0, final = false, healthy = false, healthReads = 0;
   const call = f.bridge.call;
   f.bridge.call = (type, params) => type === 'dex_verify' ? { ok: final, final, amount: final ? '42' : null } : call(type, params);
   globalThis.fetch = async (url, options) => {
+    if (new URL(url).pathname === '/v1/state') { healthReads++; return Response.json({ validators: { eligible: healthy ? 3 : 2 } }); }
     if (new URL(url).pathname === '/v1/tx/prepare') { preparations++; return Response.json(prepared); }
     submissions++;
     const row = JSON.parse(fs.readFileSync(path.join(f.intentFolder, 'intents.jsonl'), 'utf8'));
@@ -387,8 +466,12 @@ test('RESET submission retries reuse the durable gateway packet without another 
   };
   let adapter = createTracAdapter({ ...f, resetGatewayUrl: 'http://127.0.0.1:47103' });
   try {
+    assert.equal((await adapter.sendTransfer(f)).reason, RESET_PAUSED_MESSAGE);
+    assert.equal(preparations, 0); assert.equal(submissions, 0);
+    healthy = true;
     const first = await adapter.sendTransfer(f);
     assert.equal(first.unknown, true); assert.equal(first.txHash, op.tx);
+    healthy = false;
     adapter.close();
     adapter = createTracAdapter({ ...f, wallet: null, resetGatewayUrl: 'http://127.0.0.1:47103' });
     const badReceipt = await adapter.sendTransfer({ ...f, resume: true });
@@ -398,6 +481,7 @@ test('RESET submission retries reuse the durable gateway packet without another 
     final = true;
     assert.equal((await adapter.sendTransfer(f)).ok, true);
     assert.equal(preparations, 1); assert.equal(submissions, 3);
+    assert.equal(healthReads, 2, 'an existing signed intent is always reconciled, even during an outage');
   } finally { adapter.close(); globalThis.fetch = savedFetch; }
 });
 

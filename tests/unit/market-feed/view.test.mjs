@@ -12,12 +12,42 @@ import { BookFeed, BookView } from '../../../src/market/book-feed.js';
 import { setup, memoryStore } from './helpers.mjs';
 import { offerIdOf } from '../../../src/roles/common.js';
 import { networkId, proveParty } from '../core/address-proof-fixture.mjs';
+import { RESET_PAUSED_MESSAGE, RESET_READY_MESSAGE } from '../../../src/market/gateway-status.js';
 
 const pair = s => s.view().pairs.find(p => p.pair === 'RESET/USDC');
 const book = (s, remaining, ts = s.clock.t, seq = 1) => ({ pair: 'RESET/USDC', registryVersion: 1, ts, seq,
   levels: [{ side: 'sell', price: '0.43', baseAmount: '1', offers: 1 }, { side: 'sell', price: '0.42', baseAmount: '1', offers: 1 },
     { side: 'buy', price: '0.40', baseAmount: '1', offers: 1 }, { side: 'buy', price: '0.41', baseAmount: '1', offers: 1 }],
   ...(remaining === undefined ? {} : { remaining }) });
+
+test('only authenticated venue status changes the paused market; offers stay listed, stale and unknown status pause again', async () => {
+  const s = setup(); await s.register();
+  const offer = s.offer(); await s.send('offer', offer, s.f.seller, 'intercom-dex:offers');
+  assert.equal(pair(s).status, 'paused'); assert.equal(s.view().offers.length, 1);
+  const status = message => ({ status: message === RESET_READY_MESSAGE ? 'online' : 'degraded', software: '0.1.39', ts: s.clock.t, message });
+  assert.equal(await s.send('status', status(RESET_READY_MESSAGE), s.f.buyer), false);
+  assert.equal(await s.send('status', status(RESET_READY_MESSAGE), s.f.service, 'intercom-dex:offers'), false);
+  assert.equal(pair(s).status, 'paused');
+  assert.ok(await s.send('status', status(RESET_READY_MESSAGE)));
+  assert.equal(pair(s).status, 'open'); assert.equal(s.view().offers[0].paused, false);
+  const healthy = s.feed.view(); s.clock.t += 14;
+  assert.equal(s.feed.view(), healthy);
+  s.clock.t++;
+  assert.equal(pair(s).status, 'paused'); assert.notEqual(s.feed.view().etag, healthy.etag);
+  assert.equal(s.view().offers[0].reason, RESET_PAUSED_MESSAGE);
+  assert.ok(await s.send('status', status(RESET_PAUSED_MESSAGE)));
+  assert.equal(pair(s).status, 'paused'); assert.equal(s.view().offers.length, 1);
+  assert.equal(s.view().pairs.find(p => p.pair === 'TNK/USDC').status, 'open');
+  s.clock.t++;
+  assert.ok(await s.send('status', status('')));
+  assert.equal(pair(s).status, 'paused', 'an old venue without the signal does not imply health');
+  s.clock.t++;
+  assert.ok(await s.send('status', status(RESET_READY_MESSAGE)));
+  assert.equal(pair(s).status, 'open');
+  assert.equal(await s.send('status', { ...status(RESET_PAUSED_MESSAGE), ts: s.clock.t - 1 }), false);
+  assert.equal(await s.send('status', { ...status(RESET_PAUSED_MESSAGE), ts: s.clock.t + 1 }), false);
+  assert.equal(pair(s).status, 'open');
+});
 
 test('market feed hides cached unproven offers and identity mappings when proofs activate', async () => {
   const s = setup(); s.profile.peer = { msbNetworkId: networkId }; await s.register();
@@ -41,17 +71,19 @@ test('market feed hides cached unproven offers and identity mappings when proofs
 test('whole-unit view matches the game contract, with exact decimals and unknown fields', async () => {
   const s = setup(); await s.register();
   assert.deepEqual(s.view(), { v: 1, ts: s.clock.t, pairs: s.f.registry.pairs.map(p => ({ pair: p.pair, base: p.base.id,
+    status: p.base.id === 'RESET' ? 'paused' : 'open', paused: p.base.id === 'RESET', reason: p.base.id === 'RESET' ? RESET_PAUSED_MESSAGE : null,
     last: null, change24h: null, volume24h: null, bestBuy: null, bestSell: null, trades24h: null })), offers: [], trades: [] });
   const offer = s.offer();
   await s.send('offer', offer, s.f.seller, 'intercom-dex:offers');
   assert.equal(s.view().offers[0].left, null);
   await s.send('book', book(s, [{ offerId: offer.offerId, amount: '320000000000' }]));
   const trade = s.trade(); await s.send('tradeLog', trade);
-  assert.deepEqual(s.view().offers[0], { offerId: offer.offerId, pair: offer.pair, registryVersion: 1, side: 'sell', price: '0.42', amount: '5000', left: '3200',
+  assert.deepEqual(s.view().offers[0], { offerId: offer.offerId, pair: offer.pair, paused: true, reason: RESET_PAUSED_MESSAGE, registryVersion: 1, side: 'sell', price: '0.42', amount: '5000', left: '3200',
     maker: { trac: offer.maker.tracAddr, sol: offer.maker.solAddr }, postedAt: s.clock.t });
   assert.deepEqual(s.view().trades[0], { id: trade.tradeId, pair: trade.pair, price: '0.42', amount: '1200', usdc: '504',
     seller: { trac: trade.seller.tracAddr, sol: trade.seller.solAddr }, buyer: { trac: trade.buyer.tracAddr, sol: trade.buyer.solAddr }, settledAt: s.clock.t });
-  assert.deepEqual(pair(s), { pair: 'RESET/USDC', base: 'RESET', last: '0.42', change24h: '0', volume24h: '504', bestBuy: '0.41', bestSell: '0.42', trades24h: 1 });
+  assert.deepEqual(pair(s), { pair: 'RESET/USDC', base: 'RESET', status: 'paused', paused: true, reason: RESET_PAUSED_MESSAGE,
+    last: '0.42', change24h: '0', volume24h: '504', bestBuy: '0.41', bestSell: '0.42', trades24h: 1 });
   const tiny = s.offer({ pair: 'TNK/USDC', baseAmount: '1000000000000000001' });
   await s.send('offer', tiny, s.f.seller, 'intercom-dex:offers');
   assert.equal(s.view().offers.find(o => o.pair === 'TNK/USDC').amount, '1.000000000000000001');

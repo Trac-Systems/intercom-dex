@@ -17,6 +17,7 @@ import { IN_FLIGHT_SLACK_SEC, BUSY_TRADES, TICKER_SOON_SEC, SHARE_REQUESTS, Serv
 import { RegistryView, nowSec, random32, verifySummon, offerIdOf, SUMMON_SKEW_SEC } from '../../../src/roles/common.js';
 import { fixture, tracAddress, hex, SOL, SOL2, MINT, SIG } from '../core/helpers.mjs';
 import { proveParty, networkId } from '../core/address-proof-fixture.mjs';
+import { RESET_PAUSED_MESSAGE, RESET_READY_MESSAGE } from '../../../src/market/gateway-status.js';
 
 const KEY = randomBytes(32);
 const SIGNERS = 'intercom-dex:signers', OFFERS = 'intercom-dex:offers';
@@ -63,6 +64,37 @@ function setup({ store = null, immediate = false, dir = store ? null : mkdtempSy
     emit(OFFERS, envelope(f.seller, 'settled', { offerId, tradeId: t.id, terms: t.terms, hashHex: t.H, claimSignature: SIG, txHash: hex() }, OFFERS));
   return { f, service, bridge, dir, clock, calls, offer, trade, summon, publish, report, emit, envelope, member };
 }
+
+test('venue publishes gateway pause and recovery in legacy status text while retaining RESET offers and TNK availability', async t => {
+  const timers = [];
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }), health = { ok: false }; let reads = 0;
+  s.service.trac.gatewayHealth = async () => { reads++; return health; };
+  s.service.trac.gatewayHealthStatus = () => health;
+  await s.service.start(); t.after(() => s.service.stop());
+  const status = () => s.bridge.sent.filter(x => x.envelope.kind === 'status').at(-1).envelope.body;
+  assert.equal(status().status, 'degraded'); assert.equal(status().message, RESET_PAUSED_MESSAGE);
+  assert.deepEqual(Object.keys(status()).sort(), ['message', 'software', 'status', 'ts'], 'no new wire fields that old apps reject');
+  assert.equal(s.service.status().pairs.find(p => p.pair === 'RESET/USDC').availability, 'paused');
+  assert.equal(s.service.status().pairs.find(p => p.pair === 'TNK/USDC').availability, 'open');
+  const offer = { ...s.offer, pair: 'RESET/USDC', baseAmount: '100000000' }; offer.offerId = offerIdOf(offer);
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', offer, OFFERS));
+  timers.find(x => x.ms === 5000).fn();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  const book = s.bridge.sent.find(x => x.envelope.kind === 'book' && x.envelope.body.pair === 'RESET/USDC').envelope.body;
+  assert.equal(book.remaining[0].offerId, offer.offerId, 'health does not remove an offer from the venue book');
+  const version = s.service.registry.version;
+  health.ok = true; s.clock.t += 10;
+  timers.find(x => x.ms === 10000).fn();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2); assert.equal(status().status, 'online'); assert.equal(status().message, RESET_READY_MESSAGE);
+  assert.equal(s.service.registry.version, version, 'temporary health does not change terms or invalidate existing offers');
+  s.service.trac.gatewayHealth = async () => { throw Error('unreadable'); };
+  s.clock.t += 10; timers.find(x => x.ms === 10000).fn();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(status().message, RESET_PAUSED_MESSAGE);
+});
 
 test('a reported settlement is logged once both chains prove it, and published', async () => {
   const s = setup(), t = s.trade();

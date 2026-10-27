@@ -7,6 +7,7 @@ import { RANDOMNESS, ACCEPT_SLOT_BEHIND, STEP_BUDGET_MS, tradeId, tradeRandomnes
 import { SOFTWARE, meetsVersion } from './software.js';
 import { registryPair } from '../market/assets.js';
 import { addressProofRequired, validTermsAddressProofs } from './address-proof.js';
+import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
 
 export function seededRng(seed, domain) {
   const key = hexToBytes(seed, 32);
@@ -173,7 +174,7 @@ function participant(draft, role) {
 export function negotiationStep(state, event, message) {
   const s = structuredClone(state), actions = [];
   if (message?.kind === 'decline' && s.phase === 'awaitAccept' &&
-      message.body.takeNonce === s.takeNonce) return abortTransition(s, message.body.reason);
+      message.body.takeNonce === s.takeNonce) return abortTransition(s, message.body.reason === 'reset-gateway' ? RESET_PAUSED_MESSAGE : message.body.reason);
   if (s.phase === 'awaitReveal' && event.type === 'tick' && freshChainView(event) &&
       event.tipSlot >= s.acceptSlot + RANDOMNESS.REVEAL_CUTOFF) return abortTransition(s, 'Reveal arrived too late');
   if (s.phase === 'new' && event.type === 'tick') {

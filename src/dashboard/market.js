@@ -3,7 +3,7 @@ import { availableOffer } from '../market/book.js';
 import { amount } from './format.js';
 
 // Called-off reasons that are about the signers, not the maker: the same offer may work on the next try.
-const NOT_THE_MAKER = /signers/i;
+const NOT_THE_MAKER = /signers|RESET gateway/i;
 
 // A take called off before anything was locked, for a reason that lies with the maker.
 export const calledOffByMaker = s => s.phase === 'aborted' && !s.lockAttempted && !s.locked && !NOT_THE_MAKER.test(String(s.reason ?? ''));
@@ -30,7 +30,7 @@ export function ownTakes(trades) {
 export const takeOrder = () => (a, b) => a.at - b.at || (a.offerId < b.offerId ? -1 : a.offerId > b.offerId ? 1 : 0);
 
 // Build full depth from signed announcements; the wire book itself has only the best 50 levels per side.
-export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, heardAt = null, taken = { skip: new Set(), running: new Map() } }) {
+export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = book, now, heardAt = null, paused = false, taken = { skip: new Set(), running: new Map() } }) {
   const base = pair.base.id, groups = new Map();
   if (pair.status !== 'open') return { pair: pair.pair, base, at: now, asks: [], bids: [], spread: null };
   const better = takeOrder(now);
@@ -63,7 +63,7 @@ export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = b
       const level = book?.levels.find(l => l.side === side && priceUnits(l.price) === priceUnits(g.price));
       if (level && book.ts >= g.seen && BigInt(level.baseAmount) < g.units) g.units = BigInt(level.baseAmount);
       const own = g.mine < g.units ? g.mine : g.units;
-      const take = g.take && g.units > own ? { offerId: g.take.offerId,
+      const take = !paused && g.take && g.units > own ? { offerId: g.take.offerId,
         amount: amount(g.take.units < g.units - own ? g.take.units : g.units - own, base) } : null;
       total += g.units;
       return { price: g.price, amount: amount(g.units, base), total: amount(total, base), count: g.count,

@@ -8,6 +8,7 @@ import { open, createReplayCache } from '../core/envelope.js';
 import { supportedBase, tradePrice, registryPair } from '../market/assets.js';
 import { amount, shortKey } from './format.js';
 import { buildBook, ownTakes } from './market.js';
+import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
 
 const DAY = 86400, ONLINE_SEC = 90, PAYOUT_DELAY = 7 * DAY;
 export const BALANCE_CACHE_MS = 30000;
@@ -108,6 +109,8 @@ export function describeTrade(trade) {
         return line(`Waiting for the buyer to lock the USDC (${confirmed})`, 'the buyer and signers', 'If the USDC is not locked by', t.sendBy,
           'the trade is called off; you send nothing');
       case 'reservingEscrow': case 'transferring':
+        if (s.gatewayPaused) return line(RESET_PAUSED_MESSAGE, 'the RESET gateway', 'If transfers cannot resume by', t.sendBy,
+          'The trade is called off and your RESET reservation is released.');
         return line(`Sending your ${base}…`, 'the Trac network', 'Transfers are retried until', t.sendBy,
           'The same transaction is retried; confirmation may arrive later.');
       case 'awaitShares':
@@ -129,6 +132,9 @@ export function outcome(trade, note = null) {
   if (s.phase === 'lost') return { tone: 'bad', text: s.transferUnknown
     ? `The buyer took the USDC back; your ${base} transfer is still unconfirmed`
     : `The key was not released in time and the buyer took the USDC back; your ${base} had been sent` };
+  if (trade.role === 'seller' && s.phase === 'aborted' && s.reason?.startsWith('Transfer not sent before the deadline')) {
+    return { tone: 'neutral', text: `Called off: your ${base} was not sent and its trade reservation was released. The buyer's USDC stays locked until the refund time.` };
+  }
   return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Nothing was locked or sent.${note ? ' ' + note.text : ''}` };
 }
 
@@ -186,6 +192,7 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
   if (config.proof?.zkey && !existsSync(config.proof.zkey)) attention.push({ kind: 'key', text: 'The proving key file is missing. New trades cannot lock USDC until it is back at ' + config.proof.zkey + '.' });
   if (status.updateRequired) attention.push({ kind: 'update', text: 'This program needs an update before new trades can start.' });
   if (status.registryConflict) attention.push({ kind: 'paused', text: 'The venue published two different signer lists; new trades are paused.' });
+  for (const p of status.pairs ?? []) if (p.reason) attention.push({ kind: 'paused', text: p.reason });
   for (const t of running) if (t.state.phase === 'refunding') {
     attention.push({ kind: 'refund', at: t.state.now, text: `A refund became available for your ${t.state.draft.pair} trade: your USDC is being taken back automatically.` });
   }
@@ -208,8 +215,9 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
   const pairs = (reg?.pairs ?? []).filter(p => supportedBase(p.base));
   const market = pairs.map(p => {
     const book = traderBook(role, p, now, status.mine), ticker = role.tickers.get(p.pair), base = p.base.id;
+    const current = status.pairs?.find(entry => entry.pair === p.pair) ?? p;
     const price = value => value && value !== '0' ? value : null;
-    return { pair: p.pair, base, status: p.status, minBase: amount(p.minBaseAmount, base), last: price(ticker?.last),
+    return { pair: p.pair, base, status: current.status, reason: current.reason ?? null, minBase: amount(p.minBaseAmount, base), last: price(ticker?.last),
       change24h: null, high24h: price(ticker?.high24h), low24h: price(ticker?.low24h),
       volume24h: ticker ? amount(ticker.volume24h, 'USDC') : null, bestAsk: book.asks[0]?.price ?? null, bestBid: book.bids[0]?.price ?? null };
   });
@@ -219,7 +227,7 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
     attention: attention.sort((a, b) => (b.at ?? Infinity) - (a.at ?? Infinity)),
     offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {
       const base = o.pair.split('/')[0];
-      return { offerId: o.offerId, pair: o.pair, side: o.side, price: o.price, size: amount(o.baseAmount, base), filled: amount(o.filled, base),
+      return { offerId: o.offerId, pair: o.pair, paused: o.paused ?? false, reason: o.reason ?? null, side: o.side, price: o.price, size: amount(o.baseAmount, base), filled: amount(o.filled, base),
         reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt, listed: o.listed ?? null };
     }),
     running: running.map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
@@ -302,7 +310,8 @@ function serviceView({ role, now, health, midnight }) {
 }
 
 function traderBook(role, pair, now, mine = role.status().mine) {
-  return buildBook({ pair, offers: role.offers.values(), mine, dexKey: role.me.dexKey, book: role.book.get(pair.pair),
+  const current = role.status().pairs?.find(p => p.pair === pair.pair);
+  return buildBook({ pair, paused: current?.status === 'paused', offers: role.offers.values(), mine, dexKey: role.me.dexKey, book: role.book.get(pair.pair),
     inventory: role.bookView?.inventory.get(pair.pair) ?? role.book.get(pair.pair), now, heardAt: role.bookView?.heard.get(pair.pair),
     taken: ownTakes(role.host.trades.values()) });
 }

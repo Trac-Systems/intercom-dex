@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.40
+
+- RESET trades no longer start when the RESET gateway can't deliver transfers. Before an offer is posted, an offer
+  is taken or a take is accepted, the app asks the gateway how many validators it can reach and refuses with
+  "RESET transfers are paused…" when it is fewer than three. Nothing is locked or reserved.
+- A seller checks again right before sending. If the gateway stays unavailable until the send deadline, the trade is
+  called off and the seller's RESET reservation is released at once instead of waiting for the refund time.
+- The RESET/USDC pair shows as paused in the app, `status`, the agent API and MCP while transfers are paused.
+  TNK/USDC trades are not affected.
+- Needs the RESET gateway's validator report (live since 2026-10-27). Works with 0.1.32 and later.
+
 ## 0.1.39
 
 - Sellers need a little SOL to claim their USDC on Solana. Before a sell offer is posted, a buy offer is taken or a

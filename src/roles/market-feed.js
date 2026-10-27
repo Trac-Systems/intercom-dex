@@ -79,7 +79,8 @@ export class MarketFeed {
         await this.relays.update(this.registry.usable); this.view(); return accepted;
       }
       let changed = false;
-      if (channel === MAIN && ['book', 'ticker', 'tradeLog'].includes(m.kind)) {
+      if (channel === MAIN && m.kind === 'status') changed = this.market.status(m.body);
+      else if (channel === MAIN && ['book', 'ticker', 'tradeLog'].includes(m.kind)) {
         this.#pair(m.body, m.kind !== 'tradeLog');
         if (m.body.ts > this.now()) return false;
         if (m.kind === 'book') {

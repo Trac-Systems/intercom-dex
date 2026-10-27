@@ -161,6 +161,7 @@ function entryPanel() {
     kv(estimate, sideNow === 'buy' ? 'You pay about' : 'You receive about', qty > 0 && at > 0 ? `${(qty * at).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC` : '—');
     kv(minimum, 'Smallest trade', amt(pair.minBase));
     paused.hidden = open;
+    paused.textContent = pair.reason ?? 'Trading is paused on this pair.';
     submit.disabled = !open || (mode === 'take' && !o);
     submit.className = `primary wide ${sideNow}`;
     submit.textContent = `${mode === 'take' ? '' : 'Review '}${sideNow === 'buy' ? 'Buy' : 'Sell'} ${base}${mode === 'take' ? ' now' : ''}`;
@@ -202,9 +203,9 @@ function bottomPanel(getPlaces) {
   let tradesPair = null;
   const build = {
     offers: () => serverList({ fetchBlock: list('trader.offers'), rowHeight: ROW, key: o => o.offerId, label: 'Open offers', emptyText: 'Your open offers appear here.',
-      row: o => h('div', { class: 'vl-row', role: 'listitem' }, h('div', { class: 'cells' }, cell('', [o.pair, o.listed === false ? h('span', { class: 'badge warn',
-        title: o.side === 'buy' ? 'The venue leaves this offer out of the book: the wallet needs the USDC for the smallest trade and at least 0.01 SOL. It also leaves out an offer it has not heard for over a minute: keep the app online.'
-          : 'The venue leaves this offer out of the book: the wallet needs the coins for the smallest trade and TNK for the transfer fee. It also leaves out an offer it has not heard for over a minute: keep the app online.' }, 'Not listed') : null]), cell('', side(o.side)), cell('num', p(o.pair, o.price)),
+      row: o => h('div', { class: 'vl-row', role: 'listitem' }, h('div', { class: 'cells' }, cell('', [o.pair, o.paused || o.listed === false ? h('span', { class: 'badge warn',
+        title: o.paused ? o.reason : o.side === 'buy' ? 'The venue leaves this offer out of the book: the wallet needs the USDC for the smallest trade and at least 0.01 SOL. It also leaves out an offer it has not heard for over a minute: keep the app online.'
+          : 'The venue leaves this offer out of the book: the wallet needs the coins for the smallest trade and TNK for the transfer fee. It also leaves out an offer it has not heard for over a minute: keep the app online.' }, o.paused ? 'Paused' : 'Not listed') : null]), cell('', side(o.side)), cell('num', p(o.pair, o.price)),
         cell('num', amt(o.size)), cell('num hide-s', amt(o.filled)), cell('num hide-s', amt(o.reserved)), cell('num', amt(o.left)), cell('hide-s', when(o.expiresAt)),
         cell('end', h('button', { class: 'small danger', type: 'button', onclick: () => review('cancel', { offerId: o.offerId }) }, 'Cancel')))) }),
     running: () => serverList({ fetchBlock: list('trader.running'), rowHeight: ROW, key: x => x.key, label: 'Running trades',

@@ -6,8 +6,20 @@ import { formatUnits, shortKey } from '../../../src/dashboard/format.js';
 import { seal } from '../../../src/core/envelope.js';
 import { hex } from '../core/helpers.mjs';
 import { traderFixture, signerFixture, serviceFixture, walletInfo, nowSec } from './fixtures.mjs';
+import { RESET_PAUSED_MESSAGE } from '../../../src/market/gateway-status.js';
 
 const model = (fx, clock) => createModel({ config: fx.config, role: fx.role, wallets: fx.wallets ?? null, bridge: fx.bridge, ...(clock ? { clock } : {}) });
+
+test('a seller waiting for gateway recovery sees the pause and reservation-release deadline', () => {
+  const fx = traderFixture(), trade = fx.role.host.trades.get('t-sell');
+  trade.state.phase = 'transferring'; trade.state.gatewayPaused = true;
+  const line = describeTrade(trade);
+  assert.equal(line.now, RESET_PAUSED_MESSAGE); assert.equal(line.waitingFor, 'the RESET gateway');
+  assert.equal(line.deadline, trade.state.terms.sendBy); assert.match(line.fallback, /reservation is released/);
+  trade.state.phase = 'aborted'; trade.state.reason = 'Transfer not sent before the deadline: ' + RESET_PAUSED_MESSAGE;
+  assert.match(outcome(trade).text, /was not sent.*reservation was released.*USDC stays locked until the refund time/);
+  assert.doesNotMatch(outcome(trade).text, /Nothing was locked/);
+});
 
 test('claim failures appear on the trade row and in existing alerts, then disappear after success', async () => {
   const fx = traderFixture(), m = model(fx), trade = fx.role.host.trades.get('t-sell');
@@ -150,7 +162,7 @@ test('wallets: deposit addresses, in use / free per asset, fee shortfall notes, 
 });
 
 test('signer view: health checks, key pieces with the next change, earnings, venue warnings from verified requests only', async () => {
-  const fx = signerFixture(), m = model(fx), s = (await m.state()).signer;
+  const fx = signerFixture(), m = model(fx, () => fx.now * 1000), s = (await m.state()).signer;
   assert.equal(s.healthy, true);
   assert.deepEqual([s.health.peerConnected, s.health.trac, s.health.reset, s.health.heartbeatOk], [true, true, true, true]);
   assert.equal(s.pieces.held, 3); assert.equal(s.pieces.nextAt, fx.now);

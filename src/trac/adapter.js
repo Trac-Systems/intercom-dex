@@ -7,6 +7,8 @@ import { transferNonce, buildTnkTransfer, buildResetTransfer } from './transfers
 import { openIntentStore } from './intents.js';
 import { supportedBase } from '../market/assets.js';
 import { createAddressProof } from '../core/address-proof.js';
+import { createGatewayHealth, resetGatewayOrigin, GATEWAY_TIMEOUT_MS } from './gateway-health.js';
+import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
 
 const isHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const isAmount = value => typeof value === 'string' && value.length <= 78 && /^[1-9][0-9]*$/.test(value);
@@ -78,7 +80,7 @@ function observations(folder) {
 
 async function gatewayCall(origin, route, body) {
   const response = await fetch(new URL(route, origin), { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(30000) });
+    body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS) });
   if (!response.ok) { await response.body?.cancel(); reject('gateway_rejected'); }
   const chunks = [];
   let size = 0;
@@ -96,11 +98,7 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
   if (typeof bridge?.call !== 'function') throw new Error('Bridge.call is required');
   const explorer = new URL(explorerUrl);
   if (!['http:', 'https:'].includes(explorer.protocol) || explorer.username || explorer.password || explorer.search || explorer.hash || explorer.pathname !== '/') throw new Error('Expected a Trac explorer origin');
-  let origin = null;
-  if (resetGatewayUrl !== null) {
-    origin = new URL(resetGatewayUrl);
-    if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/') throw new Error('Expected a RESET gateway origin');
-  }
+  const origin = resetGatewayOrigin(resetGatewayUrl), health = createGatewayHealth({ resetGatewayUrl });
   let used, observed, intents, closed = false;
   const sends = new Map();
   try {
@@ -123,6 +121,9 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       return { payload, submission: null, txHash: payload.tro.tx };
     }
     if (!origin) reject('reset_gateway_required');
+    // No signature or durable intent exists on this path. Retries must sample again, even on resume.
+    if (!(await health.read({ fresh: true })).ok) reject(RESET_PAUSED_MESSAGE);
+    if (seconds() >= terms.sendBy) reject('send_deadline');
     const nonce = transferNonce(tradeId);
     const context = await bridge.call('dex_reset_context', {});
     if (context?.addressPrefix !== 'trac') reject('wrong_network');
@@ -133,6 +134,10 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
     const command = { type: 'transfer', value: { to: toKey, amount: terms.baseAmount } };
     const ch = Buffer.from(blake3(Buffer.from(JSON.stringify(command)))).toString('hex');
     if (!exact(pc, ['network_id', 'txv', 'writer', 'content_hash', 'subnet', 'msb']) || pc.network_id !== context.networkId || pc.txv !== context.txv || pc.subnet !== context.subnet || pc.msb !== context.msb || pc.content_hash !== ch || !isHash(pc.writer)) reject('gateway_context_mismatch');
+    // Preparation can outlast the health cache or the send window. Neither permits a late signature.
+    if (seconds() >= terms.sendBy) reject('send_deadline');
+    if (!(await health.read()).ok) reject(RESET_PAUSED_MESSAGE);
+    if (seconds() >= terms.sendBy) reject('send_deadline');
     const { payload, submission } = await buildResetTransfer({ ...context, writer: pc.writer, from: fromKey, to: toKey,
       amount: terms.baseAmount, tradeId, sign: bytes => {
         if (Buffer.from(bytes).toString('hex') !== prepared.tx) reject('gateway_hash_mismatch');
@@ -199,6 +204,8 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
   }
 
   return {
+    gatewayHealth: options => health.read(options),
+    gatewayHealthStatus: () => health.peek(),
     proveAddress({ dexKey, expiresAt }) {
       if (closed || !wallet || !profile) throw new Error('Trac wallet and network profile required');
       return createAddressProof(wallet, { networkId: profile.peer.msbNetworkId, dexKey, expiresAt });

@@ -22,6 +22,7 @@ import { createAddressProof } from '../../../src/core/address-proof.js';
 import { proofWallet, networkId } from '../core/address-proof-fixture.mjs';
 import { createModel } from '../../../src/dashboard/model.js';
 import { accountBalances } from '../../../src/wallets/accounting.js';
+import { RESET_PAUSED_MESSAGE } from '../../../src/market/gateway-status.js';
 
 const OFFERS = 'intercom-dex:offers';
 const noClaimFunds = { ok: false, balance: '0', fee: '5000', rent: '2039280', required: '2044280', shortfall: '2044280' };
@@ -57,6 +58,91 @@ const post = (bridge, from, kind, body) => {
   bridge.emit('message', OFFERS, seal({ kind, ch: OFFERS, body }, from.identity.secretKey, { ts: nowSec(), nonce: random32() }));
   return new Promise(resolve => setImmediate(resolve));
 };
+
+function gateway(t, ok = true) {
+  const state = { ok };
+  t.host.trac = { gatewayHealth: async () => state, gatewayHealthStatus: () => state };
+  return state;
+}
+
+for (const side of ['buy', 'sell']) {
+  test(`RESET ${side} posting and reposting refuse unknown or unhealthy health before reserving; TNK posting still works`, async () => {
+    const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+    const input = { pair: 'RESET/USDC', side, baseAmount: '100000000', price: '1' };
+    for (const read of [null, async () => ({ ok: false }), async () => null, async () => { throw Error('offline'); }]) {
+      t.host.trac = read && { gatewayHealth: read };
+      await assert.rejects(t.makeOffer(input), { message: RESET_PAUSED_MESSAGE });
+      assert.equal(t.mine.size, 0); assert.equal(t.store.list('offer-').length, 0);
+      assert.equal(bridge.sent.filter(x => x.envelope.kind === 'offer').length, 0);
+    }
+    const health = gateway(t);
+    const original = await t.makeOffer(input);
+    await t.cancelOffer(original.offerId); health.ok = false;
+    await assert.rejects(t.makeOffer(input), { message: RESET_PAUSED_MESSAGE });
+    assert.equal(t.mine.size, 0);
+    await t.makeOffer({ ...input, pair: 'TNK/USDC', baseAmount: '1000000000000000000' });
+    assert.equal(t.mine.size, 1);
+  });
+
+  test(`taking a RESET ${side} offer refuses before a trade or lock while TNK takes still work`, async () => {
+    const f = fixture(), alice = party(), bob = party();
+    const a = await trader(alice, { registry: f.registry }), b = await trader(bob, { registry: f.registry });
+    gateway(a.t); const health = gateway(b.t, false);
+    const reset = await a.t.makeOffer({ pair: 'RESET/USDC', side, baseAmount: '100000000', price: '1' });
+    const tnk = await a.t.makeOffer({ pair: 'TNK/USDC', side, baseAmount: '1000000000000000000', price: '1' });
+    for (const o of [reset, tnk]) await post(b.bridge, alice, 'offer', o);
+    let locks = 0; b.t.host.solana.lockEscrow = async () => { locks++; throw Error('must not lock'); };
+    await assert.rejects(b.t.takeOffer(reset.offerId, reset.baseAmount, reset.price), { message: RESET_PAUSED_MESSAGE });
+    assert.equal(b.t.host.trades.size, 0); assert.equal(b.t.store.list('trade-').length, 0); assert.equal(locks, 0);
+    assert.equal(b.bridge.sent.filter(x => x.envelope.kind === 'take').length, 0);
+    assert.ok(await b.t.takeOffer(tnk.offerId, tnk.baseAmount, tnk.price));
+    health.ok = true;
+    assert.ok(await b.t.takeOffer(reset.offerId, reset.baseAmount, reset.price));
+  });
+
+  test(`maker refuses accepting a RESET ${side} take before reserving, explains why, and accepts TNK`, async () => {
+    const f = fixture(), alice = party(), bob = party();
+    const a = await trader(alice, { registry: f.registry }), b = await trader(bob, { registry: f.registry });
+    const health = gateway(a.t); gateway(b.t);
+    const reset = await a.t.makeOffer({ pair: 'RESET/USDC', side, baseAmount: '100000000', price: '1' });
+    const tnk = await a.t.makeOffer({ pair: 'TNK/USDC', side, baseAmount: '1000000000000000000', price: '1' });
+    for (const o of [reset, tnk]) await post(b.bridge, alice, 'offer', o);
+    const taken = await b.t.takeOffer(reset.offerId, reset.baseAmount, reset.price); health.ok = false;
+    const take = b.bridge.sent.find(x => x.envelope.kind === 'take');
+    await a.t.host.hooks.unrouted[0](take.ch, take.envelope);
+    const decline = a.bridge.sent.find(x => x.envelope.kind === 'decline');
+    assert.equal(decline.envelope.body.reason, 'reset-gateway');
+    assert.equal(a.t.host.trades.size, 0); assert.equal(a.t.store.list('trade-').length, 0);
+    assert.equal(a.t.status().mine.find(o => o.offerId === reset.offerId).reserved, '0');
+    await b.t.host.inject(taken.key, decline.envelope); await b.t.host.trades.get(taken.key).queue;
+    assert.equal(b.t.host.trades.get(taken.key).state.reason, RESET_PAUSED_MESSAGE);
+    await b.t.takeOffer(tnk.offerId, tnk.baseAmount, tnk.price);
+    const next = b.bridge.sent.filter(x => x.envelope.kind === 'take').at(-1);
+    await a.t.host.hooks.unrouted[0](next.ch, next.envelope);
+    assert.equal(a.t.host.trades.size, 1);
+  });
+}
+
+test('paused RESET offers stay listed in status and dashboard depth with the same warning and no take target', async () => {
+  const f = fixture(), alice = party(), bob = party();
+  const a = await trader(alice, { registry: f.registry }), b = await trader(bob, { registry: f.registry });
+  gateway(a.t); const health = gateway(b.t);
+  const offer = await a.t.makeOffer({ pair: 'RESET/USDC', side: 'sell', baseAmount: '100000000', price: '1' });
+  await post(b.bridge, alice, 'offer', offer);
+  health.ok = false;
+  const status = b.t.status();
+  assert.equal(status.pairs.find(p => p.pair === 'RESET/USDC').status, 'paused');
+  assert.equal(status.pairs.find(p => p.pair === 'TNK/USDC').status, 'open');
+  assert.equal(status.offers[0].paused, true); assert.equal(status.offers[0].reason, RESET_PAUSED_MESSAGE);
+  const model = createModel({ role: b.t, config: { role: 'trader', network: 'local' }, bridge: b.bridge });
+  const view = (await model.state()).trader;
+  assert.equal(view.pairs.find(p => p.pair === offer.pair).reason, RESET_PAUSED_MESSAGE);
+  assert.ok(view.attention.some(a => a.kind === 'paused' && a.text === RESET_PAUSED_MESSAGE));
+  assert.equal(model.book(offer.pair).asks.length, 1); assert.equal(model.book(offer.pair).asks[0].take, null);
+  health.ok = true;
+  assert.equal(b.t.status().offers[0].paused, false);
+  assert.equal(model.book(offer.pair).asks[0].take.offerId, offer.offerId);
+});
 
 test('an offer id is bound to its content; a different offer under the same id is ignored', async () => {
   const { registry } = fixture(), alice = party(), mallory = party(), bob = party();

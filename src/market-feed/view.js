@@ -4,6 +4,7 @@ import { sha256Hex, stableJSON } from '../core/canonical.js';
 import { validOffer, nowSec } from '../roles/common.js';
 import { priceUnits } from '../market/assets.js';
 import { validTermsAddressProofs } from '../core/address-proof.js';
+import { gatewayAvailability, venueGatewayHealth, GATEWAY_STATUS_SEC } from '../market/gateway-status.js';
 
 const DAY = 86400, BOUND = 10000;
 // One record per entry, so an accepted message writes only what it changed.
@@ -155,10 +156,18 @@ export class MarketView {
     return dexKey;
   }
 
+  status(body) {
+    const status = parseBody('status', body);
+    if (status.ts > this.now() || status.ts <= (this.serviceStatus?.ts ?? -1)) return false;
+    this.serviceStatus = status; this.dirty = true; return true;
+  }
+
   snapshot(registry) {
     if (this.cached && !this.dirty && this.now() < this.validUntil && registry === this.cachedRegistry) return this.cached;
     this.#prune();
     const now = this.now(), definitions = new Map((registry?.pairs ?? []).map(p => [p.pair, p]));
+    const health = venueGatewayHealth(this.serviceStatus, now);
+    const availability = pair => gatewayAvailability(pair, health);
     const all = [...this.trades.values()].sort(newest).filter(t => definitions.has(t.pair));
     const pairs = [...definitions.values()].map(p => {
       const rows = all.filter(t => t.pair === p.pair), day = rows.filter(t => t.ts > now - DAY);
@@ -172,12 +181,12 @@ export class MarketView {
       const best = side => levels.filter(l => l.side === side && BigInt(l.baseAmount) > 0n).reduce((v, l) =>
         v === null || (side === 'buy' ? priceUnits(l.price) > priceUnits(v) : priceUnits(l.price) < priceUnits(v)) ? l.price : v, null);
       const completeDay = this.truncatedUntil <= now && (!agree || count === day.length);
-      return { pair: p.pair, base: p.base.id, last, change24h: last !== null && day.length && completeDay ? change(last, day.at(-1).price) : null,
+      return { pair: p.pair, base: p.base.id, status: availability(p.pair).paused ? 'paused' : p.status, ...availability(p.pair), last, change24h: last !== null && day.length && completeDay ? change(last, day.at(-1).price) : null,
         volume24h: rows.length || agree ? units(volume, 6) : null, bestBuy: best('buy'), bestSell: best('sell'), trades24h: rows.length || agree ? count : null };
     });
     const offers = [...this.offers.values()].filter(r => definitions.get(r.offer.pair)?.status === 'open')
       .sort((a, b) => this.seen.get(b.offer.offerId).postedAt - this.seen.get(a.offer.offerId).postedAt || a.offer.offerId.localeCompare(b.offer.offerId))
-      .slice(0, 200).map(({ offer: o }) => ({ offerId: o.offerId, pair: o.pair, registryVersion: o.registryVersion, side: o.side, price: o.price,
+      .slice(0, 200).map(({ offer: o }) => ({ offerId: o.offerId, pair: o.pair, ...availability(o.pair), registryVersion: o.registryVersion, side: o.side, price: o.price,
         amount: units(o.baseAmount, definitions.get(o.pair).base.decimals),
         left: this.#remaining(o) === null ? null : units(this.#remaining(o), definitions.get(o.pair).base.decimals),
         maker: { trac: o.maker.tracAddr, sol: o.maker.solAddr }, postedAt: this.seen.get(o.offerId).postedAt }));
@@ -196,6 +205,7 @@ export class MarketView {
     }
     this.cachedRegistry = registry; this.dirty = false;
     this.validUntil = Math.min(this.truncatedUntil > now ? this.truncatedUntil : Infinity, ...[...this.offers.values()].map(r => Math.min(r.offer.expiresAt, r.at + 300)),
+      this.serviceStatus && this.serviceStatus.ts + GATEWAY_STATUS_SEC > now ? this.serviceStatus.ts + GATEWAY_STATUS_SEC : Infinity,
       ...[...this.books.values(), ...this.tickers.values()].filter(r => r.ts + 300 > now).map(r => r.ts + 300),
       ...all.filter(t => t.ts + DAY > now).map(t => t.ts + DAY));
     return this.cached;

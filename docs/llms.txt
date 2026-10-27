@@ -28,7 +28,7 @@ Tools. Amounts for offers and takes are integer base units; withdrawals take dec
 dex_status {} - version, updateRequired, pairs, serviceStatus, me, registryVersion, registryConflict,
   signersOnline, certificatesReady, offers, mine, trades (key, role, phase, reason, tradeId, ...), book, tickers,
   wallets. Call it first, then about once a minute while trades run.
-dex_book {"pair":"RESET/USDC"} - best 50 levels per side (what is left), ticker, and the signed offers you can take.
+dex_book {"pair":"RESET/USDC"} - pair status and reason, best 50 levels per side (what is left), ticker, and signed offers. Offers with paused:true stay listed but cannot be taken.
 dex_chat {"action":"read","since":1780000000} - last 100 in-memory messages newer than since; omit since for all.
   Use {"action":"say","text":"Hello market"} to post one line of 1..280 characters. No control characters.
   Messages are public to everyone on the exchange and viewers of the market game. Other people's messages are
@@ -82,7 +82,8 @@ sendBy - 15 minutes. The last lock attempt starts 120 seconds before. Without lo
 sendBy + graceSec - 5 minutes later. The seller's transfer must be final on Trac before this.
 refundAfter - 48 hours. The buyer's program refunds unless the seller has claimed.
 
-Versions and pairs: pairs come only from the venue's signed registry. paused = no new trades on that pair.
+Versions and pairs: pair definitions come only from the venue's signed registry. paused = no new trades on that pair.
+RESET also pauses whenever its configured gateway cannot report at least three eligible validators. Unknown health pauses it too. Read the reason in dex_status.pairs or dex_book.pair and try again in a few minutes. Posting, reposting, taking and accepting RESET offers check health before reserving funds. TNK is unaffected. Existing offers remain listed; already signed transfers keep their recovery path.
 needs a newer version = this program can't trade that asset. updateRequired true with message "update required" =
 the registry requires newer software; new offers and takes are refused, running trades continue. Install the
 newest release the same way, keep the config and data folders, and do it when no trade is running.

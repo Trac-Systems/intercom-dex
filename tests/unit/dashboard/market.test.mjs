@@ -4,6 +4,7 @@ import { buildBook, ownTakes } from '../../../src/dashboard/market.js';
 import { availableOffer, OFFER_FRESH_SEC, VENUE_SILENT_SEC, LIVE_SEC, LIVE_SEC_FAST } from '../../../src/market/book.js';
 import { amount, decimalAmount } from '../../../src/dashboard/format.js';
 import { PAIRS } from '../core/helpers.mjs';
+import { RESET_PAUSED_MESSAGE } from '../../../src/market/gateway-status.js';
 
 const pair = PAIRS[1], now = 1000, dexKey = 'a'.repeat(64);
 const offer = (id, price, side = 'sell', units = '100000000', firstSeen = 900) => ({ firstSeen, lastSeen: 950,
@@ -11,6 +12,11 @@ const offer = (id, price, side = 'sell', units = '100000000', firstSeen = 900) =
     registryVersion: 1, price, side, baseAmount: units, expiresAt: 5000 } });
 const build = (offers, extra = {}) => buildBook({ pair, offers, dexKey, now, ...extra });
 const snapshot = (levels, remaining, ts = now) => ({ pair: pair.pair, registryVersion: 1, ts, levels, ...(remaining ? { remaining } : {}) });
+
+test('a gateway refusal does not permanently skip a maker whose offer can resume after recovery', () => {
+  const state = { mode: 'taker', phase: 'aborted', offerId: offer(1, '1').offer.offerId, reason: RESET_PAUSED_MESSAGE };
+  assert.equal(ownTakes([{ state }]).skip.size, 0);
+});
 
 test('equal numeric prices merge, sides sort best first, exact cumulative totals and oldest take', () => {
   const rows = [offer(1, '2'), offer(2, '1.00', 'sell', '200000000', 890), offer(3, '1', 'sell', '300000000'),

@@ -109,7 +109,7 @@ export const bodySchemas = Object.freeze({
   take: z.object({ offerId: hexKey, pair, registryVersion: uint.min(1), software: softwareSchema, baseAmount: positive, taker: participant, commitment: hexKey, sendBy: uint, refundAfter: uint }).strict(),
   settled: z.object({ offerId: hexKey, tradeId: hexKey, terms: termsSchema, hashHex: hexKey, claimSignature: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{64,88}$/).optional(), txHash: hexKey }).strict(),
   accept: z.object({ offerId: hexKey, takeCommitment: hexKey, commitment: hexKey, slot: uint.max(Number.MAX_SAFE_INTEGER - 32) }).strict(),
-  decline: z.object({ offerId: hexKey, takeNonce: hexKey, reason: z.enum(['busy', 'insufficient', 'signers', 'expired', 'invalid', 'version']) }).strict(),
+  decline: z.object({ offerId: hexKey, takeNonce: hexKey, reason: z.enum(['busy', 'insufficient', 'signers', 'expired', 'invalid', 'version', 'reset-gateway']) }).strict(),
   commit: z.object({ offerId: hexKey, commitment: hexKey }).strict(),
   reveal: z.object({ offerId: hexKey, takeCommitment: hexKey, nonce: hexKey }).strict(),
   present: z.object({ ref: hexKey }).strict(),

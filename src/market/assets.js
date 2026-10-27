@@ -1,3 +1,5 @@
+import { RESET_PAUSED_MESSAGE } from './gateway-status.js';
+
 // Units: TNK has 18 decimals (MSB), RESET 8 (contract), USDC 6 (SPL mint). Prices are USDC per whole base token,
 // as decimal strings with at most 12 decimals. All arithmetic is integer; quotes round down.
 export const ASSET_KINDS = Object.freeze({
@@ -20,8 +22,12 @@ export function registryPair(registry, pair, { open = true } = {}) {
   return entry;
 }
 
-export function pairStatus(registry) {
-  return (registry?.pairs ?? []).map(p => ({ ...p, availability: supportedBase(p.base) ? p.status : 'needs a newer version' }));
+export function pairStatus(registry, gatewayHealth) {
+  return (registry?.pairs ?? []).map(p => {
+    const paused = gatewayHealth !== undefined && p.base.id === 'RESET' && gatewayHealth?.ok !== true;
+    return { ...p, ...(paused ? { status: 'paused', reason: RESET_PAUSED_MESSAGE } : {}),
+      availability: supportedBase(p.base) ? paused ? 'paused' : p.status : 'needs a newer version' };
+  });
 }
 
 export function priceUnits(price) {

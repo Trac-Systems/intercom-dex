@@ -21,6 +21,7 @@ import { requireSellerClaimFunds } from './seller-claim-funds.js';
 import { claimWarning } from '../core/claim-warning.js';
 import { addressProofRequired, validAddressProof } from '../core/address-proof.js';
 import { releasesOfferAmount } from '../core/offer-inventory.js';
+import { gatewayAvailability, requireResetGateway } from '../market/gateway-status.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
@@ -80,6 +81,10 @@ export class Trader {
   }
 
   async start() {
+    const refreshGateway = () => this.host.trac?.gatewayHealth?.({ fresh: true }).catch(e => this.log('gateway health', e.message));
+    refreshGateway();
+    this.gatewayTimer = setInterval(refreshGateway, 10000);
+    this.gatewayTimer.unref?.();
     await this.relays.update(this.registry.usable);
     for (const ch of [MAIN, OFFERS, SIGNERS, CHAT_CHANNEL]) await this.bridge.join(ch);
     this.host.hooks.unrouted.push((ch, m) => this.#public(ch, m));
@@ -102,7 +107,7 @@ export class Trader {
     if (this.locks) await this.locks.start().catch(e => this.log('locks start', e.message));
   }
 
-  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer);
+  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer); clearInterval(this.gatewayTimer);
     this.locks?.stop().catch(e => this.log('locks stop', e.message)); }
 
   addressProofPolicy() {
@@ -313,6 +318,8 @@ export class Trader {
       }
       if (record.claimFundingWarning) this.store.put(name, { ...record, claimFundingWarning: null });
     }
+    try { await requireResetGateway(draft.base, this.host.trac); }
+    catch (error) { this.log('take refused', error.message); return decline('reset-gateway'); }
     const create = role === 'seller' ? createSeller : createBuyer;
     const state = create({ mode: 'maker', offerId: offer.offerId, terms: draft, registry: reg, nonce: random32(), entropy: random32(), now,
       networkId: policy.networkId, requireAddressProof: policy.required });
@@ -358,6 +365,7 @@ export class Trader {
     if (this.wallets) await this.wallets.requireFunds({ role: side === 'sell' ? 'seller' : 'buyer', base: entry.base,
       baseAmount, quoteAmount: quoteAmount(entry, baseAmount, price), fees: { platformFeeBps: reg.fee.platformFeeBps, tradeFeeBps: reg.fee.tradeFeeBps } });
     if (side === 'sell') await this.#requireClaimFunds(this.mint, reg.fee.collector);
+    await requireResetGateway(entry.base, this.host.trac);
     this.store.put(`offer-${offer.offerId}`, { offer, cancelled: false });
     this.mine.set(offer.offerId, offer);
     await this.bridge.join(tradeChannel(offer.offerId));
@@ -484,6 +492,7 @@ export class Trader {
     const role = offer.side === 'sell' ? 'buyer' : 'seller';
     if (this.wallets) await this.wallets.requireFunds({ role, ...draft });
     if (role === 'seller') await this.#requireClaimFunds(draft.mint, draft.fees.collector);
+    await requireResetGateway(draft.base, this.host.trac);
     const current = this.availableOffer(offerId);
     if (!current) throw new Error(STALE_OFFER_MESSAGE);
     if (BigInt(amount) > BigInt(current.baseAmount)) throw new Error('Amount must be 1 to the offer size in base units');
@@ -578,17 +587,19 @@ export class Trader {
 
   status() {
     this.pruneOffers();
+    const health = this.host.trac?.gatewayHealthStatus?.() ?? { ok: false };
+    const availability = pair => gatewayAvailability(pair, health);
     const open = new Set((this.registry.usable?.pairs ?? []).filter(p => p.status === 'open').map(p => p.pair));
     return {
       software: SOFTWARE, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '',
-      pairs: pairStatus(this.registry.usable), serviceStatus: this.serviceStatus ?? null,
+      pairs: pairStatus(this.registry.usable, health), serviceStatus: this.serviceStatus ?? null,
       me: this.me, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       signersOnline: this.onlineSigners(), certificatesReady: this.certificates.available().length,
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
-      offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
+      offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, ...availability(o.pair), lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
-        return { ...o, available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv),
+        return { ...o, ...availability(o.pair), available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv),
           warning: this.store.get(`offer-${o.offerId}`)?.claimFundingWarning ?? null }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
         claimFailure: t.state.claimFailure ?? null, warning: claimWarning(t.state),

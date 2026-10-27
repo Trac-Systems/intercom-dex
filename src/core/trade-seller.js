@@ -5,6 +5,7 @@ import { hexKey } from './schemas.js';
 import { reconstruct, verifyShare } from './vss.js';
 import { transferNonce } from './terms.js';
 import { recordClaimFailure } from './claim-warning.js';
+import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
 import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusalReason, resumeActions, runStep, sendAction } from './trade-common.js';
 
 export function createSeller(config) { return createTrader('seller', config); }
@@ -33,6 +34,7 @@ export function stepFinalized(state, event) {
         return result;
       }
       const announce = !s.txHash;
+      delete s.gatewayPaused;
       s.txHash = e.txHash;
       s.transferUnknown = true;
       s.transferRetryAt = e.now + 10;
@@ -83,6 +85,7 @@ export function step(state, event) {
     const committed = ['transferring', 'awaitShares', 'claiming', 'complete', 'lost'].includes(s.phase);
     if (s.phase === 'checkingProof' && e.now >= s.draft.sendBy) return abortTransition(s, 'Send deadline expired');
     if (e.type === 'resume') {
+      if (s.phase === 'transferring' && s.gatewayPaused && e.now >= s.terms.sendBy) return abortTransition(s, 'Transfer not sent before the deadline: ' + RESET_PAUSED_MESSAGE);
       if (s.phase === 'checkingProof') return resumeActions(s, [proofAction(s)]);
       if (['aborted', 'lost'].includes(s.phase)) return null;
       if (s.phase === 'awaitReady') {
@@ -99,7 +102,10 @@ export function step(state, event) {
       // scheduled a check, and independently of a resumed transfer's finality lookup.
       const outstanding = awaitingSettlement(s) && (s.settlementPending || e.now >= s.terms.refundAfter) ? [settlementAction(s)] : [];
       if (outstanding.length) { s.settlementPending = true; s.nextSettlementCheck = e.now + 60; }
-      if (s.phase === 'transferring') return resumeSeller(s, [...outstanding, { ...transferAction(s), resume: true }]);
+      if (s.phase === 'transferring') {
+        delete s.gatewayPaused;
+        return resumeSeller(s, [...outstanding, { ...transferAction(s), resume: true }]);
+      }
       if (s.phase === 'claiming') {
         s.claimRetryAt = null;
         return resumeSeller(s, [...outstanding, claimAction(s)]);
@@ -201,6 +207,7 @@ export function step(state, event) {
     // any more, so the trade ends.
     if (s.phase === 'transferring' && e.type === 'transferSent' && e.tradeId === s.tradeId && e.ok === false && e.unknown !== true) {
       if (e.now >= s.terms.sendBy) return abortTransition(s, 'Transfer not sent before the deadline: ' + (e.reason ?? ''));
+      if (e.reason === RESET_PAUSED_MESSAGE && !s.txHash && !s.transferUnknown) s.gatewayPaused = true;
       s.transferRetryAt = e.now + 10;
       return { state: s, actions: [] };
     }
@@ -209,6 +216,7 @@ export function step(state, event) {
       if (e.ok !== true && !(e.ok === false && e.unknown === true)) return null;
       if (e.ok === true && (!Number.isSafeInteger(e.sentAt) || e.sentAt < 0 || e.sentAt > e.now || e.sentAt >= s.terms.sendBy)) return null;
       s.txHash = e.txHash;
+      delete s.gatewayPaused;
       s.transferUnknown = e.ok !== true;
       s.phase = 'awaitShares';
       return { state: s, actions: canAnnounceTransfer(s) ? [transferNotice(s)] : [] };
@@ -250,12 +258,14 @@ export function step(state, event) {
     }
     if (e.type === 'tick') {
       const actions = [];
+      if (s.phase === 'transferring' && s.gatewayPaused && e.now >= s.terms.sendBy) return abortTransition(s, 'Transfer not sent before the deadline: ' + RESET_PAUSED_MESSAGE);
       if (s.phase === 'reservingEscrow' && s.reserveRetryAt && e.now >= s.reserveRetryAt) {
         s.reserveRetryAt = null;
         return { state: s, actions: [reservationAction(s)] };
       }
       if (s.phase === 'transferring' && s.transferRetryAt && e.now >= s.transferRetryAt) {
         s.transferRetryAt = null;
+        delete s.gatewayPaused;
         actions.push({ ...transferAction(s), resume: true });
       }
       if (s.phase === 'awaitShares' && canAnnounceTransfer(s) && e.now >= (s.transferNoticeAt ?? 0)) {

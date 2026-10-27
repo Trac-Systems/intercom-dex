@@ -100,6 +100,10 @@ await adapter.sendTransfer({ terms, tradeId, resume = false });
 // or {type:'transferSent', now, tradeId, ok:false, unknown:true, txHash, sentAt, reason}
 // or {type:'transferSent', now, tradeId, ok:false, reason}
 
+await adapter.gatewayHealth({ fresh = false });
+// {ok, eligible, checkedAt, reason}; checkedAt is Unix milliseconds
+adapter.gatewayHealthStatus(); // cached snapshot; unknown or stale is ok:false
+
 await adapter.verifyTransfer({
   asset, txHash, from, to, minAmount, nonce, tradeId, finalBefore
 });
@@ -114,12 +118,21 @@ adapter.close();                       // closes Node journal handles
 The factory is synchronous. `wallet` is needed only to sign a new transfer, and
 must match `terms.seller.tracAddr`. A recorded transfer can resume without the
 wallet. `resetGatewayUrl` is an explicit HTTP(S) origin without
-credentials/path/query/fragment; it is needed only for RESET sends. An absolute
+credentials/path/query/fragment; it is needed for RESET health checks and sends. An absolute
 `intentFolder` is mandatory for sending; use the same folder across restarts.
 An absolute `usedTxFolder` is mandatory for positive verification and reservations.
 Each journal has an exclusive native file lock. Close the adapter after its
 pending operations finish. The caller owns the wallet and bridge;
 closing the adapter does not close either.
+
+RESET health uses GET /v1/state with the same origin validation, redirect refusal,
+30-second timeout and 64 KiB response limit as gateway transfer calls. Only an
+integer validators.eligible of at least 3 permits a new transfer. Results,
+including failures, are cached for less than 15 seconds; concurrent reads share
+one request. A new transfer forces a read before preparing, and checks health
+and the deadline again before signing if preparation was slow. A refusal at
+either check leaves no signature or intent. Existing intents bypass this gate
+and continue reconciliation of the exact recorded bytes.
 
 The runner supplies approved terms and their trade ID. The adapter reads
 `pair`, `baseAmount`, `seller.tracAddr`, `buyer.tracAddr`, and `sendBy`; full terms

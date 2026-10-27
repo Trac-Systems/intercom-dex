@@ -20,6 +20,7 @@ import { SOFTWARE, meetsVersion } from '../core/software.js';
 import { checkProfileRegistry, checkProfileTerms } from '../net/profile.js';
 import { parseBody } from '../core/schemas.js';
 import { CHAT_CHANNEL, MarketChat } from '../market/chat.js';
+import { RESET_PAUSED_MESSAGE, RESET_READY_MESSAGE } from '../market/gateway-status.js';
 
 const MAIN = 'intercom-dex', OFFERS = 'intercom-dex:offers', SIGNERS = 'intercom-dex:signers';
 const DAY = 86400, PAYOUT_DELAY = 7 * DAY, CREDIT_AFTER_SEC = 300;
@@ -178,7 +179,8 @@ export class Service {
     await this.#publishRegistry();
     const every = (ms, fn) => setInterval(() => fn().catch(e => this.log('service', e.message)), ms);
     this.timers = [every(this.registryMs, () => this.#publishRegistry()), every(this.bookMs, () => this.#publishBooks()),
-      every(this.tickerMs, () => this.#publishTickers()), every(this.reconcileMs, () => this.reconcile())];
+      every(this.tickerMs, () => this.#publishTickers()), every(this.reconcileMs, () => this.reconcile()),
+      every(10000, () => this.#publishGatewayStatus())];
   }
 
   stop() { this.host.stop(); for (const t of this.timers ?? []) clearInterval(t); this.timers = null; clearTimeout(this.tickerSoon); this.#saveBook(true); }
@@ -218,9 +220,23 @@ export class Service {
     await this.host.sendPublic(MAIN, 'registry', this.registry);
     this.store.put('service-registry-published', this.registry);
     this.registryPublishedAt = this.now();
+    await this.#publishGatewayStatus();
+  }
+
+  #publishGatewayStatus() {
+    if (this.gatewayStatusPending) return this.gatewayStatusPending;
+    this.gatewayStatusPending = this.#gatewayStatus().finally(() => { this.gatewayStatusPending = null; });
+    return this.gatewayStatusPending;
+  }
+
+  async #gatewayStatus() {
+    const reset = this.registry.pairs.some(p => p.base.id === 'RESET');
+    let health;
+    if (reset) try { health = await this.trac?.gatewayHealth({ fresh: true }); } catch {}
     const update = !meetsVersion(SOFTWARE, this.registry.minSoftware);
-    await this.host.sendPublic(MAIN, 'status', { status: update ? 'degraded' : 'online', ts: this.now(), software: SOFTWARE,
-      message: update ? 'update required' : '', ...(this.latest ? { latest: this.latest } : {}) });
+    await this.host.sendPublic(MAIN, 'status', { status: update || reset && health?.ok !== true ? 'degraded' : 'online', ts: this.now(), software: SOFTWARE,
+      message: [update ? 'update required' : '', reset ? health?.ok === true ? RESET_READY_MESSAGE : RESET_PAUSED_MESSAGE : ''].filter(Boolean).join(' '),
+      ...(this.latest ? { latest: this.latest } : {}) });
   }
 
   async #publishBooks() {
@@ -786,7 +802,7 @@ export class Service {
       row.signerCredits += Object.values(r.credits ?? {}).reduce((n, amount) => n + BigInt(amount), 0n); row.trades++;
     }
     return { software: SOFTWARE, updateRequired: !meetsVersion(SOFTWARE, this.registry.minSoftware),
-      message: !meetsVersion(SOFTWARE, this.registry.minSoftware) ? 'update required' : '', pairs: pairStatus(this.registry),
+      message: !meetsVersion(SOFTWARE, this.registry.minSoftware) ? 'update required' : '', pairs: pairStatus(this.registry, this.trac?.gatewayHealthStatus?.() ?? { ok: false }),
       ...(this.latest ? { latest: this.latest } : {}), dexKey: this.identity.publicKey, registryVersion: this.registry.version, trades: count('logged'),
       fee: this.registry.fee, chat: this.readChat(),
       alerts: [...this.watched.keys()].map(id => this.store.get(`watch-${id}`)).filter(Boolean).map(w => this.#alert(w)).filter(Boolean),
