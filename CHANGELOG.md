@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.41
+
+- Balance reads recover on their own when the Trac or RESET connection stalls. Before, a stalled read could keep
+  failing with "MSB balance unavailable: read timed out" or "RESET balance unavailable" until the app was restarted.
+  The app now re-dials known replicas (at most every 30 seconds per chain), and logs each step as `[trac-read]`.
+- Repeated balance polls during a stall no longer pile up open snapshots.
+- Works with 0.1.34 and later; no minimum-version change.
+
 ## 0.1.40
 
 - RESET trades no longer start when the RESET gateway can't deliver transfers. Before an offer is posted, an offer

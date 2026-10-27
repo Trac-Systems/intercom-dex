@@ -2,6 +2,7 @@ import { bufferToBigInt } from 'trac-msb/src/utils/amountSerialization.js';
 import nodeEntry from 'trac-msb/src/core/state/utils/nodeEntry.js';
 
 export const BALANCE_READ_MS = 5000;
+const activeReads = new WeakMap();
 
 // A signed Hyperbee can be sparse after fast-forward. Fetch missing blocks with a deadline, not an
 // unbounded replication wait; a missing block must never become a zero balance. Closing this checkout
@@ -9,13 +10,22 @@ export const BALANCE_READ_MS = 5000;
 export async function signedBalanceRead(base, key, label, timeoutMs = BALANCE_READ_MS) {
   const length = base?.view?.core?.signedLength;
   if (!Number.isSafeInteger(length) || length < 1) throw new Error(`${label} signed view is not ready`);
+  let active = activeReads.get(base);
+  if (!active) activeReads.set(base, active = new Set());
+  // A timeout bounds the caller even if snapshot close itself stalls. Retain
+  // that slot until close settles so repeated polls cannot leak more snapshots.
+  if (active.has(key) || active.size >= 64) throw Object.assign(new Error(`${label} balance read still closing or busy; retry shortly`), { code: 'BALANCE_READ_BUSY' });
   const view = base.view.checkout(length);
+  active.add(key);
   let timer, closing, stage = 'read';
-  const close = () => closing ??= Promise.resolve().then(() => view.close());
+  const close = () => closing ??= Promise.resolve().then(() => view.close()).finally(() => active.delete(key));
   const work = Promise.resolve().then(async () => {
-    const value = await view.get(key, { timeout: timeoutMs, update: false });
+    let value, failure;
+    try { value = await view.get(key, { timeout: timeoutMs, update: false }); }
+    catch (error) { failure = error; }
     stage = 'snapshot close';
     await close();
+    if (failure) { stage = 'read'; throw failure; }
     return value;
   });
   const deadline = new Promise((_, reject) => {
@@ -28,7 +38,7 @@ export async function signedBalanceRead(base, key, label, timeoutMs = BALANCE_RE
   catch (error) {
     throw Object.assign(new Error(error.code === 'BLOCK_NOT_AVAILABLE'
       ? `${label} signed balance data is still syncing (signed length ${length})`
-      : `${label} balance unavailable: ${error.message} (signed length ${length})`), { code: error.code });
+      : `${label} balance unavailable: ${error.message} (signed length ${length})`), { code: error.code, stage, signedLength: length });
   } finally {
     clearTimeout(timer);
     // A stalled close must not turn the bounded read back into an unbounded bridge request.
@@ -37,14 +47,17 @@ export async function signedBalanceRead(base, key, label, timeoutMs = BALANCE_RE
 }
 
 export async function readBalances({ bus, resetPeer, address, key }) {
+  const recover = owner => error => {
+    if (error.stage === 'read' && ['BALANCE_READ_TIMEOUT', 'REQUEST_TIMEOUT', 'BLOCK_NOT_AVAILABLE'].includes(error.code)) {
+      // Recovery is background transport work. Even an asynchronous recovery
+      // failure must neither delay this reply nor replace the original error.
+      try { Promise.resolve(owner.recoverRead?.(error)).catch(() => {}); } catch { /* Preserve the read error. */ }
+    }
+    throw error;
+  };
   const reads = await Promise.allSettled([
-    signedBalanceRead(bus.state.base, address, 'MSB'),
-    signedBalanceRead(resetPeer.base, `bal/${key.toString('hex')}`, 'RESET').catch(error => {
-      if (['BALANCE_READ_TIMEOUT', 'REQUEST_TIMEOUT', 'BLOCK_NOT_AVAILABLE'].includes(error.code)) {
-        try { resetPeer.recoverRead?.(); } catch { /* Preserve the original read error. */ }
-      }
-      throw error;
-    }),
+    signedBalanceRead(bus.state.base, address, 'MSB').catch(recover(bus)),
+    signedBalanceRead(resetPeer.base, `bal/${key.toString('hex')}`, 'RESET').catch(recover(resetPeer)),
   ]);
   // Keep the address's in-flight slot until both bounded reads finish, even if one fails immediately.
   const failed = reads.find(read => read.status === 'rejected');

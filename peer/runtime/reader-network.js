@@ -1,7 +1,8 @@
 import Hyperswarm from 'hyperswarm';
+import { createReadRecovery } from './read-recovery.js';
+export { READER_REPAIR_MS } from './read-recovery.js';
 
 export const RESET_CONNECTIONS = 3;
-export const READER_REPAIR_MS = 30000;
 
 // Readers discover serving replicas without advertising themselves as another full-network seed.
 // Use Autobase's replication entry point so writer wakeups and verified fast-forward remain unchanged.
@@ -17,18 +18,8 @@ export async function replicateReader(reader, bandwidth, { Swarm = Hyperswarm, t
     connection.on('error', () => {});
   });
   const discovery = swarm.join(reader.config.channel, { server: false, client: true });
-  let repairedAt = -Infinity;
-  reader.recoverRead = () => {
-    if (reader.base.closing || swarm.destroyed || now() - repairedAt < READER_REPAIR_MS) return false;
-    repairedAt = now();
-    // A connected replica need not have the signed blocks we request. Free one slot for discovery,
-    // keeping the other replicas and the reader/store alive; do not churn the whole swarm on every poll.
-    const connection = [...(swarm.connections ?? [])].find(c => !c.destroyed);
-    connection?.destroy();
-    Promise.resolve().then(() => discovery?.refresh?.()).catch(() => {});
-    log('RESET balance read stalled; refreshing replica discovery');
-    return true;
-  };
+  reader.recoverRead = createReadRecovery({ base: reader.base, swarm, topic: reader.config.channel,
+    discovery, label: 'RESET', rotate: true, now, log });
   let timer;
   try { await Promise.race([swarm.flush(), new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); })]); }
   finally { clearTimeout(timer); }

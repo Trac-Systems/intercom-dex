@@ -12,6 +12,12 @@ import os from 'node:os';
 import { once } from 'node:events';
 import { WebSocketServer } from 'ws';
 import { Bridge } from '../../../src/net/bridge.js';
+import { registerHooks } from 'node:module';
+import { createReadRecovery } from '../../../peer/runtime/read-recovery.js';
+
+const loader = registerHooks({ resolve: (name, context, next) => next(name === 'bare-ws' ? 'ws' : name, context) });
+const { default: DexBridge } = await import('../../../peer/features/dex-bridge.js');
+loader.deregister();
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function base(read = async () => null) {
@@ -86,6 +92,37 @@ test('a stalled RESET read requests replica recovery but never falls back to sta
   await assert.rejects(readBalances(f), /Invalid RESET balance/); assert.equal(repairs, 1);
 });
 
+test('both chains request recovery independently, including rejected asynchronous repairs; cleanup errors do not rotate peers', async () => {
+  const f = fixture(), repaired = [];
+  for (const [label, owner, view] of [['MSB', f.bus, f.msb.view], ['RESET', f.resetPeer, f.reset.view]]) {
+    owner.recoverRead = async error => { repaired.push([label, error.stage, error.signedLength]); throw new Error('repair failed'); };
+    view.checkout = () => ({ get: async () => { throw Object.assign(new Error('not served'), { code: 'REQUEST_TIMEOUT' }); }, close: async () => {} });
+  }
+  await assert.rejects(readBalances(f), /MSB balance unavailable: not served/);
+  assert.deepEqual(repaired, [['MSB', 'read', 8], ['RESET', 'read', 8]]);
+  for (const view of [f.msb.view, f.reset.view]) view.checkout = () => ({ get: async () => null,
+    close: async () => { throw Object.assign(new Error('close failed'), { code: 'REQUEST_TIMEOUT' }); } });
+  await assert.rejects(readBalances(f), /close failed/);
+  assert.equal(repaired.length, 2);
+});
+
+test('stalled snapshot closes retain bounded slots until cleanup finishes, without caching old balances', async () => {
+  const f = base(), closes = [];
+  let checkouts = 0;
+  f.view.checkout = () => {
+    checkouts++;
+    return { get: async () => ({ value: 'old' }), close: () => new Promise(resolve => closes.push(resolve)) };
+  };
+  await Promise.all(Array.from({ length: 64 }, (_, i) =>
+    assert.rejects(signedBalanceRead(f, String(i), 'MSB', 10), /snapshot close timed out/)));
+  for (let i = 0; i < 100; i++) await assert.rejects(signedBalanceRead(f, String(i), 'MSB', 10), /still closing or busy/);
+  assert.equal(checkouts, 64);
+  for (const close of closes) close();
+  await turn();
+  f.view.checkout = () => ({ get: async () => ({ value: 'new' }), close: async () => {} });
+  assert.equal((await signedBalanceRead(f, '0', 'MSB', 10)).value, 'new');
+});
+
 test('a real sparse signed Hyperbee times out, cancels snapshots, and reads again when a serving replica returns', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dex-balance-'));
   const writer = new Hypercore(path.join(directory, 'writer'));
@@ -118,7 +155,13 @@ test('a real sparse signed Hyperbee times out, cancels snapshots, and reads agai
   await assert.rejects(signedBalanceRead({ view: replica }, 'bal/account', 'RESET', 20), /RESET balance unavailable/);
   await turn(); await turn();
   assert.equal(reader.sessions.length, sessions, 'timed-out checkout and its snapshot are closed');
-  connect();
+  const topic = Buffer.alloc(32, 42), key = Buffer.alloc(32, 7);
+  let attempts = 0;
+  const recover = createReadRecovery({ base: { view: replica }, label: 'RESET', topic,
+    swarm: { connections: new Set(), peers: new Map([['replica', { publicKey: key, topics: [topic] }]]),
+      joinPeer() { attempts++; connect(); }, leavePeer() {} }, discovery: { refresh: async () => false }, log() {} });
+  recover({ code: 'BALANCE_READ_TIMEOUT' });
+  assert.equal(attempts, 1);
   assert.equal((await signedBalanceRead({ view: replica }, 'bal/account', 'RESET', 1000)).value, '123');
 });
 
@@ -127,18 +170,17 @@ test('a slow peer balance read reports its stage over the real bridge while unre
   await once(server, 'listening');
   let stalled = true;
   const f = base(() => stalled ? new Promise(() => {}) : Promise.resolve({ value: '42' }));
-  server.on('connection', socket => socket.on('message', async bytes => {
-    const request = JSON.parse(String(bytes)), reply = value => socket.send(JSON.stringify({ id: request.id, ...value }));
-    if (request.type === 'auth') return reply({ type: 'auth_ok' });
-    if (request.type === 'info') return reply({ type: 'info', info: { ready: true } });
-    try { reply({ type: 'dex_balances_result', result: await signedBalanceRead(f, 'account', 'RESET', 30) }); }
-    catch (error) { reply({ type: 'error', error: error.message }); }
-  }));
+  const peerBridge = new DexBridge({}, { token: 'local-test', info: { ready: true },
+    handlers: { dex_balances: () => signedBalanceRead(f, 'account', 'RESET', 30) } });
+  server.on('connection', socket => {
+    const client = { authed: false, socket: { write: bytes => socket.send(bytes) } };
+    socket.on('message', bytes => peerBridge._handleClientMessage(client, JSON.parse(String(bytes))));
+  });
   const bridge = new Bridge({ url: `ws://127.0.0.1:${server.address().port}`, token: 'local-test', timeoutMs: 1000 });
   t.after(async () => { bridge.ws?.terminate(); for (const client of server.clients) client.terminate(); await new Promise(resolve => server.close(resolve)); });
   await bridge.connect();
   const failed = assert.rejects(bridge.call('dex_balances', {}), /RESET balance unavailable: read timed out/);
-  assert.deepEqual((await bridge.info()).info, { ready: true });
+  assert.deepEqual((await bridge.info()).info, { ready: true, blindRelay: null });
   await failed; stalled = false;
   assert.deepEqual(await bridge.call('dex_balances', {}), { value: '42' });
   assert.equal(bridge.pending.size, 0);

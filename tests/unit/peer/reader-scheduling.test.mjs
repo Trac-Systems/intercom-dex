@@ -76,7 +76,12 @@ test('per-entry message logs are summarized while diagnostics survive unchanged'
 test('stalled reader recovery rotates one replica per cooldown and never touches the reader store or a closing swarm', async () => {
   let time = 0, refreshed = 0, destroyed = 0;
   class Swarm extends EventEmitter {
-    constructor() { super(); this.connections = new Set(Array.from({ length: 3 }, () => ({ destroy() { this.destroyed = true; destroyed++; } }))); }
+    constructor() {
+      super(); this.maxPeers = 3;
+      this.connections = new Set(Array.from({ length: 3 }, () => Object.assign(new EventEmitter(), {
+        destroy() { this.destroyed = true; destroyed++; this.emit('close'); }
+      })));
+    }
     join() { return { refresh: async () => { refreshed++; } }; }
     async flush() {}
   }
@@ -86,6 +91,7 @@ test('stalled reader recovery rotates one replica per cooldown and never touches
   assert.equal(reader.recoverRead(), true); assert.equal(reader.recoverRead(), false);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(destroyed, 1); assert.equal(refreshed, 1);
+  reader.swarm.connections.add(Object.assign(new EventEmitter(), { destroy() { this.destroyed = true; destroyed++; this.emit('close'); } }));
   time += READER_REPAIR_MS;
   assert.equal(reader.recoverRead(), true); assert.equal(destroyed, 2);
   time += READER_REPAIR_MS; reader.base.closing = true;

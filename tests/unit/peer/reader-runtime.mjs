@@ -1,5 +1,7 @@
 import { cooperativeApply, summarizeApplyLogs } from '../../../peer/runtime/reader-scheduling.js';
 import { signedBalanceRead } from '../../../peer/src/trac/balances.js';
+import { createReadRecovery } from '../../../peer/runtime/read-recovery.js';
+import b4a from '../../../peer/node_modules/b4a/index.js';
 
 let responsive = false;
 setTimeout(() => { responsive = true; }, 0);
@@ -21,5 +23,12 @@ if (closed !== 1) throw new Error('Snapshot not closed');
 const lines = [], logger = { log: value => lines.push(value) }, restore = summarizeApplyLogs(logger);
 logger.log('#1 | ' + 'a'.repeat(64) + ': {}'); restore();
 if (lines.length !== 1 || lines[0] !== 'RESET reader applied 1 messages') throw new Error('Log summary mismatch');
+const topic = b4a.alloc(32, 1), replicaKey = b4a.alloc(32, 2);
+let retries = 0, releases = 0;
+const recover = createReadRecovery({ base, topic, label: 'RESET', log() {},
+  swarm: { connections: new Set(), peers: new Map([['replica', { publicKey: replicaKey, topics: [topic] }]]),
+    joinPeer() { retries++; }, leavePeer() { releases++; } }, discovery: { refresh: async () => false } });
+if (!recover() || recover() || retries !== 1 || releases !== 1) throw new Error('Read recovery mismatch');
+await new Promise(resolve => setTimeout(resolve, 0));
 console.log('Bare reader scheduling, signed reads and log summary passed');
 Bare.exit();
