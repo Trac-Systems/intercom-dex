@@ -126,7 +126,11 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .alert.bad .icon { color: var(--down); }
 
 /* ---- Trading screen */
-.trading { display: grid; gap: 6px; height: calc(100vh - 46px - 12px); min-height: 640px; grid-template-rows: auto minmax(400px, 1fr) minmax(220px, 32vh); }
+.trading { display: grid; gap: 6px; height: calc(100vh - 46px - 12px); min-height: 640px; grid-template-rows: auto auto minmax(400px, 1fr) minmax(220px, 32vh); }
+.trading > .pairbar { grid-row: 1; }
+.trading > :is(.waiting, .error) { grid-row: 2; }
+.trading > .market { grid-row: 3; }
+.trading > .bottom { grid-row: 4; }
 .trading.no-pairs { grid-template-rows: auto auto; height: auto; min-height: 0; }
 .trading.no-pairs :is(.market, .bottom) { display: none; }
 .waiting { padding: 12px; }
@@ -227,7 +231,7 @@ label.inline { display: flex; gap: 8px; align-items: center; }
 @media (max-width: 1180px) {
   .market { grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: minmax(0, 1fr) auto; }
   .market .chart { grid-row: 1 / 3; }
-  .trading { grid-template-rows: auto minmax(640px, 1fr) minmax(260px, 34vh); height: auto; }
+  .trading { grid-template-rows: auto auto minmax(640px, 1fr) minmax(260px, 34vh); height: auto; }
 }
 @media (max-width: 760px) {
   .top { gap: 8px; padding: 0 8px; }

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.44
+
+- When the app is reconnecting, the notice now shows as one line above the chart. Before, it covered the chart and order book with a large red panel.
+- Works together with 0.1.32 and later. No minimum-version change.
+
 ## 0.1.43
 
 - If the app stops hearing the network it now reconnects by itself instead of showing an empty market.
