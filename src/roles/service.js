@@ -42,6 +42,8 @@ export const SHARE_CHECKS = 100000;
 export const BUSY_TRADES = 7;
 // A logged trade sends the tickers at once instead of waiting for the ticker timer, at most this often (seconds).
 export const TICKER_SOON_SEC = 3;
+// Duplicate seller reports recover a missed tradeLog without repeating chain checks or accounting.
+export const REPORT_ACK_SEC = 600, REPORT_ACKS_PER_MINUTE = 10;
 
 // The venue: publishes the signer registry, the order book and tickers, checks every reported trade on both chains
 // before logging it, and accounts the signers' share of the venue fee (paid later, after a holding period).
@@ -605,12 +607,26 @@ export class Service {
     try { terms = validateTerms(b.terms); } catch { return; }
     if (termsTradeId(terms) !== b.tradeId || m.from !== terms.seller.dexKey || terms.fees.collector !== this.registries.get(terms.registryVersion)?.fee.collector) return;
     const logged = await this.#serialize(async () => {
-      if (this.settlements.has(b.tradeId)) return false;
+      const existing = this.settlements.get(b.tradeId);
+      if (existing) {
+        if (existing.status === 'logged') await this.#ackReport(existing);
+        return false;
+      }
       const record = { tradeId: b.tradeId, status: 'pending', reportedAt: this.now(),
         report: { offerId: b.offerId, terms, hashHex: b.hashHex, txHash: b.txHash } };
       return this.#applyProof(record);
     });
     if (logged) await this.reconcile();
+  }
+
+  async #ackReport(r) {
+    const now = this.now();
+    if (now - (r.reportAckAt ?? -Infinity) < REPORT_ACK_SEC) return;
+    const recent = (this.store.get('settlement-report-acks')?.attempts ?? []).filter(at => at > now - 60);
+    if (recent.length >= REPORT_ACKS_PER_MINUTE) return;
+    // Reserve durably before sending: a timeout can still have delivered, and restarts must not reset the limits.
+    this.store.put('settlement-report-acks', { attempts: [...recent, now] });
+    await this.#publish(this.#save(r, { reportAckAt: now }));
   }
 
   // Admission and reconciliation share a queue, including escrow uniqueness and capacity checks.

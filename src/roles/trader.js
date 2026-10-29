@@ -40,6 +40,10 @@ export const WARM_MS = 15_000, WARM_VIEW_SEC = 60, WARM_MAX = 4, WARM_SOFTWARE =
 const WARM_RETRY_SEC = 180;
 // A cancel whose announce failed is announced again every 10 s, up to six times.
 export const CANCEL_RETRY_MS = 10_000, CANCEL_RETRIES = 6;
+// Reports share one send slot every 20 s, including failed sends and restarts. Polling more often keeps the first
+// retry near 55 s without sending a burst when several trades complete together.
+export const REPORT_POLL_MS = 5000, REPORT_SPACING_SEC = 20, REPORT_MAX_AGE_SEC = 7 * 86400;
+const reportRetrySec = attempts => attempts <= 1 ? 55 : Math.min(120 * 2 ** Math.min(attempts - 2, 4), 1800);
 export const MAX_TRADES_PER_OFFER = 3;
 export const MAX_NEGOTIATIONS_PER_TAKER = 3;
 // Declines answer strangers, so they are bounded: one per sender per minute, DECLINES_PER_MINUTE in total. A decline
@@ -96,7 +100,7 @@ export class Trader {
     await this.host.start();
     for (const t of this.host.trades.values()) if (t.role === 'seller' && t.state.phase === 'complete') this.#recordReport(t);
     await this.#sendReports().catch(e => this.log('settlement report', e.message));
-    this.reports = setInterval(() => this.#sendReports().catch(e => this.log('settlement report', e.message)), 60000);
+    this.reports = setInterval(() => this.#sendReports().catch(e => this.log('settlement report', e.message)), REPORT_POLL_MS);
     await this.#restoreOffers();
     this.#pruneDeclines();
     this.reannounce = setInterval(() => {
@@ -254,7 +258,10 @@ export class Trader {
       if (m.kind === 'bookDelta') this.bookView.delta(m.body, m.ts, nowSec());
       if (m.kind === 'ticker' && this.#marketMessage(m.body)) this.tickers.set(m.body.pair, m.body);
       if (m.kind === 'status') this.serviceStatus = m.body;
-      if (m.kind === 'tradeLog' && this.#marketMessage(m.body, false) && this.store.get(`report-${m.body.tradeId}`)) this.store.put(`report-${m.body.tradeId}`, { delivered: true });
+      if (m.kind === 'tradeLog' && this.#marketMessage(m.body, false)) {
+        const name = `report-${m.body.tradeId}`, report = this.store.get(name);
+        if (report && !report.delivered) this.store.put(name, { ...report, delivered: true });
+      }
     } else if (channel === SIGNERS && m.kind === 'heartbeat') {
       const reg = this.registry.usable;
       if (reg?.signers.some(s => s.dexKey === m.from && s.status === 'active') && !reg.removed.some(s => s.dexKey === m.from)) {
@@ -541,35 +548,52 @@ export class Trader {
     if (s.mode === 'maker' && s.phase === 'lost' && before.phase !== 'lost' && releasesOfferAmount(trade)) {
       await this.#reannounce(s.offerId).catch(e => this.log('offer announce', e.message));
     }
-    if (s.phase === 'complete' && trade.role === 'seller' && this.#recordReport(trade)) await this.#sendReports();
+    if (s.phase === 'complete' && trade.role === 'seller') this.#recordReport(trade);
   }
 
-  // A completed sale's report is kept until the venue logs the trade (its tradeLog): sent every minute for two days,
-  // then every half hour. Recorded on completion and, for a completion just before a crash, again at start. The
-  // venue takes its proof from the chains; the claim signature is only included when this harness saw it.
+  // Completed sales wait for the venue's tradeLog. Retries back off to half an hour and end after seven days;
+  // delivered and abandoned records stay in the journal so restarting cannot recreate the backlog. The venue
+  // takes its proof from the chains; the claim signature is only included when this harness saw it.
   #recordReport(trade) {
     const s = trade.state, now = nowSec();
     if (this.store.get(`report-${s.tradeId}`)) return false;
     const claimSignature = this.#claimSignature(trade);
-    this.store.put(`report-${s.tradeId}`, { firstAt: now, lastSentAt: 0, body: { offerId: s.offerId, tradeId: s.tradeId, terms: s.terms,
+    this.store.put(`report-${s.tradeId}`, { firstAt: Math.min(s.now ?? now, now), lastSentAt: 0, attempts: 0, body: { offerId: s.offerId, tradeId: s.tradeId, terms: s.terms,
       hashHex: s.H, txHash: s.txHash, ...(claimSignature ? { claimSignature } : {}) } });
     return true;
   }
 
   async #sendReports() {
-    const now = nowSec();
-    for (const t of this.host.trades.values()) {
-      if (t.role === 'seller' && t.state.phase === 'complete') try { this.#recordReport(t); } catch (e) { this.log('settlement report', e.message); }
-    }
-    for (const name of this.store.list('report-')) {
-      const r = this.store.get(name);
-      if (!r || r.delivered || now - r.lastSentAt < (now - r.firstAt < 2 * 86400 ? 55 : 1800)) continue;
+    if (this.reportSending) return;
+    this.reportSending = true;
+    try {
+      const now = nowSec();
+      for (const t of this.host.trades.values()) {
+        if (t.role === 'seller' && t.state.phase === 'complete') try { this.#recordReport(t); } catch (e) { this.log('settlement report', e.message); }
+      }
+      let due;
+      for (const name of this.store.list('report-')) {
+        const r = this.store.get(name);
+        if (!r || r.delivered || r.abandoned) continue;
+        if (now - r.firstAt >= REPORT_MAX_AGE_SEC) {
+          this.store.put(name, { ...r, abandoned: true });
+          continue;
+        }
+        // Journals from older apps have only firstAt/lastSentAt/body.
+        const attempts = r.attempts ?? (r.lastSentAt ? 1 : 0);
+        const nextAt = r.nextAt ?? (r.lastSentAt ? r.lastSentAt + reportRetrySec(attempts) : r.firstAt);
+        if (nextAt <= now && (!due || nextAt < due.nextAt)) due = { name, r, attempts, nextAt };
+      }
+      if (!due || now - (this.store.get('settlement-report-schedule')?.lastAttemptAt ?? -Infinity) < REPORT_SPACING_SEC) return;
+      const { name, r, attempts } = due;
+      // Count attempts before awaiting the bridge, even on timeout. Never overwrite a tradeLog received mid-send.
+      this.store.put('settlement-report-schedule', { lastAttemptAt: now });
+      this.store.put(name, { ...r, attempts: attempts + 1, lastSentAt: now, nextAt: now + reportRetrySec(attempts + 1) });
       try {
         if (this.profile) checkProfileTerms(r.body.terms, this.profile);
         await this.host.sendPublic(OFFERS, 'settled', r.body);
-        this.store.put(name, { ...r, lastSentAt: now });
       } catch (e) { this.log('settlement report', name.slice(7, 19), e.message); }
-    }
+    } finally { this.reportSending = false; }
   }
 
   #termsSigs(trade) {

@@ -258,6 +258,11 @@ test('dex config pins the owner operationally, enables one difficulty, defaults 
     assert.ok(DEX_POW_CLASSES[1].includes('accept')); assert.ok(DEX_POW_CLASSES[1].includes('reveal'));
     assert.deepEqual(DEX_POW_CLASSES[2], ['deal']);
     assert.deepEqual(DEX_POW_LOW, ['decline']);
+    const sc = new Sidechannel({}, policy.sidechannel);
+    assert.equal(sc._powClass({ kind: 'settled' }), sc.powBackground);
+    for (const kind of DEX_POW_CLASSES.flat()) assert.ok(sc._powClass({ kind }) < sc._powClass({ kind: 'settled' }), kind);
+    assert.equal(sc._powRequired('intercom-dex:offers'), true);
+    assert.equal(sc._powRequired('intercom-dex'), false, 'venue tradeLog acknowledgements do not need stamps');
     assert.deepEqual(policy.sidechannel.powRequiredPrefixes, ['intercom-dex:t:']);
     // Servers carry the whole network's traffic per connection; traders keep the strict limit.
     const rate = role === 'trader' ? TRADER_RATE : SERVER_RATE;

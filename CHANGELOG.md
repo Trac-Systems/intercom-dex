@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.46
+
+- Completed trade reports now retry less often, with at most three attempts a minute across all trades. After seven
+  days they stop retrying and keep their saved records. This reduces peer CPU use and bridge timeouts after trading.
+- The venue repeats a trade confirmation when a seller missed it and reports again, with limits on repeat replies.
+  This part needs the venue updated; older trader apps also benefit once it is.
+- Works together with 0.1.32 and later. No minimum-version change.
+
 ## 0.1.45
 
 - RESET and TNK sellers now close trades whose transfer never landed, six hours after the buyer's refund window.
