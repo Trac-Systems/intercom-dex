@@ -731,3 +731,70 @@ for (const asset of ['TNK', 'RESET']) test(`${asset} trade waits for finality, r
     assert.equal(fs.readFileSync(path.join(f.intentFolder, 'intents.jsonl'), 'utf8').trim().split('\n').length, 1);
   } finally { adapter.close(); }
 });
+
+for (const asset of ['TNK', 'RESET']) test(`${asset} seller recovery checks the durable hash freshly without signing, broadcasting or deleting records`, async t => {
+  const f = fixture(), usedTxFolder = folder();
+  f.terms.base = BASES[asset]; f.terms.pair = asset + '/USDC';
+  const signed = asset === 'TNK'
+    ? { payload: await buildTnkTransfer({ ...f.context, from: f.wallet.address, to: f.terms.buyer.tracAddr,
+      amount: '42', tradeId: f.tradeId, sign: f.wallet.sign }), submission: null }
+    : await buildResetTransfer({ ...f.resetContext, writer: '66'.repeat(32), from: f.wallet.publicKey, to: f.toKey,
+      amount: '42', tradeId: f.tradeId, sign: f.wallet.sign });
+  const txHash = (signed.payload.tro ?? signed.payload.txo).tx, sentAt = now();
+  const store = openIntentStore(f.intentFolder);
+  store.save({ ...signed, tradeId: f.tradeId, asset, from: f.wallet.address, to: f.terms.buyer.tracAddr, amount: '42',
+    sendBy: f.terms.sendBy, txHash, createdAt: sentAt, sentAt }); store.close();
+  const journalFile = path.join(f.intentFolder, 'intents.jsonl'), journal = fs.readFileSync(journalFile, 'utf8');
+  t.mock.method(Date, 'now', () => (f.terms.sendBy + 86400) * 1000);
+  t.mock.method(globalThis, 'fetch', () => { assert.fail('Recovery must not contact the gateway'); });
+  let reads = 0, proof;
+  f.bridge.call = async (type, params) => {
+    assert.equal(type, 'dex_verify'); assert.equal(params.txHash, txHash); reads++;
+    if (proof instanceof Error) throw proof;
+    return proof;
+  };
+  let adapter = createTracAdapter({ ...f, usedTxFolder, wallet: null });
+  t.after(() => {
+    adapter.close();
+    for (const dir of [f.intentFolder, usedTxFolder]) fs.rmSync(dir, { recursive: true });
+  });
+  assert.equal(adapter.reserveTx({ txHash, tradeId: f.tradeId }).ok, true);
+  for (const reason of ['unknown_or_not_final', ...(asset === 'RESET' ? ['reset_not_final', 'contract_rejected'] : [])]) {
+    proof = { ok: false, final: reason === 'contract_rejected', reason };
+    const checked = await adapter.checkSellerTransfer(f); // No hash in the trade journal after a crash.
+    assert.equal(checked.txHash, txHash); assert.equal(checked.notApplied, true); assert.equal(checked.ok, false);
+  }
+  for (proof of [undefined, {}, { ok: false, final: false }, { ok: false, final: false, reason: 'read_failed' },
+    { ok: false, final: false, reason: 'reset_reader_required' }, { ok: false, final: true, reason: 'wrong_to' },
+    { ok: false, final: false, reason: 'timeout' }, new Error('bridge timed out')]) {
+    assert.notEqual((await adapter.checkSellerTransfer(f)).notApplied, true);
+  }
+  assert.equal((await adapter.checkSellerTransfer({ ...f, txHash: '99'.repeat(32) })).reason, 'intent_terms_mismatch');
+  proof = { ok: true, final: true, amount: '42' };
+  const final = await adapter.checkSellerTransfer(f);
+  assert.equal(final.ok, true); assert.equal(final.final, true);
+  adapter.close(); adapter = createTracAdapter({ ...f, usedTxFolder, wallet: null });
+  const before = reads;
+  proof = { ok: false, final: false, reason: 'unknown_or_not_final' };
+  const behind = await adapter.checkSellerTransfer(f);
+  assert.equal(reads, before + 1, 'fresh lookup even when finality is already journaled');
+  assert.equal(behind.ok, true, 'a lagging replica cannot undo recorded finality');
+  assert.notEqual(behind.notApplied, true);
+  assert.equal(fs.readFileSync(journalFile, 'utf8'), journal);
+  assert.equal(adapter.reserveTx({ txHash, tradeId: '99'.repeat(32) }).ok, false, 'used-tx reservation survives recovery and restart');
+});
+
+test('seller recovery proves no intent only from the open journal and verifies a legacy hash even without an intent', async t => {
+  const f = fixture(), usedTxFolder = folder();
+  t.mock.method(Date, 'now', () => f.terms.sendBy * 1000);
+  const adapter = createTracAdapter({ ...f, usedTxFolder, wallet: null });
+  t.after(() => { adapter.close(); for (const dir of [f.intentFolder, usedTxFolder]) fs.rmSync(dir, { recursive: true }); });
+  const empty = await adapter.checkSellerTransfer(f);
+  assert.equal(empty.noIntent, true); assert.equal(empty.notApplied, true); assert.equal(f.calls.length, 0);
+  assert.equal((await adapter.checkSellerTransfer({ ...f, txHash: f.request.txHash })).ok, true);
+  assert.equal(f.calls.length, 1);
+  adapter.close();
+  assert.notEqual((await adapter.checkSellerTransfer(f)).notApplied, true);
+  const missing = createTracAdapter({ bridge: f.bridge });
+  assert.equal((await missing.checkSellerTransfer(f)).reason, 'intent_store_required'); missing.close();
+});

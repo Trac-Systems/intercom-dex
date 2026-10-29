@@ -12,6 +12,29 @@ export function createSeller(config) { return createTrader('seller', config); }
 
 // Same ten-second cadence as the host's acks and SELLER_FUNDS_RETRY_SEC.
 export const TRANSFER_NOTICE_RETRY_SEC = 10;
+export const DEAD_TRANSFER_GRACE_SEC = 6 * 60 * 60;
+export const TRANSFER_CHECK_RETRY_SEC = 60;
+export const DEAD_TRANSFER_REASON = "Transfer never landed; closed after the buyer's refund window";
+
+// A claiming seller already holds the released secret, which signers only publish after the transfer landed. It
+// keeps the existing claim/settlement flow and is never closed by a transfer lookup.
+const unverifiedTransfer = s => ['transferring', 'awaitShares'].includes(s.phase) && (s.transferFinal !== true || s.transferUnknown === true);
+const canCloseDeadTransfer = s => unverifiedTransfer(s) && s.transferFinal !== true &&
+  s.now >= s.terms.refundAfter + DEAD_TRANSFER_GRACE_SEC;
+const transferCheckAction = (s, close = false) => {
+  s.transferCheck = { at: s.now, close };
+  s.transferRetryAt = s.now + TRANSFER_CHECK_RETRY_SEC;
+  return { type: 'checkSellerTransfer', tradeId: s.tradeId, txHash: s.txHash, checkAt: s.now };
+};
+
+function claimWithShares(s) {
+  if (s.shares.length < s.terms.k) return [];
+  const secret = reconstruct(s.shares.map(p => ({ id: p.id, share: fromLe32(hexToBytes(p.share, 32)) })), s.terms.k);
+  if (sha256Hex(le32(secret)) !== s.H) throw new Error('Invalid reconstructed preimage');
+  s.phase = 'claiming';
+  s.preimageHex = bytesToHex(le32(secret));
+  return [claimAction(s)];
+}
 
 // Runtime seller flow. Retain the original reducer for callers replaying older event journals.
 export function stepFinalized(state, event) {
@@ -19,6 +42,73 @@ export function stepFinalized(state, event) {
       (event.type !== 'message' && event.tradeId !== undefined && event.tradeId !== state.tradeId)) return { state, actions: [] };
   if (event.type === 'resume' && state.phase === 'awaitShares' && state.transferFinal !== true) {
     state = { ...state, phase: 'transferring', transferUnknown: true };
+  }
+  if (unverifiedTransfer(state) && event.now >= state.terms.sendBy &&
+      !(state.gatewayPaused && !state.txHash && !state.transferUnknown)) {
+    if (['tick', 'resume'].includes(event.type)) return runStep(state, event, (s, e) => {
+      if (e.type === 'resume') {
+        // In-flight work did not survive a restart. Old journals need no additional fields to reconcile now.
+        delete s.transferCheck;
+        s.settlementPending = false;
+        s.nextSettlementCheck = 0;
+        s.transferRetryAt = 0;
+      }
+      const actions = [];
+      if (e.now >= s.terms.refundAfter && !s.settlementPending &&
+          e.now >= (s.nextSettlementCheck ?? 0) && (!canCloseDeadTransfer(s) || e.now >= (s.transferRetryAt ?? 0))) {
+        // Settlement remains independent of a stalled transfer reader. A lookup spanning another settlement
+        // round cannot close the trade using the earlier round's active result.
+        if (s.transferCheck) s.transferCheck.close = false;
+        s.settlementPending = true;
+        s.nextSettlementCheck = e.now + TRANSFER_CHECK_RETRY_SEC;
+        actions.push(settlementAction(s));
+      }
+      // Once closure is possible, the settlement result starts the fresh lookup. Never close while a settlement
+      // read is failing or still in flight, and never reuse a negative lookup from before the refund window.
+      if (!canCloseDeadTransfer(s) && !s.transferCheck && e.now >= (s.transferRetryAt ?? 0)) actions.push(transferCheckAction(s));
+      if (e.type === 'resume') return resumeSeller(s, actions);
+      if (s.phase === 'awaitShares' && canAnnounceTransfer(s) && e.now >= (s.transferNoticeAt ?? 0)) actions.push(transferNotice(s));
+      return { state: s, actions };
+    });
+    if (event.type === 'sellerTransferChecked') return runStep(state, event, (s, e) => {
+      if (!s.transferCheck || e.checkAt !== s.transferCheck.at || e.tradeId !== s.tradeId ||
+          s.txHash && e.txHash !== s.txHash) return null;
+      const close = s.transferCheck.close;
+      delete s.transferCheck;
+      s.transferRetryAt = e.now + TRANSFER_CHECK_RETRY_SEC;
+      if (e.ok === true && e.final === true && e.amount === s.terms.baseAmount && hexKey.safeParse(e.txHash).success &&
+          Number.isSafeInteger(e.finalizedAt) && e.finalizedAt >= 0 && e.finalizedAt <= e.now) {
+        s.txHash = e.txHash;
+        s.transferFinal = true;
+        s.transferUnknown = false;
+        s.finalizedAt = e.finalizedAt;
+        s.phase = 'awaitShares';
+        const actions = claimWithShares(s);
+        if (canAnnounceTransfer(s)) actions.push(transferNotice(s));
+        return { state: s, actions };
+      }
+      if (hexKey.safeParse(e.txHash).success) { s.txHash = e.txHash; s.transferUnknown = true; }
+      if (close && canCloseDeadTransfer(s) && e.ok === false && e.notApplied === true &&
+          (hexKey.safeParse(e.txHash).success || e.noIntent === true && !s.txHash)) {
+        delete s.claimFailure;
+        return abortTransition(s, DEAD_TRANSFER_REASON);
+      }
+      return { state: s, actions: [] };
+    });
+    if (event.type === 'error' && event.purpose === 'sellerTransfer') return runStep(state, event, (s, e) => {
+      if (e.checkAt !== s.transferCheck?.at) return null;
+      delete s.transferCheck;
+      s.transferRetryAt = e.now + TRANSFER_CHECK_RETRY_SEC;
+      return { state: s, actions: [] };
+    });
+    if (event.type === 'escrowChecked' && state.settlementPending && event.purpose === 'settlement' &&
+        event.hashHex === state.H && event.tradeId === state.tradeId && event.ok === true && event.status === 'active') {
+      const result = step(state, event);
+      if (canCloseDeadTransfer(result.state) && !result.state.transferCheck && event.now >= (result.state.transferRetryAt ?? 0)) {
+        result.actions.push(transferCheckAction(result.state, true));
+      }
+      return result;
+    }
   }
   if (state.phase !== 'transferring') return step(state, event);
   if (event.type === 'transferSent' && hexKey.safeParse(event.txHash).success) {
@@ -31,13 +121,14 @@ export function stepFinalized(state, event) {
         if (result.state.phase !== 'awaitShares') return null;
         result.state.transferFinal = true;
         result.state.finalizedAt = e.finalizedAt;
+        delete result.state.transferCheck;
         return result;
       }
       const announce = !s.txHash;
       delete s.gatewayPaused;
       s.txHash = e.txHash;
       s.transferUnknown = true;
-      s.transferRetryAt = e.now + 10;
+      s.transferRetryAt = e.now + (e.now >= s.terms.sendBy ? TRANSFER_CHECK_RETRY_SEC : 10);
       return { state: s, actions: announce && canAnnounceTransfer(s) ? [transferNotice(s)] : [] };
     });
   }

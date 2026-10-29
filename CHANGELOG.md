@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.45
+
+- RESET and TNK sellers now close trades whose transfer never landed, six hours after the buyer's refund window.
+  A fresh transfer check and escrow check must succeed before the trade reservation is released. Unavailable reads
+  keep the trade open and retry once a minute. Transfers that did land keep their existing settlement path.
+- Older stuck trades recover automatically on startup. Closed trades show the reason in trade history and notices,
+  and stop retrying. The original transfer records are kept so a restart cannot send a replacement payment.
+- Works together with 0.1.32 and later. No minimum-version change.
+
 ## 0.1.44
 
 - When the app is reconnecting, the notice now shows as one line above the chart. Before, it covered the chart and order book with a large red panel.

@@ -242,6 +242,31 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       return pending.finally(() => { if (sends.get(tradeId) === pending) sends.delete(tradeId); });
     },
 
+    // Seller recovery after sendBy is read-only. The intent may exist even if a crash kept its hash out of the
+    // trade journal. Never infer an unsigned transfer from the trade journal alone, or discard its signed intent.
+    async checkSellerTransfer({ terms, tradeId, txHash } = {}) {
+      const event = () => ({ type: 'sellerTransferChecked', now: seconds(), tradeId, txHash });
+      try {
+        if (closed) reject('adapter_closed');
+        if (!intents) reject('intent_store_required');
+        if (!isHash(tradeId) || !supportedBase(terms?.base) || !isAmount(terms.baseAmount) ||
+            !Number.isSafeInteger(terms.sendBy) || terms.sendBy < 0 || seconds() < terms.sendBy ||
+            txHash != null && !isHash(txHash)) reject('invalid_request');
+        await sends.get(tradeId);
+        const intent = intents.get(tradeId);
+        if (intent) {
+          if (intent.asset !== terms.base.id || intent.from !== terms.seller?.tracAddr || intent.to !== terms.buyer?.tracAddr ||
+              intent.amount !== terms.baseAmount || intent.sendBy !== terms.sendBy || txHash && txHash !== intent.txHash) reject('intent_terms_mismatch');
+          txHash = intent.txHash;
+        }
+        if (!txHash) return { ...event(), ok: false, final: false, notApplied: true, noIntent: true };
+        const proof = await this.verifyTransfer({ asset: terms.base.id, txHash, from: terms.seller.tracAddr,
+          to: terms.buyer.tracAddr, minAmount: terms.baseAmount, nonce: transferNonce(tradeId), tradeId,
+          finalBefore: Number.MAX_SAFE_INTEGER, fresh: true });
+        return { ...proof, ...event() };
+      } catch (error) { return { ...event(), ok: false, final: false, reason: error.reason ?? 'verification_failed' }; }
+    },
+
     // The explorer only supplies candidate hashes. The caller must verify each one on its own peer.
     async recentTransferCandidates({ asset, from, to, tradeId, since } = {}) {
       if (closed) reject('adapter_closed');
@@ -267,25 +292,35 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       return [...candidates];
     },
 
-    async verifyTransfer({ asset, txHash, from, to, minAmount, nonce, tradeId, finalBefore } = {}) {
+    async verifyTransfer({ asset, txHash, from, to, minAmount, nonce, tradeId, finalBefore, fresh = false } = {}) {
       const event = () => ({ type: 'transferVerified', now: seconds(), tradeId, txHash, asset, from, to, nonce });
       try {
         if (closed) reject('adapter_closed');
         if (!used || !observed) reject('used_tx_store_required');
-        if (!['TNK', 'RESET'].includes(asset) || !isHash(txHash) || !isHash(tradeId) || !isHash(nonce) || !isAmount(minAmount) || !Number.isSafeInteger(finalBefore) || finalBefore < 0) reject('invalid_request');
+        if (!['TNK', 'RESET'].includes(asset) || !isHash(txHash) || !isHash(tradeId) || !isHash(nonce) || !isAmount(minAmount) || !Number.isSafeInteger(finalBefore) || finalBefore < 0 || typeof fresh !== 'boolean') reject('invalid_request');
         const fromKey = publicKey(from), toKey = publicKey(to);
         const usedBy = used.get(txHash);
         if (usedBy && usedBy !== tradeId) return { ...event(), ok: false, final: false, usedBy, reason: 'tx_already_used' };
         if (nonce !== transferNonce(tradeId)) reject('wrong_nonce');
         const observation = { asset, txHash, from, to, amount: minAmount, nonce };
         let finalizedAt = observed.get(observation);
-        if (finalizedAt === null) {
+        if (finalizedAt === null || fresh) {
           const proof = await bridge.call('dex_verify', { asset, txHash, from: asset === 'RESET' ? fromKey : from,
             to: asset === 'RESET' ? toKey : to, minAmount, nonce });
           if (proof?.reason === 'read_failed') reject('read_failed');
-          if (proof?.ok !== true || proof.final !== true) return { ...event(), ok: false, final: proof?.final === true, amount: proof?.amount ?? null, reason: proof?.reason ?? 'not_final' };
-          if (proof.amount !== minAmount) reject('wrong_amount');
-          finalizedAt = observed.record({ ...observation, finalizedAt: seconds() });
+          if (proof?.ok === true && proof.final === true) {
+            if (proof.amount !== minAmount) reject('wrong_amount');
+            finalizedAt = observed.record({ ...observation, finalizedAt: seconds() });
+          } else if (finalizedAt === null) {
+            // Only successful reads of absent signed state or an explicit contract rejection establish that
+            // nothing was applied. Errors, incomplete replies and transfer mismatches never release a hold.
+            const notApplied = proof?.ok === false && (proof.final === false &&
+              (proof.reason === 'unknown_or_not_final' || asset === 'RESET' && proof.reason === 'reset_not_final') ||
+              asset === 'RESET' && proof.final === true && proof.reason === 'contract_rejected');
+            return { ...event(), ok: false, final: proof?.final === true, amount: proof?.amount ?? null,
+              reason: proof?.reason ?? 'not_final', ...(fresh ? { notApplied } : {}) };
+          }
+          // A previously recorded final transfer cannot become unapplied when a replica falls behind.
         }
         const now = seconds();
         if (finalizedAt > now) reject('clock_regressed');

@@ -141,7 +141,8 @@ test('settlement failure retries across the transfer finality transition and rej
   s = stepFinalized(s, event(s, 'transferSent', { ok: false, unknown: true, txHash: hex() })).state;
   const pending = stepFinalized(s, event(s, 'tick', { now: s.terms.refundAfter }));
   assert.equal(checks(pending).length, 1);
-  assert.ok(pending.actions.some(a => a.type === 'sendTransfer' && a.resume));
+  assert.ok(pending.actions.some(a => a.type === 'checkSellerTransfer'));
+  assert.ok(pending.actions.every(a => a.type !== 'sendTransfer'));
   const failed = stepFinalized(pending.state, event(pending.state, 'error', { purpose: 'settlement' }));
   assert.equal(failed.state.settlementPending, false);
   const final = stepFinalized(failed.state, event(failed.state, 'transferSent', { ok: true, final: true,

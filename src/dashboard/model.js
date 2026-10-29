@@ -135,6 +135,9 @@ export function outcome(trade, note = null) {
   if (trade.role === 'seller' && s.phase === 'aborted' && s.reason?.startsWith('Transfer not sent before the deadline')) {
     return { tone: 'neutral', text: `Called off: your ${base} was not sent and its trade reservation was released. The buyer's USDC stays locked until the refund time.` };
   }
+  if (trade.role === 'seller' && s.phase === 'aborted' && s.reason?.startsWith('Transfer never landed;')) {
+    return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Your ${base} trade reservation was released.` };
+  }
   return { tone: 'neutral', text: `Called off: ${plainReason(s.reason)}. Nothing was locked or sent.${note ? ' ' + note.text : ''}` };
 }
 

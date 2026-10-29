@@ -7,6 +7,7 @@ import { seal } from '../../../src/core/envelope.js';
 import { hex } from '../core/helpers.mjs';
 import { traderFixture, signerFixture, serviceFixture, walletInfo, nowSec } from './fixtures.mjs';
 import { RESET_PAUSED_MESSAGE } from '../../../src/market/gateway-status.js';
+import { DEAD_TRANSFER_REASON } from '../../../src/core/trade-seller.js';
 
 const model = (fx, clock) => createModel({ config: fx.config, role: fx.role, wallets: fx.wallets ?? null, bridge: fx.bridge, ...(clock ? { clock } : {}) });
 
@@ -19,6 +20,19 @@ test('a seller waiting for gateway recovery sees the pause and reservation-relea
   trade.state.phase = 'aborted'; trade.state.reason = 'Transfer not sent before the deadline: ' + RESET_PAUSED_MESSAGE;
   assert.match(outcome(trade).text, /was not sent.*reservation was released.*USDC stays locked until the refund time/);
   assert.doesNotMatch(outcome(trade).text, /Nothing was locked/);
+});
+
+test('a seller whose transfer never landed sees the closure reason and released reservation in history and notices', async () => {
+  const fx = traderFixture(), trade = fx.role.host.trades.get('t-sell'), m = model(fx);
+  trade.state.phase = 'aborted'; trade.state.reason = DEAD_TRANSFER_REASON;
+  trade.state.transferUnknown = true; trade.state.txHash = hex();
+  const history = (await m.list('trader.history')).rows.find(r => r.key === trade.key);
+  assert.equal(history.outcome.tone, 'neutral');
+  assert.ok(history.outcome.text.includes(DEAD_TRANSFER_REASON));
+  assert.match(history.outcome.text, /trade reservation was released/);
+  assert.doesNotMatch(history.outcome.text, /Nothing was locked or sent/);
+  const notices = (await m.list('trader.attention')).rows;
+  assert.ok(notices.some(n => n.kind === 'failed' && n.text.includes(DEAD_TRANSFER_REASON)));
 });
 
 test('claim failures appear on the trade row and in existing alerts, then disappear after success', async () => {

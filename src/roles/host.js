@@ -830,6 +830,11 @@ export class TradeHost {
         return this.#background(trade, 'transfer', () => sendFinalTransfer(this.trac, { terms: s.terms, tradeId, resume: action.resume === true }),
           r => ({ type: 'transferSent', ok: r.ok === true, final: r.final === true, finalizedAt: r.finalizedAt,
             unknown: r.unknown === true, txHash: r.txHash, sentAt: r.sentAt, reason: r.reason }), { retries: 1 });
+      case 'checkSellerTransfer':
+        return this.#background(trade, 'seller-transfer',
+          () => this.trac.checkSellerTransfer({ terms: s.terms, tradeId, txHash: action.txHash }),
+          r => ({ ...r, type: 'sellerTransferChecked', checkAt: action.checkAt }),
+          { retries: 1, errorEvent: { purpose: 'sellerTransfer', checkAt: action.checkAt } });
       case 'verifyTransfer':
         return this.#background(trade, 'verify', () => this.#pollTransfer(action, trade), r => ({ type: 'transferVerified', ...r }), { retries: 1 });
       case 'findTransfer':
