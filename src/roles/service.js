@@ -10,6 +10,7 @@ import { RegistryRelays } from '../net/relays.js';
 import { OfferBook } from '../market/book.js';
 import { ticker } from '../market/ticker.js';
 import { MakerFunds } from '../market/funds.js';
+import { BuyerPauses } from '../market/buyer-pauses.js';
 import { addressProofRequired } from '../core/address-proof.js';
 import { TradeHost } from './host.js';
 import { deriveEscrowPda } from '../solana/escrow.js';
@@ -73,6 +74,7 @@ export class Service {
     this.relays = new RegistryRelays(bridge);
     const savedFee = store.get('service-fee-policy');
     this.registry = this.#registry({ ...registryInput, ...(savedFee ? { fee: savedFee.fee } : {}) });
+    this.buyerPauses = new BuyerPauses({ store, registry: () => this.registry, now });
     this.registryQueue = Promise.resolve();
     this.registries = new Map();
     for (const name of store.list('service-registry-v')) { const r = store.get(name); if (r) this.registries.set(r.version, r); }
@@ -243,12 +245,20 @@ export class Service {
     const now = this.now();
     this.#saveBook();
     const makers = new Set(), pending = this.#pendingByOffer(), busy = this.busySellers();
-    for (const p of this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open')) {
-      const listed = this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware));
-      this.funds.refresh(listed);
+    const pairs = this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open');
+    const listedByPair = new Map(pairs.map(p => [p.pair,
+      this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))]));
+    this.funds.refresh([...listedByPair.values()].flat());
+    const sizes = this.funds.allocate(pairs.flatMap(p => listedByPair.get(p.pair).filter(o => o.side !== 'buy' || !this.buyerPauses.refusal(o.maker)).map(offer => ({ offer, pair: p,
+      fees: this.registries.get(offer.registryVersion).fee, firstSeen: this.book.get(offer.offerId, now).firstSeen }))),
+    pending, [...[...this.inFlight.values()].map(t => t.terms), ...[...this.settlements.values()]
+      .filter(r => r.status === 'logged' && r.loggedAt >= now - 2 * this.funds.ttlSec)
+      .map(r => ({ ...r.report.terms, settledAt: r.loggedAt }))]);
+    for (const p of pairs) {
+      const listed = listedByPair.get(p.pair);
       for (const o of listed) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
       const offers = listed.filter(o => !(o.side === 'sell' && busy.has(o.maker.dexKey))).filter(o => {
-        const funded = this.funds.funded(o, p);
+        const funded = BigInt(sizes.get(o.offerId) ?? '0') >= BigInt(p.minBaseAmount);
         if (funded === this.hidden.has(o.offerId)) {
           if (funded) this.hidden.delete(o.offerId); else this.hidden.add(o.offerId);
           this.log(funded ? 'offer funded again' : 'offer hidden, maker cannot fund the smallest trade', p.pair, o.side, o.offerId.slice(0, 12),
@@ -258,7 +268,7 @@ export class Service {
       }).flatMap(o => {
         // The published size is what is still free: summoned trades in progress hold part of it. A free rest below the
         // pair's smallest trade cannot be taken and is left out.
-        const free = BigInt(o.baseAmount) - (pending.get(o.offerId) ?? 0n);
+        const free = BigInt(sizes.get(o.offerId) ?? '0');
         return free >= BigInt(p.minBaseAmount) ? [{ ...o, baseAmount: free.toString() }] : [];
       });
       this.unfunded[p.pair] = listed.length - offers.length;
@@ -312,12 +322,13 @@ export class Service {
     } else if (channel === OFFERS && m.kind === 'cancel') this.book.cancel(m.body.offerId, m.from);
     else if (channel === OFFERS && m.kind === 'settled') return this.#settled(m);
     else if (channel === SIGNERS && m.kind === 'summon') this.#summon(m);
+    else if (channel === SIGNERS && m.kind === 'status') this.buyerPauses.receive(m);
     else if (channel === SIGNERS && m.kind === 'heartbeat' && this.#listed(m.from)) this.heartbeats.set(m.from, { ...m.body, at: this.now() });
   }
 
   #track(terms) {
     const until = terms.sendBy + terms.graceSec + IN_FLIGHT_SLACK_SEC, tradeId = termsTradeId(terms);
-    if (this.now() < until && this.settlements.get(tradeId)?.status !== 'logged') this.inFlight.set(tradeId, { offerId: terms.offerId, amount: BigInt(terms.baseAmount), until });
+    if (this.now() < until && this.settlements.get(tradeId)?.status !== 'logged') this.inFlight.set(tradeId, { offerId: terms.offerId, amount: BigInt(terms.baseAmount), until, terms });
   }
 
   // Base units of each offer held by summoned trades that are not logged yet (a logged trade is already a fill).

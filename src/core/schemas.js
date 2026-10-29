@@ -119,7 +119,7 @@ export const bodySchemas = Object.freeze({
   working: z.object({ tradeId: hexKey, step: z.literal('certificate') }).strict(),
   deal: dealSchema,
   ack: z.object({ tradeId: hexKey, H: hexKey, holdUntil: uint }).strict(),
-  refused: z.object({ tradeId: hexKey, reason: z.enum(['seller-funds', 'seller-struck']) }).strict(),
+  refused: z.object({ tradeId: hexKey, reason: z.enum(['seller-funds', 'seller-struck', 'buyer-struck']) }).strict(),
   transferSent: z.object({ tradeId: hexKey, txHash: hexKey }).strict(),
   sharePublish: z.object({ tradeId: hexKey, H: hexKey, signerIndex: uint.min(1).max(16), share: hexKey,
     commitments: z.array(hexKey).min(1).max(16) }).strict(),

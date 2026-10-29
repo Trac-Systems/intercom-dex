@@ -210,6 +210,9 @@ test('max-take: the most of an offer the free balance pays for, fees included', 
   const sale = (await get(buy.offerId)).json();
   assert.equal(sale.baseAmount, fx.info.balances.TNK.free);
   assert.equal(sale.all, false);
+  fx.role.book.get(buy.pair).remaining = [{ offerId: buy.offerId, amount: '100000000000000000' }];
+  assert.equal((await get(buy.offerId)).json().baseAmount, '100000000000000000', 'max-take uses the venue-sized bid');
+  delete fx.role.book.get(buy.pair).remaining;
   fx.info.balances.USDC.free = '25000000';
   assert.deepEqual((await get(sell.offerId)).json(), { baseAmount: sell.baseAmount, amount: { units: sell.baseAmount, text: '5', unit: 'TNK' }, all: true, note: null });
   assert.match((await get(hex())).json().error, /no longer announced by its maker/);

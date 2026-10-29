@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-// Local signer policy only. No stake, deposit, shared reputation or new protocol messages.
+// Each signer keeps its own evidence. No stake or deposit; buyer pause decisions reach the venue in status text.
 export const STRIKE_WINDOW_SEC = 7 * 86400;
 export const MAX_SELLER_STRIKES = 4096;
 export const STRIKE_HEALTH_INTERVAL_SEC = 15;
@@ -21,7 +21,6 @@ export function sellerInfrastructureNotice(trade, message) {
     ['read_failed', 'gateway_rejected', 'reset_gateway_required', 'invalid_gateway_response'].includes(reason);
 }
 
-const RECORD = 'seller-strikes';
 const sameSeller = (a, b) => a.tracAddr.toLowerCase() === b.tracAddr.toLowerCase();
 const oldestFirst = (a, b) => a.at - b.at;
 const refusalFor = (seller, strikes) => {
@@ -50,14 +49,15 @@ export function validateSeller({ tracAddr, dexKey } = {}) {
 // One atomic encrypted record, with independent caps for strikes and refusals. Refusals retain the two triggering
 // trade ids after the first strike expires, so the full seven days from the second strike survives a restart.
 export class SellerStrikes {
-  constructor({ store, log = () => {}, cap = MAX_SELLER_STRIKES, enabled = false }) {
+  constructor({ store, log = () => {}, cap = MAX_SELLER_STRIKES, enabled = false, party = 'seller' }) {
     if (!Number.isSafeInteger(cap) || cap < 2) throw new Error('Invalid strike cap');
     if (typeof enabled !== 'boolean') throw new Error('Invalid strikes.enabled');
-    Object.assign(this, { store, log, cap, enabled });
+    if (!['seller', 'buyer'].includes(party)) throw new Error('Invalid strike party');
+    Object.assign(this, { store, log, cap, enabled, party, recordName: `${party}-strikes` });
   }
 
   list(now) {
-    const record = this.store.get(RECORD) ?? { strikes: [], refusals: [] };
+    const record = this.store.get(this.recordName) ?? { strikes: [], refusals: [] };
     // Pre-proof strikes could name somebody else's address. Never promote those into address-wide refusals.
     return { strikes: record.strikes.filter(s => s.proven === true && s.at + STRIKE_WINDOW_SEC > now),
       refusals: record.refusals.filter(r => r.proven === true && r.until > now) };
@@ -76,8 +76,8 @@ export class SellerStrikes {
     if (refusal && !data.refusals.some(r => sameSeller(r, seller))) data.refusals.push(refusal);
     data.strikes = data.strikes.sort(oldestFirst).slice(-this.cap);
     data.refusals = data.refusals.sort(oldestFirst).slice(-this.cap);
-    this.store.put(RECORD, data);
-    this.log(`seller strike tradeId=${tradeId} seller=${seller.tracAddr} identity=${seller.dexKey} at=${now}`);
+    this.store.put(this.recordName, data);
+    this.log(`${this.party} strike tradeId=${tradeId} ${this.party}=${seller.tracAddr} identity=${seller.dexKey} at=${now}`);
     return true;
   }
 
@@ -90,16 +90,32 @@ export class SellerStrikes {
       const remaining = refusalFor(prior, strikes);
       if (remaining) refusals.push(remaining);
     }
-    this.store.put(RECORD, { strikes, refusals });
-    this.log(`seller strike clear tradeId=${tradeId} reason=${reason}`);
+    this.store.put(this.recordName, { strikes, refusals });
+    this.log(`${this.party} strike clear tradeId=${tradeId} reason=${reason}`);
   }
 
   clear(seller, now) {
     validateSeller(seller);
     const data = this.list(now), strikes = data.strikes.filter(s => !sameSeller(s, seller)),
       refusals = data.refusals.filter(r => !sameSeller(r, seller));
-    this.store.put(RECORD, { strikes, refusals });
-    this.log(`seller strike clear seller=${seller.tracAddr} identity=${seller.dexKey} strikes=${data.strikes.length - strikes.length} refusals=${data.refusals.length - refusals.length}`);
+    this.store.put(this.recordName, { strikes, refusals });
+    this.log(`${this.party} strike clear ${this.party}=${seller.tracAddr} identity=${seller.dexKey} strikes=${data.strikes.length - strikes.length} refusals=${data.refusals.length - refusals.length}`);
     return { cleared: true, strikes: data.strikes.length - strikes.length, refusals: data.refusals.length - refusals.length };
   }
+}
+
+export class BuyerStrikes extends SellerStrikes {
+  constructor(options) { super({ ...options, party: 'buyer' }); }
+}
+
+export const BUYER_PAUSED_MESSAGE = 'Your bids are paused for 7 days: 2 trades were accepted but never paid';
+
+// Both parties signed the exact terms, the seller was able to deliver, and the whole payment window was observed.
+// The host still needs a fresh, definitive Solana absence check; silence alone is never evidence of no payment.
+export function buyerStrikeCandidate(trade, now) {
+  const s = trade.state, deadline = s.terms.sendBy + s.terms.graceSec;
+  return trade.role === 'signer' && trade.buyerAddressProven === true && Number.isSafeInteger(trade.buyerAcceptedAt) &&
+    trade.buyerAcceptedAt < s.terms.sendBy && trade.buyerSellerReady === true &&
+    !trade.buyerStrikeExemption && !trade.buyerPaymentSeen && !trade.sellerTransferSeen && !s.txHash &&
+    s.finalizedAt == null && s.phase !== 'published' && now >= deadline && now < deadline + STRIKE_WINDOW_SEC;
 }

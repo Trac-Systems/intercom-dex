@@ -48,5 +48,6 @@ export function bookPanel({ onTake }) {
       spreadPct.textContent = book.spread?.pct != null ? `${Number(book.spread.pct).toFixed(2)}%` : '';
     },
     clear() { asks.clear(); bids.clear(); spreadPrice.textContent = '—'; spreadPct.textContent = ''; },
+    network(message) { asks.emptyText(message || 'No sell offers'); bids.emptyText(message || 'No buy offers'); },
   };
 }

@@ -53,6 +53,9 @@ export function abortTransition(state, reason) {
 }
 
 export function refusalReason(state, reason) {
+  if (reason === 'buyer-struck') return state.role === 'buyer'
+    ? 'Your bids are paused for 7 days: 2 trades were accepted but never paid'
+    : 'The buyer is paused for 7 days: 2 trades were accepted but never paid';
   if (reason === 'seller-struck') return state.role === 'seller'
     ? 'Signers refused: your wallet is paused after unsent trades; contact the venue'
     : 'The seller is paused after unsent trades; contact the venue';
@@ -64,6 +67,7 @@ export function refusalReason(state, reason) {
 
 // The peer may hear the refusal first. Keep the local party's explanation when its courtesy abort arrives first.
 export function peerAbortReason(state, reason) {
+  if (/^(Your bids are paused for 7 days:|The buyer is paused for 7 days:)/.test(reason)) return refusalReason(state, 'buyer-struck');
   if (/^(The seller cannot deliver this trade right now|Signers refused: your wallet does not hold )/.test(reason)) return refusalReason(state, 'seller-funds');
   if (/^(The seller is paused after unsent trades|Signers refused: your wallet is paused after unsent trades)/.test(reason)) return refusalReason(state, 'seller-struck');
   return 'Peer aborted: ' + reason;

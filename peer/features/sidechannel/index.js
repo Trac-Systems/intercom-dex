@@ -73,6 +73,8 @@ const toProtocol = (name) => `sidechannel/${name}`;
 // networks can leave a flush pending indefinitely; the node must keep running.
 const FLUSH_TIMEOUT_MS = 10_000;
 export const PUBLIC_REPAIR_MS = 15_000;
+// Three signer heartbeat periods. Market leaves must recover even if the venue socket disappears.
+export const CHANNEL_SILENCE_MS = 90_000;
 const PUBLIC_OPEN_TIMEOUT_MS = 30_000;
 
 const stableStringify = (value) => {
@@ -140,6 +142,7 @@ class Sidechannel extends Feature {
     this.discovery = config.discovery ?? { server: true, client: true };
     this.bandwidth = config.bandwidth ?? null;
     this.publicDelivery = config.publicDelivery ?? null;
+    this.networkLog = config.networkLog ?? (event => console.log(`[dex-network] ${JSON.stringify(event)}`));
     this.publicChannels = new Set(this.publicDelivery?.channels ?? []);
     this.publicSendVerified = new WeakMap();
     this.publicSend = config.publicSend ? new PublicSend({ ...config.publicSend, now: () => this._now(), send: item => {
@@ -1162,6 +1165,7 @@ class Sidechannel extends Feature {
             }
           }
           if (this.onMessage) {
+            if (this.publicChannels.has(entry.name)) this._publicHeardAt = this._now();
             this.onMessage(entry.name, payload, connection);
           } else {
             const from = payload?.from ?? 'unknown';
@@ -1241,6 +1245,7 @@ class Sidechannel extends Feature {
   _markAnnounced(entry, announced = true) {
     if (!entry) return;
     entry.announced = announced === true;
+    if (entry.announced) entry.disconnectedAt ??= this._now();
     const waiters = entry._announceWaiters;
     entry._announceWaiters = null;
     if (!waiters) return;
@@ -1307,7 +1312,7 @@ class Sidechannel extends Feature {
     for (const connection of new Set([...this.connections.keys(), ...(this.peer?.swarm?.connections ?? [])])) {
       this._openChannelForConnection(connection, entry);
     }
-    if (entry.announced) return true;
+    if (entry.announced) { this._repairSilentVenue(); return true; }
     if (!this.peer?.swarm) return false;
     const announced = this.started
       ? await this._announceChannel(entry)
@@ -1489,6 +1494,81 @@ class Sidechannel extends Feature {
     }
   }
 
+  _networkEvent(event, extra = {}) {
+    this.networkLog({ at: this._now(), event,
+      swarmConnections: [...(this.peer.swarm.connections ?? [])].filter(c => !c.destroyed).length,
+      publicHeardAgoMs: this._publicHeardAt == null ? null : this._now() - this._publicHeardAt, ...extra });
+  }
+
+  // Keep existing discovery sessions (join() would allocate another session each time).
+  // A venue-only leaf has no public DHT topic: re-arm its existing explicit venue pin instead.
+  _repairDisconnectedChannels() {
+    const swarm = this.peer?.swarm;
+    if (!this.started || !swarm || swarm.destroyed || swarm.suspended) return;
+    const now = this._now();
+    let redialVenue = false;
+    for (const entry of this.channels.values()) {
+      if (!entry.announced) continue;
+      const connected = [...this.connections].some(([connection, channels]) =>
+        this._usableRecord(connection, entry.name, channels.get(entry.name)));
+      if (connected) {
+        if (entry.repairNoted) this._networkEvent('channel recovered', { channel: entry.name });
+        entry.disconnectedAt = null; entry.repairNoted = false; continue;
+      }
+      entry.disconnectedAt ??= now;
+      if (now - entry.disconnectedAt < CHANNEL_SILENCE_MS || now - (entry.repairedAt ?? -Infinity) < CHANNEL_SILENCE_MS) continue;
+      entry.repairedAt = now; entry.repairNoted = true;
+      this._networkEvent('rejoin disconnected channel', { channel: entry.name, connections: 0 });
+      for (const connection of swarm.connections ?? []) this._openChannelForConnection(connection, entry);
+      if (this._venueOnly(entry.name)) { redialVenue = true; continue; }
+      if (entry._refreshing) continue;
+      entry._refreshing = Promise.resolve().then(() => {
+        if (!this.started || this.channels.get(entry.name) !== entry || swarm.destroyed) return;
+        const discovery = swarm.status?.(entry.topic);
+        return discovery ? discovery.refresh() : this._joinTopic(entry);
+      }).catch(() => this._networkEvent('channel rejoin failed', { channel: entry.name }))
+        .finally(() => { entry._refreshing = null; });
+    }
+    if (redialVenue) {
+      swarm.joinPeer(b4a.from(this.publicDelivery.venueKey, 'hex'));
+      swarm._attemptClientConnections?.();
+      this._networkEvent('redial venue');
+    }
+  }
+
+  // An opened mux is not proof of delivery. First reopen silent public sessions; if
+  // another heartbeat window passes, retire the stuck venue socket and redial it.
+  // Private trade state and its durable outbox remain with the role.
+  _repairSilentVenue() {
+    const swarm = this.peer?.swarm, now = this._now();
+    if (!this.started || !this.publicDelivery?.venueOnly || !swarm || swarm.destroyed || swarm.suspended) return;
+    if (now - (this._publicHeardAt ?? this._networkStartedAt ?? now) < CHANNEL_SILENCE_MS) {
+      if (this._silentVenueStage) this._networkEvent('venue traffic recovered');
+      this._silentVenueStage = 0; return;
+    }
+    if (now - (this._venueRepairedAt ?? -Infinity) < CHANNEL_SILENCE_MS) return;
+    const connections = [...(swarm.connections ?? [])].filter(c => !c.destroyed && this._getRemoteKey(c) === this.publicDelivery.venueKey);
+    if (!connections.length) return; // The zero-connection repair owns redialing.
+    this._venueRepairedAt = now;
+    const redial = this._silentVenueStage === 1;
+    this._silentVenueStage = 1;
+    this._networkEvent(redial ? 'redial silent venue' : 'reopen silent venue channels');
+    for (const connection of connections) {
+      if (redial) { connection.destroy(); continue; }
+      for (const name of this.publicChannels) {
+        const entry = this.channels.get(name), channels = this.connections.get(connection), record = channels?.get(name);
+        if (!entry) continue;
+        record?.channel.close();
+        if (channels?.get(name) === record) channels?.delete(name);
+        this._openChannelForConnection(connection, entry);
+      }
+    }
+    if (redial) {
+      swarm.joinPeer(b4a.from(this.publicDelivery.venueKey, 'hex'));
+      swarm._attemptClientConnections?.();
+    }
+  }
+
   async _start() {
     if (!this.peer?.swarm) {
       throw new Error('Sidechannel requires peer.swarm to be initialized.');
@@ -1536,10 +1616,11 @@ class Sidechannel extends Feature {
     // registrations announce through addChannel; this synchronous scan covers
     // entries created while the flush was pending.
     this.started = true;
-    if (this.publicDelivery?.venueOnly && !this._publicRepairTimer) {
+    this._networkStartedAt = this._now(); this._publicHeardAt = null; this._silentVenueStage = 0; this._venueRepairedAt = null;
+    if (!this._publicRepairTimer) {
       this._publicRepairTimer = setInterval(() => {
-        try { this._repairPublicChannels(); }
-        catch (error) { if (this.debug) console.log('public channel repair', error.message); }
+        try { this._repairPublicChannels(); this._repairDisconnectedChannels(); this._repairSilentVenue(); }
+        catch { this._networkEvent('channel repair failed'); }
       }, PUBLIC_REPAIR_MS);
       this._publicRepairTimer.unref?.();
     }
@@ -1576,7 +1657,10 @@ class Sidechannel extends Feature {
     // Nothing is on the swarm any more: drop announced state (a later start()
     // re-announces from scratch) and release pending waiters with a truthful
     // "not joined" instead of leaving them hanging.
-    for (const entry of this.channels.values()) this._markAnnounced(entry, false);
+    for (const entry of this.channels.values()) {
+      this._markAnnounced(entry, false);
+      entry.disconnectedAt = null; entry.repairedAt = null; entry.repairNoted = false;
+    }
   }
 }
 

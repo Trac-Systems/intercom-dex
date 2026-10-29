@@ -16,6 +16,7 @@ import { rpcCall, readAccount } from './rpc.js';
 import { readAccountQuorum, QuorumError } from './quorum.js';
 import { readRpcQuorum } from './read-quorum.js';
 import { ChainWatch } from './chain-watch.js';
+import { buyerPayment } from './buyer-payment.js';
 
 const QUORUM_ATTEMPTS = 4, QUORUM_RETRY_MS = 400;
 // A history search proves a withdrawal absent only while it still covers the signing time.
@@ -864,6 +865,7 @@ export function createSolanaAdapter({
   return {
     lockEscrow: input => guarded(`lock:${input?.hashHex}`, () => lockEscrow(input)),
     checkEscrow: input => inspectTrade(input),
+    buyerPayment: input => buyerPayment({ ...input, endpoints: urls, need, timeoutMs, programId: program }),
     // Read-only: null means a successful read found no settlement; pending means the read could not decide.
     settlementSignature: async ({ terms, hashHex }) => {
       const checked = await inspectTrade({ terms, hashHex, purpose: 'settlement' });

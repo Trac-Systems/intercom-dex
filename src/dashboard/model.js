@@ -189,6 +189,7 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
   const running = trades.filter(t => !isFinished(t)).sort((a, b) => a.state.now - b.state.now);
   const finished = trades.filter(t => isFinished(t)).sort((a, b) => b.state.now - a.state.now);
   const attention = [];
+  if (status.network?.reconnecting) attention.push({ kind: 'network', text: status.network.message });
   if (config.proof?.zkey && !existsSync(config.proof.zkey)) attention.push({ kind: 'key', text: 'The proving key file is missing. New trades cannot lock USDC until it is back at ' + config.proof.zkey + '.' });
   if (status.updateRequired) attention.push({ kind: 'update', text: 'This program needs an update before new trades can start.' });
   if (status.registryConflict) attention.push({ kind: 'paused', text: 'The venue published two different signer lists; new trades are paused.' });
@@ -222,7 +223,7 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
       volume24h: ticker ? amount(ticker.volume24h, 'USDC') : null, bestAsk: book.asks[0]?.price ?? null, bestBid: book.bids[0]?.price ?? null };
   });
   return {
-    signersOnline: status.signersOnline.length, software: status.software, registryVersion: status.registryVersion,
+    signersOnline: status.signersOnline.length, network: status.network ?? null, software: status.software, registryVersion: status.registryVersion,
     balances: wallet?.balances ? Object.fromEntries(['TNK', 'RESET', 'USDC', 'SOL'].map(a => [a, { total: amount(wallet.balances[a].balance, a), free: amount(wallet.balances[a].free, a) }])) : null,
     attention: attention.sort((a, b) => (b.at ?? Infinity) - (a.at ?? Infinity)),
     offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {

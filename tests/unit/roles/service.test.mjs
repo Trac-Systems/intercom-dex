@@ -1005,3 +1005,53 @@ test('a logged trade sends the tickers at once, at most every TICKER_SOON_SEC', 
   await s.report(s.trade()); await s.service.settlementQueue;
   assert.equal(waits.length, 2, 'a stopped venue schedules nothing');
 });
+
+test('venue sizes bids across pairs after all pending purchases, preserving the budget after restart', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  const maker = { dexKey: encodeKey(s.f.buyer.publicKey), tracAddr: s.trade().terms.buyer.tracAddr, solAddr: SOL };
+  const bids = ['TNK/USDC', 'RESET/USDC'].map((pair, i) => {
+    const o = { ...s.offer, maker, pair, side: 'buy', baseAmount: i ? '200000000' : '2000000000000000000', price: i ? '6' : '5' };
+    o.offerId = offerIdOf(o); return o;
+  });
+  const balances = async () => ({ USDC: '18000000', SOL: '100000000' });
+  s.service.funds.solana.walletBalances = balances;
+  for (const b of bids) await s.emit(OFFERS, s.envelope(s.f.buyer, 'offer', b, OFFERS));
+  // This buyer is also taking an unrelated ask. Its signed summon reserves 5.03 USDC even though that ask is absent.
+  await s.summon(s.trade());
+  s.service.funds.refresh(bids); await new Promise(r => setImmediate(r));
+  const tick = async () => { s.clock.t += 5; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+  await tick();
+  const size = b => s.bridge.sent.findLast(x => x.envelope.kind === 'book' && x.envelope.body.pair === b.pair).envelope.body.remaining.find(r => r.offerId === b.offerId)?.amount;
+  assert.equal(size(bids[1]), bids[1].baseAmount);
+  assert.ok(BigInt(size(bids[0])) < 200000000000000000n, 'after the RESET bid and pending ask, less than 0.2 TNK fits');
+  s.service.stop();
+  const again = setup({ dir: s.dir, f: s.f, clock: s.clock, immediate: true });
+  assert.equal(again.service.inFlight.size, 1);
+  assert.equal([...again.service.inFlight.values()][0].terms.buyer.solPayer, SOL);
+  // A wallet decrease must update the per-offer inventory immediately, not wait for the 60-second snapshot.
+  s.service.funds.wallets.set(`solana:${SOL}`, { at: s.clock.t, balances: { USDC: '7000000', SOL: '100000000' }, failures: 0 });
+  await tick(); assert.equal(size(bids[0]), undefined);
+  assert.ok(BigInt(size(bids[1])) < BigInt(bids[1].baseAmount));
+});
+
+test('quorum buyer pauses hide only bids, survive venue restart, and a signer clear restores them', async t => {
+  const { buyerPauseText } = await import('../../../src/market/buyer-pauses.js');
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return fn; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  const bid = { ...s.offer, side: 'buy' }; bid.offerId = offerIdOf(bid);
+  for (const o of [s.offer, bid]) await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', o, OFFERS));
+  const tick = async () => { s.clock.t += 5; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)); };
+  const shown = () => s.bridge.sent.findLast(x => x.envelope.kind === 'book' && x.envelope.body.pair === bid.pair).envelope.body.remaining;
+  await tick(); assert.equal(shown().length, 2);
+  const notice = async (i, until) => s.emit(SIGNERS, s.envelope(s.f.signers[i].identity, 'status', { software: '0.1.43', status: until ? 'degraded' : 'online', ts: s.clock.t,
+    message: buyerPauseText({ ...bid.maker, until }) }, SIGNERS));
+  for (const i of [0, 1]) await notice(i, s.clock.t + 1000);
+  await tick(); assert.equal(shown().length, 2, 'one or two signers are below k=3');
+  await notice(2, s.clock.t + 1000); await tick();
+  assert.deepEqual(shown().map(r => r.offerId), [s.offer.offerId]);
+  const again = setup({ dir: s.dir, f: s.f, clock: s.clock }); assert.ok(again.service.buyerPauses.refusal(bid.maker));
+  await notice(0, 0); await tick(); assert.equal(shown().length, 2);
+});

@@ -149,6 +149,12 @@ export class LocksClient {
     for (const ch of this.joined) await this.#need(this.transport, 'leave')(ch);
     this.joined.clear(); await this.#need(this.transport, 'leave')(LOCKS_CHANNEL);
   }
+  async restoreTransport(current) {
+    await Promise.all([LOCKS_CHANNEL, ...this.joined].map(async channel => {
+      if (!current()) return;
+      await this.#need(this.transport, 'join')(channel);
+    }));
+  }
   getSettings() { return clone(this.settings); }
   setSettings(input) {
     this.settings = validateSettings(input, this.settings); this.#event('settings'); return this.getSettings();

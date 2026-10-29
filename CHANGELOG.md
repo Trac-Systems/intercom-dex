@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.43
+
+- If the app stops hearing the network it now reconnects by itself instead of showing an empty market.
+- While reconnecting, the order book says “Not connected to the DEX network, reconnecting…”.
+  Running trades keep their saved progress; reconnecting does not send a second payment or lock.
+- Peers recover missing market connections and log which recovery step they take.
+- Buy orders show only what the buyer's wallet can pay, including fees, other bids and purchases already in progress.
+  A balance is shared across pairs, with higher prices first, then older orders. Orders below the smallest trade are hidden.
+  Unavailable balance reads keep the existing behavior.
+- When strike checking is enabled, buyers who accept two trades in seven days but never pay have their bids hidden
+  and new trades refused for seven days. The seller must have been ready; signer, venue and chain failures exempt the trade.
+  Later payment evidence cancels a strike. The same operator command can clear a buyer with `strikes clear --buyer`.
+- Updated traders explain buyer pauses in plain words. Existing 0.1.32+ traders can keep trading without an update;
+  an older app may show a timeout when a paused buyer is refused. No minimum-version change.
+
 ## 0.1.42
 
 - Offers and takes keep working while existing trades or withdrawal status update during a balance read.

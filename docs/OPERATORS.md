@@ -50,9 +50,9 @@ makers end these offers on their next announcement or restart and log the reason
 proofs cannot obtain new signer acknowledgements. Already committed signer shares remain available through the
 trade's normal claim/refund lifecycle, even after upgrade or proof expiry. Do not reset role storage during rollout.
 
-Seller strikes are **disabled by default**. The signer role setting `"strikes": { "enabled": false }` prevents both
+Seller and buyer strikes are **disabled by default**. The signer role setting `"strikes": { "enabled": false }` prevents both
 new strikes and refusals based on existing records. `GET /status` reports `strikes.enabled`; startup logs say
-`seller strikes disabled` or `seller strikes enabled`. Only a boolean is accepted. Keep strikes off until the
+`seller and buyer strikes disabled` or `seller and buyer strikes enabled`. Only a boolean is accepted. Keep strikes off until the
 infrastructure is reliable. See [signer strike settings and update guidance](STRIKE-PAUSE.md).
 
 When explicitly enabled, two confirmed no-send trades within seven days pause the proven seller Trac address for seven days from the second
@@ -67,16 +67,19 @@ to 30 seconds and a pending in-window read delays strike evaluation. The window 
 An existing signed seller abort identifying a read/gateway failure also exempts the trade, including late forwarded
 notices; generic send failures do not. Exemptions survive recovery and restart. Windows interrupted by a signer
 restart or observed with strikes disabled are not punished retrospectively. Settlement still requires verified payment.
+Buyer nonpayment has an independent ledger with the same seven-day policy and clear command. See
+[buyer evidence, infrastructure safeguards and legacy wording](STRIKE-PAUSE.md#buyer-nonpayment).
 The list is local to each signer and persists across restarts. Operators can inspect and clear it through the
 running signer's authenticated local control API:
 
 ```sh
 node bin/dex.mjs strikes list --config /path/to/signer.json
 node bin/dex.mjs strikes clear --seller <Trac-address> --identity <DEX-public-key> --config /path/to/signer.json
+node bin/dex.mjs strikes clear --buyer <Trac-address> --identity <DEX-public-key> --config /path/to/signer.json
 ```
 
 Clearing applies to the address across all its DEX identities; `--identity` remains an audit field. Repeat a clear on
-each signer that recorded the seller. Clearing also prevents those overdue trades from recreating their strikes.
+each signer that recorded that buyer or seller. Clearing also prevents those overdue trades from recreating their strikes.
 Retain the data folder on rollback. Older strike-capable code does not honor the disabled switch or exemptions;
 review its strike enforcement before rolling back to it. Already acknowledged trades keep their
 existing settlement and recovery paths.

@@ -11,7 +11,8 @@ import { fixture, hex, SIG } from '../core/helpers.mjs';
 import { seal } from '../../../src/core/envelope.js';
 import { generateIdentity, encodeKey } from '../../../src/core/keys.js';
 import { offerIdOf } from '../../../src/roles/common.js';
-import { HEARTBEAT_MS } from '../../../src/roles/signer.js';
+import { HEARTBEAT_MS, BUYER_PAUSES_PER_BEAT } from '../../../src/roles/signer.js';
+import { buyerPauseText } from '../../../src/market/buyer-pauses.js';
 
 test('500 offers, 20 signers and 200 refund-window trades stay under 32 KB/s, including repair traffic', async () => {
   const sim = simulation(), f = sim.f, now = 1780000000, transportKey = generateIdentity();
@@ -35,8 +36,9 @@ test('500 offers, 20 signers and 200 refund-window trades stay under 32 KB/s, in
   }
   assert.equal(b.snapshot('TNK/USDC', now).length, 500);
   const feed = new BookFeed(), full = feed.next('TNK/USDC', 1, b.snapshot('TNK/USDC', now), now, () => 1);
-  assert.equal(full.body.remaining.length, 200);
-  assert.deepEqual(full.body.remaining, b.snapshot('TNK/USDC', now).slice(0, 200).map(o => ({ offerId: o.offerId, amount: o.baseAmount })));
+  assert.equal(full.body.remaining.length, 199);
+  assert.deepEqual(full.body.remaining, [...b.snapshot('TNK/USDC', now).filter(o => o.side === 'sell').slice(0, 99),
+    ...b.snapshot('TNK/USDC', now).filter(o => o.side === 'buy').slice(0, 100)].map(o => ({ offerId: o.offerId, amount: o.baseAmount })));
   assert.equal(Object.hasOwn(full.body, 'offers'), false);
   const bookBytes = bytes(await payload('intercom-dex', full.kind, full.body, f.service));
   perSecond['intercom-dex'] += bookBytes / 60;
@@ -55,13 +57,18 @@ test('500 offers, 20 signers and 200 refund-window trades stay under 32 KB/s, in
   const repair = { ...perSecond };
   repair['intercom-dex:signers'] += 200 * bytes(await payload('intercom-dex:signers', 'shareRequest', { tradeId: sim.state('buyer').tradeId }, f.service)) / 600;
   for (const { name, action } of publications) repair['intercom-dex:signers'] += 200 * bytes(await payload('intercom-dex:signers', 'sharePublish', action.body, sim.nodes.get(name).identity)) / 600;
-  repair['intercom-dex'] += bytes(await payload('intercom-dex', 'bookDelta', { pair: full.body.pair, seq: 1, upserts: full.body.levels,
-    removes: full.body.levels.map(({ side, price }) => ({ side, price })) }, f.service)) / 5;
+  // Bid reallocations require complete per-offer inventory for legacy clients, even when a level total stays flat.
+  repair['intercom-dex'] += bookBytes / 5;
   const seller = sim.state('seller'), buyer = sim.state('buyer');
   const report = { offerId: f.offerId, tradeId: seller.tradeId, terms: seller.terms, hashHex: seller.H, txHash: seller.txHash, claimSignature: SIG };
   repair['intercom-dex:offers'] += 200 * bytes(await payload('intercom-dex:offers', 'settled', report)) / 60;
+  // Every signer also drains a full policy-announcement batch, using the largest admitted address text.
+  const pause = { status: 'degraded', software: '0.1.43', ts: now,
+    message: buyerPauseText({ tracAddr: 'a'.repeat(256), dexKey: encodeKey(f.buyer.publicKey), until: now + 7 * 86400 }) };
+  repair['intercom-dex:signers'] += 20 * BUYER_PAUSES_PER_BEAT * bytes(await payload('intercom-dex:signers', 'status', pause,
+    sim.nodes.get('signer1').identity)) / (HEARTBEAT_MS / 1000);
   const total = o => Object.values(o).reduce((a, b) => a + b, 0);
-  assert.ok(total(perSecond) < 32000); assert.ok(total(repair) < 32000);
+  assert.ok(total(perSecond) < 32000); assert.ok(total(repair) < 32000, `repair traffic ${total(repair)} bytes/s`);
 
   const work = {}, messages = [];
   const add = async (name, ch, kind, body) => messages.push({ name, payload: await payload(ch, kind, body, sim.nodes.get(name).identity) });

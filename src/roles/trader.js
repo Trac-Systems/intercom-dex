@@ -22,6 +22,7 @@ import { claimWarning } from '../core/claim-warning.js';
 import { addressProofRequired, validAddressProof } from '../core/address-proof.js';
 import { releasesOfferAmount } from '../core/offer-inventory.js';
 import { gatewayAvailability, requireResetGateway } from '../market/gateway-status.js';
+import { NetworkWatchdog, MARKET_CHANNELS } from '../net/network-watchdog.js';
 
 const OFFERS = 'intercom-dex:offers', MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
 export const SIGNER_ONLINE_SEC = 90;
@@ -54,7 +55,7 @@ const beforeLock = t => !isFinished(t) && !t.state.lockAttempted && !t.state.loc
 // A trader: posts and takes offers, then runs the buyer or seller side of each trade.
 // `me` = {dexKey, tracAddr, solAddr}; `solana`/`trac` are the chain adapters for this trader's own keys.
 export class Trader {
-  constructor({ bridge, identity, store, solana, trac, me, serviceKey, mint, platformCollector, profile = null, proof, log = console.log, locks = null }) {
+  constructor({ bridge, identity, store, solana, trac, me, serviceKey, mint, platformCollector, profile = null, proof, log = console.log, locks = null, validateBridge }) {
     if (typeof proof?.zkey !== 'string' || !isAbsolute(proof.zkey)) throw new Error('Traders require proof.zkey as an absolute path');
     Object.assign(this, { bridge, identity, store, me, serviceKey, mint: profile?.mint ?? mint, platformCollector: profile?.platformCollector ?? platformCollector, profile, log });
     this.certificates = new CertificatePool({ store, proof, log });
@@ -69,6 +70,9 @@ export class Trader {
       keepChannel: ch => this.mine?.has(ch.slice(tradeChannel('').length)) ?? false });
     this.registry = new RegistryView(serviceKey, store, log, profile);
     this.relays = new RegistryRelays(bridge);
+    this.network = new NetworkWatchdog({ bridge, log, validate: validateBridge,
+      hasSigners: () => this.registry.usable?.signers.some(s => s.status === 'active' && !this.registry.usable.removed.some(r => r.dexKey === s.dexKey)) ?? false,
+      restore: current => this.#restoreNetwork(current) });
     this.receive = publicReceiver();
     this.offers = new Map();     // offerId -> {offer, from, firstSeen, lastSeen}
     this.mine = new Map();       // own active offers: offerId -> offer (sizes come from the trades, see #inventory)
@@ -86,7 +90,7 @@ export class Trader {
     this.gatewayTimer = setInterval(refreshGateway, 10000);
     this.gatewayTimer.unref?.();
     await this.relays.update(this.registry.usable);
-    for (const ch of [MAIN, OFFERS, SIGNERS, CHAT_CHANNEL]) await this.bridge.join(ch);
+    for (const ch of MARKET_CHANNELS) await this.bridge.join(ch);
     this.host.hooks.unrouted.push((ch, m) => this.#public(ch, m));
     this.host.hooks.afterStep.push((trade, before) => this.#afterStep(trade, before));
     await this.host.start();
@@ -105,10 +109,23 @@ export class Trader {
     this.warmTimer.unref?.();
     // Locks never keep spot trading from starting.
     if (this.locks) await this.locks.start().catch(e => this.log('locks start', e.message));
+    this.network.start();
   }
 
-  stop() { this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer); clearInterval(this.gatewayTimer);
+  stop() { this.network.stop(); this.host.stop(); this.certificates.stop(); clearInterval(this.reannounce); clearInterval(this.reports); clearInterval(this.warmTimer); clearInterval(this.gatewayTimer);
     this.locks?.stop().catch(e => this.log('locks stop', e.message)); }
+
+  async #restoreNetwork(current) {
+    this.relays.applied = null;
+    await this.relays.update(this.registry.usable);
+    if (!current()) return;
+    await Promise.all([
+      this.host.restoreTransport(current),
+      ...[...this.mine.values()].filter(offer => offer.expiresAt > nowSec()).map(offer => this.bridge.join(tradeChannel(offer.offerId))),
+      this.locks?.restoreTransport(current),
+    ]);
+    this.warmSig = null; this.warmRetryAt = 0;
+  }
 
   addressProofPolicy() {
     return { networkId: this.profile?.peer?.msbNetworkId, now: nowSec(), required: addressProofRequired(this.registry.usable) };
@@ -228,6 +245,7 @@ export class Trader {
     const m = this.receive(raw);
     if (!m || m.ch !== channel) return;
     if (channel === MAIN && m.from === this.serviceKey) {
+      this.network.heard('market');
       if (m.kind === 'registry') {
         if (this.registry.offer(m)) this.log('registry', this.registry.current.version);
         await this.relays.update(this.registry.usable);
@@ -240,11 +258,13 @@ export class Trader {
     } else if (channel === SIGNERS && m.kind === 'heartbeat') {
       const reg = this.registry.usable;
       if (reg?.signers.some(s => s.dexKey === m.from && s.status === 'active') && !reg.removed.some(s => s.dexKey === m.from)) {
+        this.network.heard('heartbeat');
         if (m.body.status === 'online') this.heartbeats.set(m.from, { at: performance.now(), software: m.body.software, registryVersion: m.body.registryVersion });
         else this.heartbeats.delete(m.from);
       }
     } else if (channel === OFFERS && m.kind === 'offer' && validOffer(m.body, m.from, this.addressProofPolicy())) {
       try { this.#newPair(m.body.pair, m.body.registryVersion, m.body.software); } catch { return; }
+      if (m.from !== this.identity.publicKey) this.network.heard('market');
       const now = nowSec();
       this.pruneOffers(now);
       if (m.body.expiresAt > now) this.offers.set(m.body.offerId, {
@@ -595,7 +615,7 @@ export class Trader {
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '',
       pairs: pairStatus(this.registry.usable, health), serviceStatus: this.serviceStatus ?? null,
       me: this.me, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
-      signersOnline: this.onlineSigners(), certificatesReady: this.certificates.available().length,
+      signersOnline: this.onlineSigners(), network: this.network.status(), certificatesReady: this.certificates.available().length,
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
       offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, ...availability(o.pair), lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);

@@ -296,6 +296,7 @@ function pairBar(onPick) {
 
 export function tradingView() {
   let current = localStorage.getItem('pair'), shown = null, pairs = [], book = null, state = null, bookEpoch = 0, bookReadAt = null, bookPending = null;
+  let bookError = '';
   const places = new Map(), bookPlaces = new Map();
   const placesOf = name => places.get(name) ?? 2;
   const bar = pairBar(name => choose(name));
@@ -305,11 +306,18 @@ export function tradingView() {
   const bookWarning = h('p', { class: 'error', role: 'status', hidden: true });
   const el = h('div', { class: 'trading' }, bar.el, waiting, bookWarning, h('div', { class: 'market' }, chart.el, books.el, entry.el), bottom.el);
 
+  function showBookStatus() {
+    const message = state?.network?.reconnecting ? state.network.message : '';
+    bookWarning.textContent = message || bookError;
+    bookWarning.hidden = !bookWarning.textContent;
+    books.network(message);
+  }
+
   function choose(name) {
     if (name === shown) return;
     const first = !shown;
     current = shown = name; localStorage.setItem('pair', name);
-    book = null; bookReadAt = null; bookWarning.hidden = true; books.clear(); bookEpoch++;
+    book = null; bookReadAt = null; bookError = ''; showBookStatus(); books.clear(); bookEpoch++;
     chart.pair(name); bottom.pair(name);
     if (first) bottom.start();
     refreshBook();
@@ -323,7 +331,7 @@ export function tradingView() {
       const b = await marketRead(`/api/book?${q({ pair: name })}`);
       if (e !== bookEpoch) return;
       book = b;
-      bookReadAt = Date.now(); bookWarning.hidden = true;
+      bookReadAt = Date.now(); bookError = ''; showBookStatus();
       bookPlaces.set(name, precisionOf([...b.asks, ...b.bids].map(l => l.price)));
       const p = pricePlaces(pairs.find(x => x.pair === name));
       chart.precision(p);
@@ -331,9 +339,9 @@ export function tradingView() {
       entry.data(b, state?.balances ?? null);
     } catch (error) {
       if (e !== bookEpoch) return;
-      bookWarning.hidden = false;
-      bookWarning.textContent = `Order book could not refresh: ${error.message}. ` +
+      bookError = `Order book could not refresh: ${error.message}. ` +
         (bookReadAt === null ? 'No order book received yet.' : `Showing the book read at ${new Date(bookReadAt).toLocaleTimeString()}.`);
+      showBookStatus();
     } finally { if (bookPending === e) bookPending = null; }
   }
   // Price decimals per pair: what its book's prices carry, or its best prices and last price before the book is read.
@@ -344,6 +352,7 @@ export function tradingView() {
   }
   function update(t) {
     state = t;
+    showBookStatus();
     pairs = t.pairs;
     for (const p of pairs) pricePlaces(p);
     waiting.hidden = pairs.length > 0;

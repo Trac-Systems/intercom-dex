@@ -26,6 +26,10 @@ test('signer CLI lists and clears an exact pair over authenticated local control
   const clear = run('strikes', 'clear', '--seller', seller.tracAddr, '--identity', seller.dexKey);
   assert.equal(clear.status, 0, clear.stderr);
   assert.deepEqual(JSON.parse(clear.stdout), { route: '/seller-strikes/clear', method: 'POST', body: seller });
+  const buyerClear = run('strikes', 'clear', '--buyer', seller.tracAddr, '--identity', seller.dexKey);
+  assert.equal(buyerClear.status, 0, buyerClear.stderr);
+  assert.deepEqual(JSON.parse(buyerClear.stdout), { route: '/buyer-strikes/clear', method: 'POST', body: seller });
+  assert.notEqual(run('strikes', 'clear', '--buyer', seller.tracAddr, '--seller', seller.tracAddr, '--identity', seller.dexKey).status, 0);
   for (const args of [['strikes', 'clear'], ['strikes', 'clear', '--seller', seller.tracAddr],
     ['strikes', 'clear', '--seller', seller.tracAddr, '--identity', 'invalid'], ['strikes', 'list', '--seller', seller.tracAddr]]) {
     assert.notEqual(run(...args).status, 0);

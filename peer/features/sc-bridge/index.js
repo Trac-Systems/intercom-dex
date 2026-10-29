@@ -137,6 +137,13 @@ class ScBridge extends Feature {
     this._broadcastToClient(client, { type: 'error', error });
   }
 
+  _networkNote(event, client) {
+    if (!this.info?.role) return;
+    console.log(`[dex-network] ${JSON.stringify({ at: Date.now(), event, clients: this.clients.size,
+      subscribed: client.channels?.size || 'all',
+      publicHeardAgoMs: this.sidechannel?._publicHeardAt == null ? null : Date.now() - this.sidechannel._publicHeardAt })}`);
+  }
+
   _handleClientMessage(client, message) {
     if (!message || typeof message !== 'object') {
       this._sendError(client, 'Invalid message.');
@@ -160,6 +167,7 @@ class ScBridge extends Feature {
       if (message.token === this.token) {
         client.authed = true;
         client.ready = true;
+        this._networkNote('bridge authenticated', client);
         reply({ type: 'auth_ok' });
         return;
       }
@@ -227,6 +235,7 @@ class ScBridge extends Feature {
             : [];
         if (!client.channels) client.channels = new Set();
         for (const ch of channels) client.channels.add(String(ch));
+        this._networkNote('bridge subscribed', client);
         reply({ type: 'subscribed', channels: Array.from(client.channels) });
         return;
       }
@@ -568,7 +577,7 @@ class ScBridge extends Feature {
       this._broadcastToClient(client, hello);
 
       socket.on('data', (data) => this._handleSocketData(client, data));
-      const cleanup = () => this.clients.delete(client);
+      const cleanup = () => { if (this.clients.delete(client)) this._networkNote('bridge client closed', client); };
       socket.on('close', cleanup);
       socket.on('end', cleanup);
       socket.on('error', cleanup);

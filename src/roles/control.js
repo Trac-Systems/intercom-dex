@@ -7,6 +7,7 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
     ...(fees ? { 'POST /fee/set': b => fees.set(b), 'POST /fee/platform': b => fees.platform(b) } : {}),
     ...(role.listSellerStrikes ? { 'GET /seller-strikes': () => role.listSellerStrikes(),
       'POST /seller-strikes/clear': b => role.clearSellerStrikes(b) } : {}),
+    ...(role.clearBuyerStrikes ? { 'POST /buyer-strikes/clear': b => role.clearBuyerStrikes(b) } : {}),
     ...(role.readChat ? { 'GET /chat': (_, url) => {
       const values = url.searchParams.getAll('since');
       if ([...url.searchParams.keys()].some(key => key !== 'since') || values.length > 1 ||

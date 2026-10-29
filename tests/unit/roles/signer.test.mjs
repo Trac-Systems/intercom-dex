@@ -206,3 +206,89 @@ test('signer role defaults strikes off and reports the effective setting', async
   assert.deepEqual(enabled.status().strikes, { enabled: true });
   assert.throws(() => new Signer({ strikes: { enabled: 'true' } }));
 });
+
+test('buyer refusal blocks new signed summons before any ack, carries plain words, and the operator clear publishes a legacy status', async t => {
+  const timers = [];
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return fn; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { signer, f, summonTerms, sent, now } = await setup();
+  signer.buyerStrikes.enabled = true;
+  signer.profile = signer.host.profile = { mint: f.terms.mint, platformCollector: f.terms.fees.platformCollector, peer: { msbNetworkId: networkId } };
+  const terms = structuredClone(f.terms);
+  for (const role of ['seller', 'buyer']) terms[role] = proveParty(terms[role], { expiresAt: now + 2000 });
+  signer.buyerStrikes.record(terms.buyer, 'first', now - 2); signer.buyerStrikes.record(terms.buyer, 'second', now - 1);
+  await summonTerms(terms);
+  const trade = [...signer.host.trades.values()][0];
+  assert.equal(trade.state.phase, 'aborted');
+  assert.equal(trade.state.reason, 'Your bids are paused for 7 days: 2 trades were accepted but never paid');
+  assert.ok(sent.some(m => m.kind === 'refused' && m.body.reason === 'buyer-struck'));
+  assert.ok(!sent.some(m => m.kind === 'ack'));
+  // While the registry still allows legacy unproved terms, stripping a proof must not evade an existing proven pause.
+  const legacy = structuredClone(terms); legacy.offerId = hex();
+  delete legacy.buyer.tracProof; delete legacy.seller.tracProof;
+  await summonTerms(legacy);
+  assert.equal([...signer.host.trades.values()].at(-1).state.reason, trade.state.reason);
+  timers.find(x => x.ms === HEARTBEAT_MS).fn();
+  for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r));
+  const notice = sent.findLast(m => m.kind === 'status');
+  assert.match(notice.body.message, /^buyer-pause /);
+  assert.deepEqual(Object.keys(notice.body).sort(), ['message', 'software', 'status', 'ts']);
+  assert.equal(signer.listSellerStrikes().buyers.refusals.length, 1);
+  await signer.clearBuyerStrikes(terms.buyer);
+  assert.equal(JSON.parse(sent.findLast(m => m.kind === 'status').body.message.slice('buyer-pause '.length)).until, 0);
+  assert.equal(signer.buyerStrikes.refusal(terms.buyer, now), null);
+  const fresh = { ...terms, offerId: hex() };
+  await summonTerms(fresh);
+  assert.equal([...signer.host.trades.values()].at(-1).state.phase, 'awaitDeal', 'cleared buyer may start a new trade');
+});
+
+test('real signer admission observes a proven accepted no-deal buyer through healthy heartbeats and a finalized absence', async t => {
+  const timers = [], clock = { ms: Date.now() };
+  t.mock.method(Date, 'now', () => clock.ms);
+  t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return fn; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { signer, f, now } = await setup(); t.after(() => signer.stop());
+  signer.host.stopped = false; signer.buyerStrikes.enabled = true;
+  signer.profile = signer.host.profile = { mint: f.terms.mint, platformCollector: f.terms.fees.platformCollector, peer: { msbNetworkId: networkId } };
+  signer.host.buyerObserver.trac = { balances: async () => ({ TNK: '100000000000000000000', feeTnk: '3' }) };
+  let scans = 0;
+  signer.host.buyerObserver.solana = { walletBalances: async () => ({ SOL: '10000000', USDC: '0' }),
+    chainTime: async () => Math.floor(clock.ms / 1000), buyerPayment: async () => { scans++; return { ok: true, seen: false, chainTime: Math.floor(clock.ms / 1000) }; } };
+  const terms = structuredClone(f.terms);
+  for (const role of ['seller', 'buyer']) terms[role] = proveParty(terms[role], { expiresAt: now + 2000 });
+  const message = (identity, kind, body, ch) => seal({ kind, body, ch }, identity.secretKey, { ts: Math.floor(clock.ms / 1000), nonce: hex() });
+  const receive = (ch, m) => signer.host.hooks.unrouted[0](ch, m);
+  const health = async () => {
+    await receive('intercom-dex', message(f.service, 'status', { status: 'online', software: '0.1.43', ts: Math.floor(clock.ms / 1000), message: '' }, 'intercom-dex'));
+    for (const member of f.signers) await receive('intercom-dex:signers', message(member.identity, 'heartbeat', { status: 'online', software: '0.1.43', registryVersion: 1, holdCount: 0 }, 'intercom-dex:signers'));
+    await timers.find(x => x.ms === HEARTBEAT_MS).fn();
+  };
+  await health();
+  const id = tradeId(terms), ch = 'intercom-dex:t:' + id;
+  await receive('intercom-dex:signers', message(f.buyer, 'summon', { tradeId: id, terms,
+    sigs: [f.buyer, f.seller].map(identity => message(identity, 'termsSig', { tradeId: id }, ch)) }, 'intercom-dex:signers'));
+  const record = [...signer.host.trades.values()][0];
+  assert.equal(record.state.phase, 'awaitDeal');
+  for (let at = now; at <= terms.sendBy + terms.graceSec + 15; at += 15) {
+    clock.ms = at * 1000; await health();
+    timers.find(x => x.ms === 1000).fn();
+    for (let i = 0; i < 8; i++) { await new Promise(r => setImmediate(r)); await record.queue; }
+  }
+  assert.ok(scans > 0);
+  assert.deepEqual(signer.buyerStrikes.list(Math.floor(clock.ms / 1000)).strikes.map(s => s.tradeId), [id]);
+  assert.equal(record.buyerStrikeExemption, undefined);
+});
+
+test('a stalled buyer pause announcement never holds back signer heartbeats', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return fn; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { signer, f, now, sent } = await setup();
+  signer.buyerStrikes.enabled = true;
+  signer.buyerStrikes.record(f.terms.buyer, 'first', now - 2); signer.buyerStrikes.record(f.terms.buyer, 'second', now - 1);
+  const send = signer.bridge.send; let release;
+  signer.bridge.send = (ch, m) => m.kind === 'status' ? new Promise(resolve => { release = resolve; }) : send(ch, m);
+  const beat = timers.find(x => x.ms === HEARTBEAT_MS).fn;
+  await beat(); await beat();
+  assert.equal(sent.filter(m => m.kind === 'heartbeat').length, 2);
+  assert.ok(release); release(); await signer.publishingBuyerPauses;
+});

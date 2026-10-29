@@ -10,6 +10,18 @@ async function posted(f) {
   for (let i = 0; i < 3; i++) await f.receive(p, 'posted', i);
   return p;
 }
+
+test('bridge recovery rejoins live locks channels without repeating operations or subscribing twice', async () => {
+  const f = fixture(), row = await f.client.post({ product: 'loan', terms: terms('loan') });
+  const channel = lockChannel(row.positionId), positions = f.client.positions, queue = f.client.queue;
+  const sent = f.sent.length, calls = f.calls.length;
+  f.joins.length = 0;
+  await f.client.restoreTransport(() => true);
+  assert.deepEqual(f.joins, ['intercom-locks', channel]);
+  assert.equal(f.sent.length, sent); assert.equal(f.calls.length, calls);
+  assert.equal(f.client.positions, positions); assert.equal(f.client.queue, queue);
+  f.joins.length = 0; await f.client.restoreTransport(() => false); assert.deepEqual(f.joins, []);
+});
 function taking(f) {
   const maker = identity(), p = position('loan', party(maker), f.reg);
   p.opened = false; p.state = 'posted'; delete p.dueBlock; delete p.taker;

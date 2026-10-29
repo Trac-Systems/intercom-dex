@@ -47,7 +47,7 @@ const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   'authority-keypair': { type: 'string' }, yes: { type: 'boolean' }, from: { type: 'string' }, mint: { type: 'string' },
   'first-launch': { type: 'boolean' },
   'peer-config': { type: 'string' }, force: { type: 'boolean' },
-  seller: { type: 'string' }, identity: { type: 'string' },
+  seller: { type: 'string' }, buyer: { type: 'string' }, identity: { type: 'string' },
 } });
 if (!isAbsolute(values.config ?? '')) throw new Error('--config must be an absolute path');
 const command = ['fee', 'keys', 'strikes'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
@@ -55,7 +55,7 @@ const allowed = { run: ['first-launch'], setup: ['import-solana', 'import-trac-m
   start: ['peer-config'], stop: ['force'], status: [], logs: [],
   restore: ['from'], 'keys check': ['authority-keypair'], 'fee withdraw-platform': ['authority-keypair', 'to', 'mint', 'amount'],
   'fee set': ['trade-fee', 'signer-share'], 'fee platform': ['bps', 'authority-keypair', 'yes'],
-  'strikes list': [], 'strikes clear': ['seller', 'identity'] };
+  'strikes list': [], 'strikes clear': ['seller', 'buyer', 'identity'] };
 if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, strikes list, strikes clear, or no command');
 if (Object.keys(values).some(k => k !== 'config' && !allowed[command].includes(k))) throw new Error('Option does not apply to this command');
 if (['start', 'stop', 'status', 'logs'].includes(command)) {
@@ -86,8 +86,9 @@ if (values['first-launch'] && config.role !== 'service') throw new Error('--firs
 if (command.startsWith('strikes ')) {
   if (config.role !== 'signer') throw new Error('Strike commands are signer only');
   const clear = command === 'strikes clear';
-  const body = clear ? validateSeller({ tracAddr: values.seller, dexKey: values.identity }) : undefined;
-  console.log(JSON.stringify(await controlCall(config, clear ? 'POST' : 'GET', clear ? '/seller-strikes/clear' : '/seller-strikes', body), null, 2));
+  if (values.seller && values.buyer) throw new Error('Choose one buyer or seller');
+  const body = clear ? validateSeller({ tracAddr: values.buyer ?? values.seller, dexKey: values.identity }) : undefined;
+  console.log(JSON.stringify(await controlCall(config, clear ? 'POST' : 'GET', clear ? values.buyer ? '/buyer-strikes/clear' : '/seller-strikes/clear' : '/seller-strikes', body), null, 2));
   process.exit(0);
 }
 if (['fee set', 'fee platform'].includes(command)) {
@@ -242,6 +243,12 @@ if (locksRole) {
     const me = { dexKey: identity.publicKey, tracAddr: wallet.address, solAddr: keypair.publicKey.toBase58() };
     role = new Trader({ bridge, identity, store, solana, trac, me, profile, serviceKey: config.serviceKey, mint: profile.mint,
       platformCollector: profile.platformCollector, proof: config.proof, log,
+      validateBridge: async () => {
+        const info = (await bridge.info()).info;
+        checkPeerProfile(info, profile);
+        if (info.peerPubkey !== peerInfo.peerPubkey || info.role !== config.role || info.servicePeerKey !== config.servicePeerKey)
+          throw new Error('Reconnected peer identity does not match');
+      },
       locks: createTraderLocks({ config, bridge, store, keypair, wallet, profile, rpc, wallets: () => wallets }) });
   } else throw new Error('role must be service, signer or trader');
   wallets = config.role === 'signer' ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
@@ -295,7 +302,7 @@ if (locksRole) {
     ...(role.box ? { boxKey: role.box.publicKey } : {}), ...(config.role === 'trader' ? { me: role.me } : {}) }));
   if (process.env.DEX_LIFECYCLE_ID && process.connected) process.send({ type: 'role-ready', dashboard: dashboardUrl });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => stop(0));
-  // Without its peer the role can neither hear nor speak; exit so the supervisor restarts it (state is on disk).
-  bridge.on('close', () => { log('bridge closed, exiting'); stop(75); });
+  // Traders restore their transport in place; other roles retain supervisor recovery.
+  if (config.role !== 'trader') bridge.on('close', () => { log('bridge closed, exiting'); stop(75); });
 
 }

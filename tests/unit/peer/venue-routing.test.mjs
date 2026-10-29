@@ -96,16 +96,16 @@ test('a listening trader repairs closed venue protocols and hears makers and boo
   await Promise.all([venue.sc.connections.get(venueLeaf).get(offers).channel.fullyOpened(), leaf.sc.connections.get(leafVenue).get(offers).channel.fullyOpened()]);
   leaf.sc.connections.get(leafVenue).get(offers).channel.close(); await turn();
   assert.equal(leaf.sc.connections.get(leafVenue).has(offers), false);
-  assert.equal(callbacks.length, 1);
-  callbacks[0](); await turn(); await turn();
+  assert.equal(callbacks.length, 2, 'venue discovery and leaf sessions both have recovery timers');
+  callbacks[1](); await turn(); await turn();
   const record = leaf.sc.connections.get(leafVenue).get(offers);
   assert.ok(record); assert.equal(await record.channel.fullyOpened(), true);
   for (const kind of ['offer', 'bookDelta', 'tradeLog']) await venue.sc.broadcast(offers, { kind });
   await turn(); await turn();
   assert.deepEqual(leaf.received.map(m => m.message.kind), ['offer', 'bookDelta', 'tradeLog']);
   const before = leaf.sc.connections.get(leafVenue).get(offers);
-  callbacks[0](); assert.equal(leaf.sc.connections.get(leafVenue).get(offers), before, 'healthy sessions stay open');
-  await leaf.sc.stop(); callbacks[0](); assert.equal(leaf.sc.connections.size, 0);
+  callbacks[1](); assert.equal(leaf.sc.connections.get(leafVenue).get(offers), before, 'healthy sessions stay open');
+  await leaf.sc.stop(); callbacks[1](); assert.equal(leaf.sc.connections.size, 0);
 });
 
 test('public repair replaces a stuck opening session after its deadline, and ignores untrusted peers', async () => {

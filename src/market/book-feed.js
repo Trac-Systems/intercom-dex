@@ -23,11 +23,21 @@ export function priceLevels(offers) {
 export class BookFeed {
   constructor() { this.pairs = new Map(); }
   next(pair, registryVersion, offers, now, nextSeq) {
+    // Keep bid books below the legacy 200-row truncation marker. Otherwise an unlisted bid can fall back to its
+    // maker's full amount or a shared price level. Give each side room, then use any spare room on the other side.
+    if (offers.some(o => o.side === 'buy') && offers.length >= 200) {
+      const asks = offers.filter(o => o.side === 'sell'), bids = offers.filter(o => o.side === 'buy');
+      const askCount = Math.min(asks.length, Math.max(99, 199 - bids.length));
+      offers = [...asks.slice(0, askCount), ...bids.slice(0, 199 - askCount)];
+    }
     const levels = priceLevels(offers), current = JSON.stringify(levels), prev = this.pairs.get(pair);
-    if (!prev || prev.registryVersion !== registryVersion || now - prev.at >= 60) {
+    const remaining = offers.slice(0, 200).map(o => ({ offerId: o.offerId, amount: o.baseAmount }));
+    // Legacy deltas only cap whole price levels. A changed bid allocation needs per-offer sizes immediately, even
+    // if another bid at the same price grows by the same amount. Full books already carry these sizes on 0.1.32+.
+    const bids = JSON.stringify(offers.filter(o => o.side === 'buy').map(o => [o.offerId, o.baseAmount]));
+    if (!prev || prev.registryVersion !== registryVersion || now - prev.at >= 60 || prev.bids !== bids) {
       const seq = nextSeq();
-      this.pairs.set(pair, { seq, registryVersion, at: now, levels, current });
-      const remaining = offers.slice(0, 200).map(o => ({ offerId: o.offerId, amount: o.baseAmount }));
+      this.pairs.set(pair, { seq, registryVersion, at: now, levels, current, bids });
       return { kind: 'book', body: { pair, registryVersion, seq, ts: now, levels, remaining } };
     }
     if (prev.current === current) return null;

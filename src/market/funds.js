@@ -1,11 +1,11 @@
-import { quoteAmount } from './assets.js';
+import { quoteAmount, priceUnits } from './assets.js';
 import { MIN_SOL } from '../wallets/accounting.js';
 import { validAddressProof } from '../core/address-proof.js';
 
 // Maker funds: the venue reads each maker's wallet and leaves an offer out of its published book while the maker cannot
-// fill even the pair's smallest trade (a seller without the base asset or the TNK transfer fee, a buyer without the
-// USDC or the SOL for the escrow lock). The offer stays in the book and returns once the funds are there. A wallet
-// that could not be read never hides an offer.
+// fill even the pair's smallest trade. Bids share one wallet budget across pairs, after pending purchases, including
+// USDC fees and one MIN_SOL reserve per lock. Unknown/malformed balances preserve the unsized offer; repeated isolated
+// read failures retain the existing #failing policy. A chain-wide outage never hides or sizes offers from failed reads.
 export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4, FAILED_READS = 3;
 
 export class MakerFunds {
@@ -20,6 +20,59 @@ export class MakerFunds {
   funded(offer, pair) {
     if (!this.#proven(offer)) return false;
     try { return this.#funded(offer, pair); } catch { return true; }
+  }
+
+  // Entries carry the offer's original fee terms and venue first-seen time. Allocate globally before publishing any
+  // pair: highest price, then oldest, then id. All integer floors match the quote and escrow fee formulas.
+  allocate(entries, pending = new Map(), purchases = []) {
+    const budgets = new Map(), sizes = new Map();
+    const cost = (quote, fees = {}) => quote + quote * BigInt(fees.platformFeeBps ?? 0) / 10000n +
+      quote * BigInt(fees.tradeFeeBps ?? 0) / 10000n;
+    const ordered = [...entries].sort((a, b) => {
+      const d = priceUnits(b.offer.price) - priceUnits(a.offer.price);
+      return (d > 0n ? 1 : d < 0n ? -1 : 0) || a.firstSeen - b.firstSeen || a.offer.offerId.localeCompare(b.offer.offerId);
+    });
+    for (const { offer: o, pair, fees } of ordered) {
+      let free = BigInt(o.baseAmount) - (pending.get(o.offerId) ?? 0n);
+      if (!this.funded(o, pair) || free < BigInt(pair.minBaseAmount)) { sizes.set(o.offerId, '0'); continue; }
+      if (o.side === 'buy') {
+        const address = o.maker.solAddr;
+        if (!budgets.has(address)) {
+          let budget = null;
+          try {
+            const b = this.balances(o);
+            if (b && [b.USDC, b.SOL].every(v => typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v))) {
+              budget = { usdc: BigInt(b.USDC), sol: BigInt(b.SOL) };
+              for (const t of purchases) if (t.buyer.solPayer === address) {
+                // A logged trade may have spent a balance cached before settlement. Keep that debit until a newer
+                // wallet read observes it; otherwise logging a fill briefly creates spendable money again.
+                const read = this.wallets.get(`solana:${address}`);
+                if (t.settledAt != null && t.settledAt < (read.readAt ?? read.at)) continue;
+                budget.usdc -= cost(BigInt(t.quoteAmount), t.fees);
+                budget.sol -= BigInt(MIN_SOL);
+              }
+            }
+          } catch { budget = null; }
+          budgets.set(address, budget);
+        }
+        const budget = budgets.get(address);
+        if (budget) {
+          const quote = amount => amount * priceUnits(o.price) * 1000000n / 10n ** BigInt(pair.base.decimals + 12);
+          let lo = 0n, hi = free;
+          if (budget.sol < BigInt(MIN_SOL)) hi = 0n;
+          while (lo < hi) {
+            const mid = (lo + hi + 1n) / 2n;
+            if (cost(quote(mid), fees) <= budget.usdc) lo = mid; else hi = mid - 1n;
+          }
+          free = lo;
+          if (free >= BigInt(pair.minBaseAmount) && quote(free) > 0n) {
+            budget.usdc -= cost(quote(free), fees); budget.sol -= BigInt(MIN_SOL);
+          } else free = 0n;
+        }
+      }
+      sizes.set(o.offerId, free.toString());
+    }
+    return sizes;
   }
 
   #proven(offer) {
@@ -74,14 +127,16 @@ export class MakerFunds {
 
   #cached(chain, address) {
     const w = this.wallets.get(`${chain}:${address}`);
-    return w && this.now() - w.at < 2 * this.ttlSec ? w.balances : null;
+    // A slow successful response does not make the snapshot newer than the request that obtained it.
+    return w && this.now() - (w.readAt ?? w.at) < 2 * this.ttlSec ? w.balances : null;
   }
 
   async #read({ key, chain, address }) {
     this.reading.add(key);
+    const readAt = this.now();
     try {
       const balances = chain === 'trac' ? await this.trac.balances(address) : await this.solana.walletBalances(address);
-      this.wallets.set(key, { balances, at: this.now(), failures: 0 });
+      this.wallets.set(key, { balances, at: this.now(), readAt, failures: 0 });
       this.lastGood.set(chain, this.now());
     } catch (e) {
       this.wallets.set(key, { balances: null, at: this.now(), failures: (this.wallets.get(key)?.failures ?? 0) + 1 });
