@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { SellerStrikes, STRIKE_WINDOW_SEC as WEEK, strikeCandidate } from '../../../src/roles/signer-strikes.js';
+import { SellerStrikes, STRIKE_WINDOW_SEC as WEEK, strikeCandidate, strikeSettings, STRIKE_READ_TIMEOUT_MS } from '../../../src/roles/signer-strikes.js';
 import { openStore } from '../../../src/roles/store.js';
 import { TradeHost, tradeChannel } from '../../../src/roles/host.js';
 import { rescueTrade } from '../../../src/core/trade-signer.js';
@@ -30,7 +30,7 @@ function record(key = hex(), phase = 'holding') {
 const deadline = r => r.state.terms.sendBy + r.state.terms.graceSec;
 
 test('one strike permits, two refuse the proven address across DEX identities; no extension during refusal', () => {
-  const b = new SellerStrikes({ store: memory() });
+  const b = new SellerStrikes({ enabled: true, store: memory() });
   b.record(seller, 'a', 100);
   assert.equal(b.refusal(seller, 100), null);
   b.record(seller, 'b', 200);
@@ -45,7 +45,7 @@ test('one strike permits, two refuse the proven address across DEX identities; n
 });
 
 test('strikes expire exactly at seven days; refusal lasts seven days from the second strike', () => {
-  const b = new SellerStrikes({ store: memory() });
+  const b = new SellerStrikes({ enabled: true, store: memory() });
   b.record(seller, 'a', 100); b.record(seller, 'b', 200);
   assert.equal(b.list(100 + WEEK).strikes.length, 1);
   assert.ok(b.refusal(seller, 100 + WEEK));
@@ -58,20 +58,20 @@ test('strikes expire exactly at seven days; refusal lasts seven days from the se
 test('restart uses the encrypted durable ledger; clear and late evidence remove dependent refusals', t => {
   const dir = mkdtempSync(join(tmpdir(), 'seller-strikes-')), key = randomBytes(32);
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const first = new SellerStrikes({ store: openStore(dir, key) });
+  const first = new SellerStrikes({ enabled: true, store: openStore(dir, key) });
   first.record(seller, 'a', 100); first.record(seller, 'b', 200);
-  const logs = [], second = new SellerStrikes({ store: openStore(dir, key), log: line => logs.push(line) });
+  const logs = [], second = new SellerStrikes({ enabled: true, store: openStore(dir, key), log: line => logs.push(line) });
   assert.equal(second.refusal(seller, 201).until, 200 + WEEK);
   second.forget('a', 202); assert.equal(second.refusal(seller, 202), null);
   assert.deepEqual(second.list(202).strikes.map(s => s.tradeId), ['b']);
   second.record(seller, 'c', 203);
   assert.deepEqual(second.clear(seller, 204), { cleared: true, strikes: 2, refusals: 1 });
-  assert.deepEqual(new SellerStrikes({ store: openStore(dir, key) }).list(204), { strikes: [], refusals: [] });
+  assert.deepEqual(new SellerStrikes({ enabled: true, store: openStore(dir, key) }).list(204), { strikes: [], refusals: [] });
   assert.ok(logs.some(l => l.startsWith('seller strike clear seller=')));
 });
 
 test('caps evict oldest strikes and refusals; clearing one address leaves other addresses intact', () => {
-  const disk = memory(), b = new SellerStrikes({ store: disk, cap: 2 });
+  const disk = memory(), b = new SellerStrikes({ enabled: true, store: disk, cap: 2 });
   const others = [seller, { ...seller, tracAddr: 'second-address' }, { ...seller, tracAddr: 'another' }];
   others.forEach((s, i) => { b.record(s, `a${i}`, 100 + i * 2); b.record(s, `b${i}`, 101 + i * 2); });
   assert.deepEqual(b.list(110).strikes.map(s => s.tradeId), ['a2', 'b2']);
@@ -79,7 +79,7 @@ test('caps evict oldest strikes and refusals; clearing one address leaves other 
   assert.equal(b.refusal(seller, 110), null);
   b.clear(others[1], 111);
   assert.ok(b.refusal(others[2], 111));
-  const clock = new SellerStrikes({ store: memory(), cap: 2 });
+  const clock = new SellerStrikes({ enabled: true, store: memory(), cap: 2 });
   clock.record(seller, 'newer', 200); clock.record(seller, 'oldest', 100); clock.record(seller, 'newest', 300);
   assert.deepEqual(clock.list(300).strikes.map(s => s.tradeId), ['newer', 'newest']);
 });
@@ -97,18 +97,20 @@ test('each local evidence condition is necessary, including attempts never accep
   }
 });
 
-async function fixture(t, { disk = memory(), check, send, now = 101 } = {}) {
+async function fixture(t, { disk = memory(), check, send, now = 101, enabled = true, trac = {} } = {}) {
   const bridge = new EventEmitter(), sent = [], logs = [], clock = { now }, timers = [];
   t.mock.method(globalThis, 'setInterval', fn => { timers.push(fn); return fn; });
   t.mock.method(globalThis, 'clearInterval', () => {});
   bridge.join = bridge.leave = async () => {};
   bridge.send = send ?? (async (_ch, m) => { sent.push(m); });
-  const strikes = new SellerStrikes({ store: disk, log: l => logs.push(l) });
+  const strikes = new SellerStrikes({ enabled, store: disk, log: l => logs.push(l) });
   const identity = sim.nodes.get('signer1').identity;
   const host = new TradeHost({ bridge, store: disk, identity: { publicKey: encodeKey(identity.publicKey), secretKey: identity.secretKey },
     profile: { peer: { msbNetworkId: networkId }, mint: sim.f.terms.mint, platformCollector: sim.f.terms.fees.platformCollector },
     now: () => clock.now, signerStrikes: strikes, signerSolana: { checkEscrow: check ?? (async ({ hashHex, purpose }) => ({ ok: true, hashHex, purpose, status: 'active' })) },
-    trac: { balances: async () => ({ TNK: '1000000000000000000', feeTnk: '3' }), reserveTx: async ({ tradeId }) => ({ ok: true, reservedFor: tradeId }) },
+    trac: { balances: async () => ({ TNK: '1000000000000000000', RESET: '1000000000000000000', feeTnk: '3' }),
+      gatewayHealth: async () => ({ ok: true, eligible: 3 }), recentTransferCandidates: async () => [],
+      reserveTx: async ({ tradeId }) => ({ ok: true, reservedFor: tradeId }), ...trac },
     log: (...a) => logs.push(a.join(' ')) });
   await host.start(); t.after(() => host.stop());
   return { bridge, sent, logs, strikes, host, clock, disk, tick: async () => { timers[0](); await flush(host); } };
@@ -213,9 +215,9 @@ test('RPC race with transfer evidence or operator clear cannot produce a strike'
   }
 });
 
-test('restart records overdue acked trades once, preserves clear, and reconciles interrupted evidence cancellation', async t => {
-  const disk = memory(), r = record('restart', 'expired'); disk.put('trade-restart', r);
-  const first = await fixture(t, { disk, now: deadline(r) }); await first.tick(); first.host.stop();
+test('restart preserves recorded strikes and clear, and reconciles interrupted evidence cancellation', async t => {
+  const disk = memory(), r = record('restart', 'expired');
+  const first = await fixture(t, { disk, now: deadline(r) }); await first.host.addTrade(r); await first.tick(); first.host.stop();
   const second = await fixture(t, { disk, now: deadline(r) + 1 }); await second.tick();
   assert.equal(second.strikes.list(second.clock.now).strikes.length, 1);
   second.host.clearSellerStrikes(seller); await second.tick(); second.host.stop();
@@ -255,4 +257,194 @@ test('late final transfer accepted by rescue publishes the share without a strik
   await f.host.addTrade(r); await f.host.deliver(r.key, { type: 'resume' }); await flush(f.host); await f.tick();
   assert.equal(f.host.trades.get(r.key).state.phase, 'published');
   assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+});
+
+test('strike configuration is strictly boolean and defaults off; old records remain inspectable', () => {
+  assert.deepEqual(strikeSettings(), { enabled: false });
+  assert.deepEqual(strikeSettings({}), { enabled: false });
+  for (const enabled of [true, false]) assert.deepEqual(strikeSettings({ enabled }), { enabled });
+  for (const input of [null, false, [], 'true', { enabled: 'false' }, { enabled: 0 }, { enabled: null }, { enable: true }]) {
+    assert.throws(() => strikeSettings(input));
+  }
+  const store = memory(), prior = new SellerStrikes({ store, enabled: true });
+  prior.record(seller, 'a', 100); prior.record(seller, 'b', 101);
+  const paused = new SellerStrikes({ store });
+  assert.equal(paused.refusal(seller, 102), null);
+  assert.equal(paused.record(seller, 'c', 102), false);
+  assert.deepEqual(paused.list(102), prior.list(102));
+});
+
+test('disabled host neither records nor refuses existing records, and does not probe infrastructure', async t => {
+  const disk = memory(), prior = new SellerStrikes({ store: disk, enabled: true });
+  prior.record(seller, 'old-a', 100); prior.record(seller, 'old-b', 101);
+  const r = record('disabled'), f = await fixture(t, { disk, enabled: false, now: deadline(r),
+    check: () => assert.fail('disabled strikes must not read escrow'),
+    trac: { gatewayHealth: () => assert.fail('disabled strikes must not poll gateway') } });
+  await f.host.addTrade(r); await f.tick();
+  const next = record('admit', 'checkingSellerFunds'); delete next.signerAckedAt;
+  next.state.terms.sendBy += 5000; next.state.sellerFundsDeadline = f.clock.now + 100;
+  await f.host.addTrade(next); await f.host.deliver(next.key, { type: 'resume' }); await flush(f.host);
+  assert.equal(f.host.trades.get(next.key).state.phase, 'holding');
+  assert.ok(f.sent.some(m => m.kind === 'ack' && m.body.tradeId === next.state.tradeId));
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes.map(s => s.tradeId), ['old-a', 'old-b']);
+  assert.ok(!f.logs.some(l => l.startsWith('seller struck ')));
+  assert.equal(f.disk.get('trade-disabled').sellerStrikeExemption.reason, 'strikes-disabled');
+});
+
+test('a failed pre-ack seller balance read remains exempt after recovery and acknowledgement', async t => {
+  let healthy = false;
+  const r = record('pre-ack', 'checkingSellerFunds'); delete r.signerAckedAt;
+  const f = await fixture(t, { trac: { balances: async () => {
+    if (!healthy) throw Error('RESET balance unavailable: read timed out');
+    return { TNK: '1000000000000000000', RESET: '1000000000000000000', feeTnk: '3' };
+  } } });
+  await f.host.addTrade(r); await f.host.deliver(r.key, { type: 'resume' }); await flush(f.host);
+  healthy = true; f.clock.now += 10; await f.tick();
+  assert.equal(f.host.trades.get(r.key).state.phase, 'holding');
+  assert.ok(f.sent.some(m => m.kind === 'ack'));
+  assert.equal(f.disk.get('trade-pre-ack').sellerStrikeExemption.reason, 'seller-read-failed');
+  f.clock.now = deadline(r); await f.tick();
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+});
+
+for (const asset of ['TNK', 'RESET']) test(`${asset}: a post-ack balance failure exempts only that trade, even after recovery`, async t => {
+  const r = record('outage'), f = await fixture(t);
+  if (asset === 'RESET') { r.state.terms.base = { kind: 'RESET', id: 'RESET', decimals: 8 }; r.state.terms.pair = 'RESET/USDC'; }
+  await f.host.addTrade(r); await f.tick();
+  const balances = f.host.trac.balances;
+  f.host.trac.balances = async () => { throw Error('read unavailable'); };
+  f.clock.now += 15; await f.tick();
+  assert.equal(f.disk.get('trade-outage').sellerStrikeExemption.reason, 'seller-read-failed');
+  f.host.trac.balances = balances;
+  const healthy = record('healthy'); await f.host.addTrade(healthy); await f.tick();
+  f.clock.now = deadline(r); await f.tick();
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes.map(s => s.tradeId), [healthy.state.tradeId]);
+});
+
+test('a read begun inside the window cannot race a strike when its failure arrives after the deadline', async t => {
+  let reject;
+  const r = record('pending'), f = await fixture(t, { now: deadline(r) - 1,
+    trac: { balances: () => new Promise((_, no) => { reject = no; }) } });
+  await f.host.addTrade(r); await f.tick();
+  f.clock.now = deadline(r); await f.tick();
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+  reject(Error('read timed out')); await flush(f.host); await f.tick();
+  assert.equal(f.disk.get('trade-pending').sellerStrikeExemption.reason, 'seller-read-failed');
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+});
+
+test('a hung own-node read is bounded and exempts the trade instead of hanging strike evaluation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = record('timeout'), f = await fixture(t, { now: deadline(r) - 1,
+    trac: { balances: () => new Promise(() => {}) } });
+  await f.host.addTrade(r); await f.tick();
+  f.clock.now = deadline(r); await f.tick();
+  t.mock.timers.tick(STRIKE_READ_TIMEOUT_MS); await flush(f.host); await f.tick();
+  assert.equal(f.disk.get('trade-timeout').sellerStrikeExemption.reason, 'seller-read-failed');
+  assert.equal(f.host.trades.get(r.key).sellerReadsPending, 0);
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+});
+
+test('RESET gateway counts below three, unknown health and failed checks exempt RESET; three permits a healthy no-show strike', async t => {
+  for (const eligible of [0, 1, 2, 3, null, 'throw']) {
+    const r = record(String(eligible)), f = await fixture(t, { trac: { gatewayHealth: async () => {
+      if (eligible === 'throw') throw Error('gateway timeout');
+      return { ok: eligible === 3, eligible };
+    } } });
+    r.state.terms.base = { kind: 'RESET', id: 'RESET', decimals: 8 }; r.state.terms.pair = 'RESET/USDC';
+    await f.host.addTrade(r); await f.tick();
+    f.host.trac.gatewayHealth = async () => ({ ok: true, eligible: 3 });
+    f.clock.now += 15; await f.tick();
+    f.clock.now = deadline(r); await f.tick();
+    assert.equal(f.strikes.list(f.clock.now).strikes.length, eligible === 3 ? 1 : 0, String(eligible));
+    if (eligible !== 3) assert.equal(f.disk.get(`trade-${r.key}`).sellerStrikeExemption.reason, 'reset-gateway-unavailable');
+  }
+});
+
+test('RESET gateway requests that hang across the deadline time out without a strike', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const r = record('gateway-timeout'), f = await fixture(t, { now: deadline(r) - 1,
+    trac: { gatewayHealth: () => new Promise(() => {}) } });
+  r.state.terms.base = { kind: 'RESET', id: 'RESET', decimals: 8 }; r.state.terms.pair = 'RESET/USDC';
+  await f.host.addTrade(r); await f.tick();
+  f.clock.now = deadline(r); await f.tick();
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+  t.mock.timers.tick(STRIKE_READ_TIMEOUT_MS); await flush(f.host); await f.tick();
+  assert.equal(f.disk.get('trade-gateway-timeout').sellerStrikeExemption.reason, 'reset-gateway-unavailable');
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+});
+
+test('own-node discovery read errors exempt; a healthy not-final candidate does not', async t => {
+  for (const reason of ['read_failed', 'verification_failed', 'not_final']) {
+    const r = record(reason), f = await fixture(t, { trac: {
+      recentTransferCandidates: async () => [hex()], verifyTransfer: async () => ({ ok: false, final: false, reason }),
+    } });
+    await f.host.addTrade(r); f.clock.now += 30; await f.tick();
+    f.clock.now = deadline(r); await f.tick();
+    assert.equal(f.strikes.list(f.clock.now).strikes.length, reason === 'not_final' ? 1 : 0, reason);
+  }
+});
+
+test('existing signed seller outage aborts exempt, including gateway message truncation and late forwarded delivery', async t => {
+  const gateway = "RESET transfers are paused: the RESET gateway can't reach enough validators right now. Try again in a few minutes.";
+  for (const reason of [gateway, 'read_failed', 'gateway_rejected']) {
+    const r = record(), f = await fixture(t, { now: deadline(r) });
+    await f.host.addTrade(r); await f.tick(); await f.tick();
+    assert.equal(f.strikes.list(f.clock.now).strikes.length, 1);
+    const ch = tradeChannel(r.state.tradeId), notice = seal({ kind: 'abort', ch, body: { tradeId: r.state.tradeId,
+      reason: ('Transfer not sent before the deadline: ' + reason).slice(0, 160) } }, sim.f.seller.secretKey,
+      { ts: r.state.terms.sendBy, nonce: hex() });
+    f.bridge.emit('message', 'intercom-dex:signers', notice); await flush(f.host);
+    assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+    assert.equal(f.disk.get(`trade-${r.key}`).sellerStrikeExemption.reason, 'seller-infrastructure-notice');
+    assert.ok(f.sent.some(m => m.sig === notice.sig));
+    assert.equal(f.host.trades.get(r.key).state.phase, 'expired', 'an exemption never publishes a share');
+  }
+});
+
+test('bad signatures, other senders/trades, old timestamps and generic aborts cannot claim an outage exemption', async t => {
+  const r = record('invalid-notice'), f = await fixture(t, { now: deadline(r) });
+  await f.host.addTrade(r); await f.tick();
+  const ch = tradeChannel(r.state.tradeId);
+  for (const what of ['signature', 'buyer', 'foreign-trade', 'old', 'generic']) {
+    const notice = seal({ kind: 'abort', ch, body: { tradeId: what === 'foreign-trade' ? hex() : r.state.tradeId,
+      reason: 'Transfer not sent before the deadline: ' + (what === 'generic' ? 'send_failed' : 'read_failed') } },
+    (what === 'buyer' ? sim.f.buyer : sim.f.seller).secretKey,
+    { ts: what === 'old' ? 0 : r.state.terms.sendBy, nonce: hex() });
+    if (what === 'signature') notice.sig = '00'.repeat(64);
+    f.bridge.emit('message', 'intercom-dex:signers', notice); await flush(f.host);
+    assert.equal(f.strikes.list(f.clock.now).strikes.length, 1, what);
+    assert.equal(f.disk.get('trade-invalid-notice').sellerStrikeExemption, undefined, what);
+  }
+});
+
+test('exemptions survive restart; legacy and paused windows are never struck retrospectively', async t => {
+  const r = record('durable'), f = await fixture(t, { trac: { balances: async () => { throw Error('read failed'); } } });
+  await f.host.addTrade(r); await f.tick(); f.host.stop();
+  const legacy = record('legacy', 'expired'); f.disk.put('trade-legacy', legacy);
+  const again = await fixture(t, { disk: f.disk, now: deadline(r) }); await again.tick();
+  assert.equal(f.disk.get('trade-durable').sellerStrikeExemption.reason, 'seller-read-failed');
+  assert.equal(f.disk.get('trade-legacy').sellerStrikeExemption.reason, 'unobserved-window');
+  assert.deepEqual(again.strikes.list(again.clock.now).strikes, []);
+  again.host.stop();
+  const paused = await fixture(t, { disk: f.disk, now: deadline(r), enabled: false });
+  const off = record('off', 'expired'); await paused.host.addTrade(off); paused.host.stop();
+  const enabled = await fixture(t, { disk: f.disk, now: deadline(r) + 1 }); await enabled.tick();
+  assert.equal(f.disk.get('trade-off').sellerStrikeExemption.reason, 'strikes-disabled');
+  assert.deepEqual(enabled.strikes.list(enabled.clock.now).strikes, []);
+});
+
+test('disabled signers suppress saved seller-struck refusals and ignore an in-flight escrow result', async t => {
+  let release;
+  const r = record('switch'), f = await fixture(t, { now: deadline(r), check: ({ hashHex, purpose }) => new Promise(resolve => {
+    release = () => resolve({ ok: true, hashHex, purpose, status: 'active' });
+  }) });
+  await f.host.addTrade(r); await f.tick();
+  f.strikes.enabled = false;
+  release(); await flush(f.host);
+  const ch = tradeChannel(r.state.tradeId), trade = f.host.trades.get(r.key);
+  await f.host.sendEnvelope(trade, ch, seal({ kind: 'refused', ch, body: { tradeId: r.state.tradeId, reason: 'seller-struck' } },
+    sim.nodes.get('signer1').identity.secretKey, { ts: f.clock.now, nonce: hex() }));
+  assert.deepEqual(f.strikes.list(f.clock.now).strikes, []);
+  assert.ok(!f.sent.some(m => m.kind === 'refused'));
 });

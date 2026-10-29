@@ -10,7 +10,7 @@ import { sha256Hex, hexToBytes } from '../core/canonical.js';
 import { proveLock, verifyLock } from '../proof/lockproof.js';
 import { checkProfileRegistry, checkProfileTerms } from '../net/profile.js';
 import { sellerFunds } from './signer-funds.js';
-import { strikeCandidate, validateSeller } from './signer-strikes.js';
+import { strikeCandidate, validateSeller, sellerInfrastructureNotice, STRIKE_HEALTH_INTERVAL_SEC, STRIKE_READ_TIMEOUT_MS } from './signer-strikes.js';
 import { validTermsAddressProofs } from '../core/address-proof.js';
 import { claimWarning } from '../core/claim-warning.js';
 
@@ -33,7 +33,7 @@ const ACCEPTS = {
 const DONE = { buyer: ['complete', 'refunded'], seller: ['complete', 'aborted', 'lost'], signer: ['published', 'expired', 'aborted'] };
 export const tradeChannel = ref => `intercom-dex:t:${ref}`;
 // Signed trade evidence a committee signer passes on over the signers channel.
-export const FORWARDED = ['deal', 'working', 'transferSent'];
+export const FORWARDED = ['deal', 'working', 'transferSent', 'abort'];
 const MAX_PER_SENDER = 400;
 // A published signer repeats its share on its own at 10, 20, 40 ... 640 seconds and then only answers requests: every
 // repeat costs a fresh work stamp, and a seller that still misses shares asks for them (shareRequest) every 30 s.
@@ -167,12 +167,21 @@ export class TradeHost {
     const trade = { ...record, serviceKey: this.serviceKey, seen: createReplayCache({ maxEntries: 8192 }), queue: Promise.resolve(), busy: new Set(),
       lastResend: new Map(), perSender: new Map(), presentSent: [], budgetAt: performance.now(), makerConnectedAt: null };
     if (trade.role === 'signer' && trade.state.phase === 'holding') trade.state.holdingSince ??= trade.signerAckedAt ?? trade.state.now;
+    if (trade.role === 'signer' && this.signerStrikes) {
+      trade.sellerStrikeWindowStart ??= trade.state.now;
+      // Never punish a window that was unobserved while disabled, offline, or running pre-exemption code.
+      if (!trade.sellerStrikeDone && (!this.signerStrikes.enabled || (resume && trade.signerAckedAt != null))) {
+        trade.sellerStrikeExemption ??= { reason: this.signerStrikes.enabled ? 'unobserved-window' : 'strikes-disabled', at: this.now() };
+      }
+    }
     if (resume) { trade.state.stepElapsedMs = 0; trade.state.connectedAtMs = null; }
     this.trades.set(trade.key, trade);
     this.#save(trade);
     // Finish a cancellation interrupted between saving transfer evidence and removing its ledger entry.
     if (this.signerStrikes && trade.role === 'signer' && (trade.sellerTransferSeen || trade.sellerClaimed ||
-        trade.state.txHash || trade.state.phase === 'published')) this.signerStrikes.forget(trade.state.tradeId, this.now());
+        trade.state.txHash || trade.state.phase === 'published' || trade.sellerStrikeExemption)) {
+      this.signerStrikes.forget(trade.state.tradeId, this.now(), trade.sellerStrikeExemption?.reason);
+    }
     // A finished trade (a signer's once it no longer serves) needs no channel: a restart that joined every stored trade's
     // channel at once (hundreds of topics) held the heartbeats back for minutes, and traders kept them for the whole uptime.
     if (this.#idle(trade)) {
@@ -244,7 +253,8 @@ export class TradeHost {
   }
 
   #save(trade) {
-    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, forwarded, discoveryCheck, ...record } = trade;
+    const { seen, queue, busy, lastResend, perSender, presentSent, presentAt, budgetAt, makerConnectedAt, channelsLeft, forwarded, discoveryCheck,
+      sellerReadsPending, strikeHealthAt, ...record } = trade;
     this.store.put(`trade-${trade.key}`, record);
   }
 
@@ -264,6 +274,9 @@ export class TradeHost {
   }
 
   async sendEnvelope(trade, ch, envelope) {
+    // A saved outbox can contain a refusal produced before the operator disabled strikes.
+    if (trade?.role === 'signer' && !this.signerStrikes?.enabled &&
+        envelope.kind === 'refused' && envelope.body.reason === 'seller-struck') return;
     if (process.env.DEX_DEBUG && ch.startsWith('intercom-dex:t:')) {
       this.log('send', (trade?.key ?? ch.slice('intercom-dex:t:'.length)).slice(0, 12), ch.slice(-8), envelope.kind, envelope.from.slice(0, 8));
     }
@@ -272,6 +285,7 @@ export class TradeHost {
       trade.signerAckedAt = this.now();
       try { this.#save(trade); }
       catch (error) { delete trade.signerAckedAt; throw error; }
+      this.#checkSellerInfrastructure(trade);
     }
     return result;
   }
@@ -354,7 +368,7 @@ export class TradeHost {
     };
     if (!message || typeof message !== 'object' || message.ch !== channel || typeof message.from !== 'string') return reject('channel mismatch or invalid sender');
     if (isFinished(trade) && !this.#serving(trade) &&
-        !(this.#observingSeller(trade) && ['transferSent', 'claimed'].includes(message.kind))) return reject('trade finished');
+        !(this.#observingSeller(trade) && ['transferSent', 'claimed', 'abort'].includes(message.kind))) return reject('trade finished');
     const s = trade.state, ref = message.body?.tradeId;
     if (message.kind === 'present' && channel !== tradeChannel(message.body?.ref)) return false;
     if (ref !== undefined && ref !== s.tradeId && !(message.kind === 'abort' && ref === s.offerId)) return reject('wrong trade id');
@@ -381,10 +395,12 @@ export class TradeHost {
       this.#save(trade);
       this.signerStrikes.forget(s.tradeId, this.now());
     }
+    const infrastructureNotice = trade.role === 'signer' && sellerInfrastructureNotice(trade, m);
+    if (this.signerStrikes && infrastructureNotice) this.#exemptSellerStrike(trade, 'seller-infrastructure-notice');
     // An authenticated message/presence from the maker on this offer channel proves a usable peer path.
     if (s.mode === 'taker' && m.from === s.peer && channel === tradeChannel(s.offerId) && trade.makerConnectedAt == null) trade.makerConnectedAt = performance.now();
     if (process.env.DEX_DEBUG) this.log('recv', trade.key.slice(0, 12), channel.slice(-8), m.kind, m.from.slice(0, 8));
-    if (trade.role === 'signer' && FORWARDED.includes(m.kind)) {
+    if (trade.role === 'signer' && FORWARDED.includes(m.kind) && (m.kind !== 'abort' || infrastructureNotice)) {
       trade.forwarded ??= new Set();
       if (!trade.forwarded.has(message.sig)) {
         trade.forwarded.add(message.sig);
@@ -439,7 +455,8 @@ export class TradeHost {
   }
 
   #checkSellerStrike(trade) {
-    if (!this.signerStrikes || !this.signerSolana || this.stopped || trade.sellerStrikeDone ||
+    if (!this.signerStrikes?.enabled || !this.signerSolana || this.stopped || trade.sellerStrikeDone ||
+        trade.sellerReadsPending || trade.busy.has('seller-strike-health') ||
         !strikeCandidate(trade, this.now()) || this.now() < (trade.strikeRetryAt ?? 0)) return;
     trade.strikeRetryAt = this.now() + 30;
     const { terms, H: hashHex } = trade.state;
@@ -447,6 +464,68 @@ export class TradeHost {
       try { return await this.signerSolana.checkEscrow({ terms, hashHex, purpose: 'settlement' }); }
       catch { return { ok: false }; }
     }, result => ({ type: 'sellerStrikeEscrow', result }), { retries: 1 });
+  }
+
+  #exemptSellerStrike(trade, reason) {
+    trade.sellerStrikeExemption ??= { reason, at: this.now() };
+    // Keep the in-memory exemption even if persistence fails; restore also exempts unobserved windows.
+    this.#save(trade);
+    this.signerStrikes.forget(trade.state.tradeId, this.now(), reason);
+    if (!trade.strikeExemptionLogged) {
+      trade.strikeExemptionLogged = true;
+      this.log(`seller strike exempt tradeId=${trade.state.tradeId} reason=${trade.sellerStrikeExemption.reason}`);
+    }
+  }
+
+  async #boundedStrikeRead(read) {
+    let timer;
+    try {
+      return await Promise.race([Promise.resolve().then(read), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Seller infrastructure read timed out')), STRIKE_READ_TIMEOUT_MS);
+        timer.unref?.();
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  // Track the request's start, not its completion: a read can fail after the window closes. Pending reads
+  // prevent a strike until their bounded result arrives. A later successful read never erases the exemption.
+  async #sellerRead(trade, read) {
+    const started = this.now(), { terms } = trade.state;
+    if (!this.signerStrikes?.enabled || trade.role !== 'signer' ||
+        started < trade.sellerStrikeWindowStart || started >= terms.sendBy + terms.graceSec) return read();
+    trade.sellerReadsPending = (trade.sellerReadsPending ?? 0) + 1;
+    try {
+      const result = await this.#boundedStrikeRead(read);
+      if (result?.ok !== true && ['read_failed', 'verification_failed'].includes(result?.reason)) {
+        this.#exemptSellerStrike(trade, 'seller-read-failed');
+      }
+      return result;
+    } catch (error) {
+      this.#exemptSellerStrike(trade, 'seller-read-failed');
+      throw error;
+    } finally { trade.sellerReadsPending--; }
+  }
+
+  #checkSellerInfrastructure(trade) {
+    const now = this.now(), s = trade.state;
+    if (!this.signerStrikes?.enabled || this.stopped || trade.role !== 'signer' || trade.signerAckedAt == null ||
+        trade.sellerStrikeDone || trade.sellerStrikeExemption || trade.sellerTransferSeen || s.txHash ||
+        s.phase !== 'holding' || now >= s.terms.sendBy + s.terms.graceSec || now < (trade.strikeHealthAt ?? 0) ||
+        trade.busy.has('seller-strike-health')) return;
+    trade.strikeHealthAt = now + STRIKE_HEALTH_INTERVAL_SEC;
+    this.#background(trade, 'seller-strike-health', async () => {
+      const reads = [this.#sellerRead(trade, () => this.trac.balances(s.terms.seller.tracAddr))];
+      if (s.terms.base.id === 'RESET') reads.push((async () => {
+        let health;
+        try { health = await this.#boundedStrikeRead(() => this.trac.gatewayHealth()); } catch {}
+        // Unknown/unconfigured health is also insufficient evidence for punishing the seller.
+        if (health?.ok !== true || !Number.isSafeInteger(health.eligible) || health.eligible < 3) {
+          this.#exemptSellerStrike(trade, 'reset-gateway-unavailable');
+        }
+      })());
+      await Promise.allSettled(reads);
+      return {};
+    }, () => ({ type: 'sellerStrikeHealth' }), { retries: 1 });
   }
 
   #addressProofs(state, now, required = state.requireAddressProof || this.addressProofRequired()) {
@@ -520,8 +599,10 @@ export class TradeHost {
   async #apply(trade, event) {
     if (event.now < trade.state.now) event = { ...event, now: trade.state.now };
     const before = trade.state;
+    if (event.type === 'sellerStrikeHealth') { this.#checkSellerStrike(trade); return; }
     if (event.type === 'sellerStrikeEscrow') {
-      if (!this.signerStrikes || this.stopped || event.tradeId !== before.tradeId || trade.sellerStrikeDone || !strikeCandidate(trade, this.now())) return;
+      if (!this.signerStrikes?.enabled || this.stopped || trade.sellerReadsPending || trade.busy.has('seller-strike-health') ||
+          event.tradeId !== before.tradeId || trade.sellerStrikeDone || !strikeCandidate(trade, this.now())) return;
       const r = event.result;
       // The existing finalized reader checks every term, the vault, and original lock history after settlement.
       if (r?.ok !== true || r.hashHex !== before.H || r.purpose !== 'settlement' || !['active', 'refunded', 'claimed'].includes(r.status)) return;
@@ -633,7 +714,7 @@ export class TradeHost {
         return this.#background(trade, 'seller-funds', async () => {
           if (!this.#addressProofs(s, this.now())) return { type: 'sellerFunds', ok: false, reason: 'Invalid Trac address proof' };
           if (this.signerStrikes?.refusal(s.terms.seller, this.now())) return { type: 'sellerFunds', ok: false };
-          try { return { type: 'sellerFunds', balances: await this.trac.balances(s.terms.seller.tracAddr) }; }
+          try { return { type: 'sellerFunds', balances: await this.#sellerRead(trade, () => this.trac.balances(s.terms.seller.tracAddr)) }; }
           catch (error) { return { type: 'sellerFunds', ok: false, reason: String(error?.message ?? error ?? 'Trac read failed') }; }
         }, result => result, { retries: 1 });
       // One escrow pays for one trade: the first trade of this harness to reserve an escrow keeps it, for good.
@@ -735,7 +816,7 @@ export class TradeHost {
         if (!active()) return;
         if (trade.state.usedTx[txHash] && trade.state.usedTx[txHash] !== action.tradeId) continue;
         // A real notice for this hash can reuse the in-flight check, including its successful result.
-        const check = { txHash, promise: Promise.resolve().then(() => this.trac.verifyTransfer({ ...action, type: 'verifyTransfer', txHash })) };
+        const check = { txHash, promise: this.#sellerRead(trade, () => this.trac.verifyTransfer({ ...action, type: 'verifyTransfer', txHash })) };
         trade.discoveryCheck = check;
         try {
           const proof = await check.promise;
@@ -754,7 +835,7 @@ export class TradeHost {
   async #pollTransfer(action, trade) {
     for (;;) {
       let r;
-      try { r = await (trade.discoveryCheck?.txHash === action.txHash ? trade.discoveryCheck.promise : this.trac.verifyTransfer(action)); }
+      try { r = await (trade.discoveryCheck?.txHash === action.txHash ? trade.discoveryCheck.promise : this.#sellerRead(trade, () => this.trac.verifyTransfer(action))); }
       catch (error) { r = { ok: false, final: false, reason: error.message }; }
       if (r.ok && r.final) return r;
       if (r.final || this.now() >= action.finalBefore) return { ...r, ok: false };
@@ -766,6 +847,7 @@ export class TradeHost {
     const now = this.now();
     for (const trade of this.trades.values()) {
       const s = trade.state;
+      this.#checkSellerInfrastructure(trade);
       this.#checkSellerStrike(trade);
       // A maker whose Solana view stays stale cannot answer a take; it ends that negotiation with a reason the taker
       // receives instead of leaving it to time out.

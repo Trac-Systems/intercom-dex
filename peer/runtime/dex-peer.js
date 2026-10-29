@@ -20,6 +20,7 @@ import { fanOutValidatorSends } from './fanout.js';
 import { Bandwidth } from './bandwidth.js';
 import { summarizeApplyLogs } from './reader-scheduling.js';
 import { createReadRecovery } from './read-recovery.js';
+import { createReadMetrics } from './read-metrics.js';
 import { resolveProfile } from '../../src/net/profile-core.js';
 
 const hex32 = /^[0-9a-f]{64}$/;
@@ -114,6 +115,7 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
     bus = new MainSettlementBus(mc, await walletAt(mc.keyPairPath, PeerWallet, options)); await bus.ready(); step('msb ready');
     bus.recoverRead = createReadRecovery({ base: bus.state.base, swarm: bus.network.swarm,
       topic: bus.config.channel, label: 'MSB' });
+    bus.observeRead = createReadMetrics({ base: bus.state.base, swarm: bus.network.swarm, label: 'MSB' });
     bandwidth.trackStore(bus.state.base.store, 'msb');
     fanOutValidatorSends(bus.network);
     if (devnet) {

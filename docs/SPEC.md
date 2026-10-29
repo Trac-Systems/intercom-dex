@@ -73,7 +73,7 @@ string with at most 12 decimals; `trac1` is a checksummed Trac address; `sol` is
 | `cancel` | maker | `offerId` |
 | `take` | taker | `offerId`, `pair`, `registryVersion`, `software`, `baseAmount`, `taker` {`dexKey`, `tracAddr`, `solAddr`}, `commitment`, `sendBy`, `refundAfter` |
 | `accept` | maker | `offerId`, `takeCommitment`, `commitment`, `slot` |
-| `decline` | maker | `offerId`, `takeNonce`, `reason` (`busy`, `insufficient`, `signers`, `expired`, `invalid`, `version`) |
+| `decline` | maker | `offerId`, `takeNonce`, `reason` (`busy`, `insufficient`, `signers`, `expired`, `invalid`, `version`, `reset-gateway`) |
 | `reveal` | both traders | `offerId`, `takeCommitment`, `nonce` |
 | `commit` | none | `offerId`, `commitment` (defined in the schema; no role sends it) |
 | `terms` | both traders | `tradeId`, `terms` |
@@ -158,7 +158,8 @@ maker or the taker can be either side; the sequence is the same.
    `insufficient` when the offer's size minus filled and reserved amounts is too small or a fresh balance read shows
    the taker cannot fund this trade (seller: base amount plus TNK transfer fee; buyer: USDC including both fees plus
    0.01 SOL). A failed or slower-than-two-second read proceeds to the signer checks. It declines `signers` when fewer
-   than n eligible signers exist or fewer than k+1 of them are online. Each take envelope gets at most one
+   than n eligible signers exist or fewer than k+1 of them are online. It declines `reset-gateway` when RESET gateway
+   health is unavailable or fewer than three eligible validators are reachable. Each take envelope gets at most one
    decline, and the decline names the take's envelope nonce. Declines answer strangers, so they are bounded: at
    most one per sender per minute and 30 per minute in total (`DECLINES_PER_MINUTE`). They are stamped last
    (section 12).

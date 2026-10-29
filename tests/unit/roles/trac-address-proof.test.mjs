@@ -60,7 +60,7 @@ test('a third-party rich address cannot receive the first signer ack', async t =
 });
 
 test('rotating the DEX identity must not escape strikes on a proven Trac address', () => {
-  const strikes = new SellerStrikes({ store: store() }), seller = attack().f.terms.seller;
+  const strikes = new SellerStrikes({ enabled: true, store: store() }), seller = attack().f.terms.seller;
   strikes.record(seller, hex(), now);
   strikes.record(seller, hex(), now + 1);
   assert.ok(strikes.refusal({ ...seller, dexKey: encodeKey(generateIdentity().publicKey) }, now + 2));
@@ -156,7 +156,7 @@ test('legacy ledger entries cannot poison a proven address; clear spans all rota
   const disk = store(), seller = attack().f.terms.seller;
   disk.put('seller-strikes', { strikes: [{ ...seller, tradeId: 'old-a', at: now }],
     refusals: [{ ...seller, until: now + 1000, tradeIds: ['old-a', 'old-b'] }] });
-  const strikes = new SellerStrikes({ store: disk });
+  const strikes = new SellerStrikes({ enabled: true, store: disk });
   assert.deepEqual(strikes.list(now), { strikes: [], refusals: [] });
   strikes.record(seller, 'a', now); strikes.record({ ...seller, dexKey: hex() }, 'b', now + 1);
   const rotated = { ...seller, tracAddr: seller.tracAddr.toUpperCase(), dexKey: hex() };

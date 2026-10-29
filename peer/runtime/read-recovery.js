@@ -42,7 +42,10 @@ export function createReadRecovery({ base, swarm, topic, discovery = swarm?.stat
   return error => {
     if (stopped() || retiring || now() - repairedAt < READER_REPAIR_MS) return false;
     repairedAt = now();
-    emit('stalled', { reason: error?.code ?? 'read unavailable', discoveryPending: refreshing !== null });
+    emit('stalled', { reason: error?.code ?? 'read unavailable', discoveryPending: refreshing !== null,
+      coreKey: error?.coreKey ?? null, waitingSeq: error?.waitingSeq ?? null,
+      blockReads: error?.blockReads ?? null, elapsedMs: error?.elapsedMs ?? null,
+      corePeers: base.view?.core?.peers?.length ?? 0 });
     if (!refreshing && discovery) {
       refreshing = Promise.resolve().then(() => stopped() ? undefined : discovery.refresh()).then(ok => {
         if (ok === false && !stopped()) emit('discovery_failed');

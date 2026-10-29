@@ -362,7 +362,8 @@ inside `take` and `accept`; sealed shares are inside `deal`. The standalone
 taker's commitment from `take`; it separates simultaneous negotiations by the
 same parties on one offer. `decline` is `{offerId,takeNonce,reason}`, where
 `takeNonce` is the take envelope's nonce; reasons are `busy`, `insufficient`,
-`signers`, `expired`, `invalid`, or `version`. Pre-terms `abort` can carry the
+`signers`, `expired`, `invalid`, `version`, or `reset-gateway` (RESET transfers paused).
+Pre-terms `abort` can carry the
 commitment; after terms, its `tradeId` identifies the negotiation.
 `working:{tradeId,step:'certificate'}` is sent only by the buyer during on-demand proving.
 

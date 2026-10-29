@@ -280,9 +280,9 @@ test('SPEC.md lists every message kind exactly once, and the agent documents lis
   assert.deepEqual([...kinds].sort(), Object.keys(bodySchemas).sort());
   const reasons = bodySchemas.decline.shape.reason.options;
   const skill = section(docs['SKILL.md'], 'Declines');
-  assert.deepEqual([...skill.matchAll(/^\| `(\w+)` \|/gm)].map(m => m[1]).sort(), [...reasons].sort());
+  assert.deepEqual([...skill.matchAll(/^\| `([\w-]+)` \|/gm)].map(m => m[1]).sort(), [...reasons].sort());
   const llmsDeclines = docs['docs/llms.txt'].split('\n\n').find(p => p.startsWith('Declines'));
-  assert.deepEqual([...llmsDeclines.matchAll(/^(\w+) - /gm)].map(m => m[1]).sort(), [...reasons].sort());
+  assert.deepEqual([...llmsDeclines.matchAll(/^([\w-]+) - /gm)].map(m => m[1]).sort(), [...reasons].sort());
   for (const reason of reasons) assert.ok(docs['docs/SPEC.md'].includes(`\`${reason}\``));
 });
 

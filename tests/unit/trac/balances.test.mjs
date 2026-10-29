@@ -35,7 +35,8 @@ test('each signed balance stage is bounded, closes its checkout and names the fa
     await assert.rejects(signedBalanceRead(f, 'account', label, 10), new RegExp(`${label} balance unavailable: read timed out`));
     await turn(); assert.equal(f.closes, 1);
     const ok = base(async (_key, options) => {
-      assert.deepEqual(options, { timeout: 10, update: false }); return { value: '9' };
+      assert.equal(options.timeout, 10); assert.equal(options.update, false); assert.equal(options.extension, false);
+      assert.equal(typeof options.onseq, 'function'); assert.equal(typeof options.onwait, 'function'); return { value: '9' };
     });
     assert.deepEqual(await signedBalanceRead(ok, 'account', label, 10), { value: '9' });
     await turn(); assert.equal(ok.closes, 1);

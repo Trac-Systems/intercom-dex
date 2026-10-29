@@ -321,6 +321,7 @@ A maker answers a take it can't serve with a decline. Your trade then ends `abor
 | `busy` | The offer already has 3 trades before their lock, or you have 3 with this maker. | Wait a minute and try again, or take another offer. |
 | `insufficient` | Less is left on the offer than you asked for, or your wallet cannot cover the trade and fees. | Check your balance and fees, or take a smaller amount from `dex_book` levels. |
 | `signers` | The maker sees fewer eligible signers online than a trade needs. | Wait a few minutes and try again. |
+| `reset-gateway` | The RESET gateway cannot deliver transfers or its health is unavailable. | Wait a few minutes and retry when RESET transfers are available. |
 | `expired` | The offer expired or was cancelled. | Pick another offer. |
 | `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under, or the take doesn't match the offer, the registry or the clock (makers before 0.1.18 don't answer those, and your trade times out). | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |
 

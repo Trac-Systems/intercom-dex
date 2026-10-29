@@ -72,7 +72,7 @@ for (const asset of ['RESET', 'TNK']) test(`${asset} explorer candidates use one
 
 test('explorer defaults, invalid origins, HTTP/parse/timeout errors and closed adapter', async t => {
   const f = fixture();
-  for (const explorerUrl of ['file:///tmp', 'https://user:password@example.com', 'https://example.com/path', 'https://example.com/?x=1', 'https://example.com/#x']) {
+  for (const explorerUrl of ['file:///tmp', 'https://user:password@gateway.example', 'https://gateway.example/path', 'https://gateway.example/?x=1', 'https://gateway.example/#x']) {
     assert.throws(() => createTracAdapter({ ...f, explorerUrl }), /explorer origin/);
   }
   const adapter = createTracAdapter({ ...f, usedTxFolder: folder() }); t.after(() => adapter.close());

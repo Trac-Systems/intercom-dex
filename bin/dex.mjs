@@ -38,7 +38,7 @@ import { controlHandler } from '../src/roles/control.js';
 import { startDex, stopDex, statusDex, dexLogs } from '../src/lifecycle/manager.js';
 import { lifecycleHandler } from '../src/lifecycle/control.js';
 import { requestStop } from '../src/lifecycle/lock.js';
-import { validateSeller } from '../src/roles/signer-strikes.js';
+import { validateSeller, strikeSettings } from '../src/roles/signer-strikes.js';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   config: { type: 'string' }, out: { type: 'string' }, asset: { type: 'string' }, amount: { type: 'string' }, to: { type: 'string' },
@@ -71,6 +71,9 @@ if (['start', 'stop', 'status', 'logs'].includes(command)) {
   } catch (error) { console.error(error.message); process.exit(1); }
 }
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
+// Reject a mistyped safety switch before opening keys, connecting a peer or starting a role.
+if (config.role === 'signer') config.strikes = strikeSettings(config.strikes);
+else if (config.strikes !== undefined) throw new Error('strikes is signer-only configuration');
 let managedStop = () => process.exit(75);
 if (process.env.DEX_LIFECYCLE_ID) {
   process.on('disconnect', () => managedStop());
@@ -234,7 +237,7 @@ if (locksRole) {
     role = new Service({ bridge, identity, store, solana, trac, profile, registryInput: config.registry, latest: config.latest, log,
       firstLaunch: values['first-launch'] === true });
   } else if (config.role === 'signer') {
-    role = new Signer({ bridge, identity, box: keys.box, store, trac, solana, profile, serviceKey: config.serviceKey, log });
+    role = new Signer({ bridge, identity, box: keys.box, store, trac, solana, profile, serviceKey: config.serviceKey, strikes: config.strikes, log });
   } else if (config.role === 'trader') {
     const me = { dexKey: identity.publicKey, tracAddr: wallet.address, solAddr: keypair.publicKey.toBase58() };
     role = new Trader({ bridge, identity, store, solana, trac, me, profile, serviceKey: config.serviceKey, mint: profile.mint,

@@ -1,6 +1,26 @@
-// Local signer policy only. No stake, deposit, shared reputation or protocol messages.
+import { z } from 'zod';
+
+// Local signer policy only. No stake, deposit, shared reputation or new protocol messages.
 export const STRIKE_WINDOW_SEC = 7 * 86400;
 export const MAX_SELLER_STRIKES = 4096;
+export const STRIKE_HEALTH_INTERVAL_SEC = 15;
+export const STRIKE_READ_TIMEOUT_MS = 30_000;
+const settingsSchema = z.object({ enabled: z.boolean().default(false) }).strict();
+export const strikeSettings = input => settingsSchema.parse(input === undefined ? {} : input);
+
+// Existing sellers report a failed send in a signed abort. The gateway message is truncated to 160 characters
+// by the host; match its stable prefix. Generic send_failed/insufficient-funds errors are not outage evidence.
+export function sellerInfrastructureNotice(trade, message) {
+  const { terms, tradeId } = trade.state;
+  if (message.kind !== 'abort' || message.from !== terms.seller.dexKey || message.body.tradeId !== tradeId ||
+      message.ts < trade.sellerStrikeWindowStart || message.ts >= terms.refundAfter) return false;
+  const prefix = 'Transfer not sent before the deadline: ';
+  if (!message.body.reason.startsWith(prefix)) return false;
+  const reason = message.body.reason.slice(prefix.length);
+  return reason.startsWith('RESET transfers are paused:') ||
+    ['read_failed', 'gateway_rejected', 'reset_gateway_required', 'invalid_gateway_response'].includes(reason);
+}
+
 const RECORD = 'seller-strikes';
 const sameSeller = (a, b) => a.tracAddr.toLowerCase() === b.tracAddr.toLowerCase();
 const oldestFirst = (a, b) => a.at - b.at;
@@ -14,6 +34,7 @@ const refusalFor = (seller, strikes) => {
 export function strikeCandidate(trade, now) {
   const s = trade.state;
   return trade.role === 'signer' && s.sellerAddressProven === true && Number.isSafeInteger(trade.signerAckedAt) && !!s.H &&
+    !trade.sellerStrikeExemption &&
     !trade.sellerTransferSeen && !trade.sellerClaimed && !s.txHash && s.finalizedAt == null &&
     !['published', 'complete', 'aborted'].includes(s.phase) &&
     ![...(trade.raw ?? []), ...(trade.buffer ?? [])].some(m => m.kind === 'transferSent' && m.from === s.terms.seller.dexKey) &&
@@ -29,9 +50,10 @@ export function validateSeller({ tracAddr, dexKey } = {}) {
 // One atomic encrypted record, with independent caps for strikes and refusals. Refusals retain the two triggering
 // trade ids after the first strike expires, so the full seven days from the second strike survives a restart.
 export class SellerStrikes {
-  constructor({ store, log = () => {}, cap = MAX_SELLER_STRIKES }) {
+  constructor({ store, log = () => {}, cap = MAX_SELLER_STRIKES, enabled = false }) {
     if (!Number.isSafeInteger(cap) || cap < 2) throw new Error('Invalid strike cap');
-    Object.assign(this, { store, log, cap });
+    if (typeof enabled !== 'boolean') throw new Error('Invalid strikes.enabled');
+    Object.assign(this, { store, log, cap, enabled });
   }
 
   list(now) {
@@ -41,9 +63,10 @@ export class SellerStrikes {
       refusals: record.refusals.filter(r => r.proven === true && r.until > now) };
   }
 
-  refusal(seller, now) { return this.list(now).refusals.find(r => sameSeller(r, seller)) ?? null; }
+  refusal(seller, now) { return this.enabled ? this.list(now).refusals.find(r => sameSeller(r, seller)) ?? null : null; }
 
   record(seller, tradeId, now) {
+    if (!this.enabled) return false;
     // The host calls this only for a trade whose address proof passed before its first ack.
     const data = this.list(now);
     if (data.strikes.some(s => s.tradeId === tradeId)) return false;
@@ -59,7 +82,7 @@ export class SellerStrikes {
   }
 
   // Late authenticated transfer evidence cancels its strike and any refusal that depended on it.
-  forget(tradeId, now) {
+  forget(tradeId, now, reason = 'transfer-or-completion-seen') {
     const data = this.list(now), strikes = data.strikes.filter(s => s.tradeId !== tradeId),
       refusals = data.refusals.filter(r => !r.tradeIds.includes(tradeId));
     if (strikes.length === data.strikes.length && refusals.length === data.refusals.length) return;
@@ -68,7 +91,7 @@ export class SellerStrikes {
       if (remaining) refusals.push(remaining);
     }
     this.store.put(RECORD, { strikes, refusals });
-    this.log(`seller strike clear tradeId=${tradeId} reason=transfer-or-completion-seen`);
+    this.log(`seller strike clear tradeId=${tradeId} reason=${reason}`);
   }
 
   clear(seller, now) {

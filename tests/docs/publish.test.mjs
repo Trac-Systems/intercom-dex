@@ -18,7 +18,7 @@ const rules = [
   ['private hostname', /\b(?:[a-z0-9-]+\.)+(?:interna[l]|loca[l]|la[n])\b(?!\.[a-z])/i],
 ];
 const publicHosts = new Set([
-  'nodejs.org', 'github.com', 'explorer.solana.com', 'circom.info', 'www.tradingview.com', 'reset.much.fun', 'play' + 'bay.games', 'www.apache.org', 'www.w3.org',
+  'nodejs.org', 'github.com', 'explorer.solana.com', 'explorer.trac.network', 'circom.info', 'www.tradingview.com', 'reset.much.fun', 'play' + 'bay.games', 'www.apache.org', 'www.w3.org',
   'api.mainnet-beta.solana.com', 'public.rpc.solanavibestation.com', 'solana.api.pocket.network',
   'solana.leorpc.com', 'rpc.solanatracker.io', 'solana-rpc.publicnode.com',
   ['reset', 'open' + 'mayhem', 'ai'].join('.'),

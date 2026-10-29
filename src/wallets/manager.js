@@ -1,7 +1,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountBalances, accountLockBalances, amountUnits, withdrawalDestination, validatePayout, MIN_SOL, MIN_TNK } from './accounting.js';
+import { accountBalances, accountLockBalances, conservativeBalances, amountUnits, withdrawalDestination, validatePayout, MIN_SOL, MIN_TNK } from './accounting.js';
 import { walletFile, rpcAdvice } from './setup.js';
 import { SystemProgram } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
@@ -16,6 +16,9 @@ const BASES = { TNK: { kind: 'trac-native', id: 'TNK', decimals: 18 }, RESET: { 
 const finished = w => ['confirmed', 'failed'].includes(w.status);
 const TOKEN_PROGRAMS = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map(p => p.toBase58());
 const quote = s => "'" + s.replaceAll("'", "'\\''") + "'";
+
+// A record that cannot be cloned structurally (for example a function field) must never block trading.
+const cloneState = state => { try { return structuredClone(state); } catch { return JSON.parse(JSON.stringify(state)); } };
 
 export class WalletManager {
   constructor({ config, configFile, store, role, solana, trac, addresses }) {
@@ -47,16 +50,19 @@ export class WalletManager {
   }
 
   async balances({ positionId = null } = {}) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const before = JSON.stringify(this.state()), balances = await this.raw(), state = this.state();
-      if (before !== JSON.stringify(state)) continue;
-      let result = accountBalances({ balances, ...state, trader: this.config.role === 'trader', feeTnk: balances.feeTnk,
+    // Trade clocks and polling progress can change on every read. Snapshot before awaiting either chain,
+    // including in-place updates, and compare only the funds held by the two accounting results.
+    const before = cloneState(this.state()), beforeNow = Math.floor(Date.now() / 1000);
+    const balances = await this.raw(), after = this.state();
+    const account = (state, now) => {
+      let result = accountBalances({ balances, ...state, now, trader: this.config.role === 'trader', feeTnk: balances.feeTnk,
         registry: version => this.role.registry.snapshot(version) });
       if (this.role.locks) result = accountLockBalances(result, state.locks.filter(p => p.positionId !== positionId), this.role.locks.me.lockKey, balances.feeTnk);
-      if (balances.collectors) Object.assign(result.USDC, { collectedFees: balances.collectedFees, collectors: balances.collectors });
       return result;
-    }
-    throw new Error('Wallet state changed during balance reads; retry');
+    };
+    const result = conservativeBalances(account(before, beforeNow), account(after, Math.floor(Date.now() / 1000)));
+    if (balances.collectors) Object.assign(result.USDC, { collectedFees: balances.collectedFees, collectors: balances.collectors });
+    return result;
   }
 
   // Withdrawals and payouts go to wallets, not to token accounts (for SOL, not to anything a program other than System

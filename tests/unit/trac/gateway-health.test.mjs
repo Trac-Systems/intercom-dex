@@ -25,7 +25,7 @@ test('gateway health requires an integer eligible count of at least three; conne
 });
 
 test('gateway origin, GET route, redirect policy and timeout match the transfer gateway', async t => {
-  for (const resetGatewayUrl of ['file:///tmp', 'https://user:pass@example.com', 'https://example.com/path', 'https://example.com/?x=1', 'https://example.com/#x']) {
+  for (const resetGatewayUrl of ['file:///tmp', 'https://user:pass@gateway.example', 'https://gateway.example/path', 'https://gateway.example/?x=1', 'https://gateway.example/#x']) {
     assert.throws(() => createGatewayHealth({ resetGatewayUrl }), /gateway origin/);
   }
   const durations = [], timeout = AbortSignal.timeout;

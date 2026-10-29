@@ -44,13 +44,15 @@ export function withdrawalDestination(asset, to, payout) {
 // Pending chain actions remain reserved until their state machine records settlement.
 export function accountBalances({ balances, offers = [], trades = [], registry, now = Math.floor(Date.now() / 1000),
   trader = true, feeTnk = MSB_FEE, withdrawals = [] }) {
+  // Only this wallet's buyer/seller machines can reserve funds or consume its offers.
+  trades = trades.filter(t => ['buyer', 'seller'].includes(t.role));
   const rows = Object.fromEntries(Object.entries(DECIMALS).map(([asset, decimals]) => [asset,
     { decimals, wallet: BigInt(balances[asset] ?? '0'), offers: 0n, trades: 0n, escrow: 0n, fees: 0n, withdrawals: 0n }]));
   const fee = BigInt(feeTnk), active = t => !['complete', 'refunded', 'lost'].includes(t.state.phase) &&
     (t.state.phase !== 'aborted' || t.state.locked || t.state.lockAttempted);
   let solActions = 0n, tracActions = 0n;
   for (const t of trades) {
-    if (!active(t) || !['buyer', 'seller'].includes(t.role)) continue;
+    if (!active(t)) continue;
     const s = t.state, terms = s.terms ?? s.draft;
     if (t.role === 'buyer') {
       const cost = calculateFees(BigInt(terms.quoteAmount), terms.fees.platformFeeBps, terms.fees.tradeFeeBps).totalAmount;
@@ -92,6 +94,14 @@ export function accountBalances({ balances, offers = [], trades = [], registry, 
       committed: committed.toString(), free: max(0n, r.wallet - held).toString(),
       breakdown: Object.fromEntries(['offers', 'trades', 'escrow', 'fees', 'withdrawals'].map(k => [k, r[k].toString()])) }];
   }));
+}
+
+// Both snapshots use the same freshly read wallet balances. Escrow and finalized lock funds are already
+// outside the wallet; compare wallet holds, even when both free amounts have been clamped to zero.
+// Choose a whole row per asset: summing breakdown maxima would count an offer-to-trade handoff twice.
+export function conservativeBalances(before, after) {
+  const held = row => BigInt(row.committed) - BigInt(row.breakdown.escrow) - BigInt(row.breakdown.locked ?? '0');
+  return Object.fromEntries(Object.entries(after).map(([asset, row]) => [asset, held(before[asset]) > held(row) ? before[asset] : row]));
 }
 
 // Lock funding is outside the wallet after finality; pending transactions reserve wallet funds.

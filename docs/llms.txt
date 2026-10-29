@@ -72,6 +72,7 @@ Declines (a take ends aborted with this reason):
 busy - offer has 3 trades before their lock, or you have 3 with this maker; retry later.
 insufficient - less is left than you asked, or your wallet cannot cover the trade and fees; check balances or take less.
 signers - too few eligible signers online at the maker; retry in a few minutes.
+reset-gateway - RESET transfers are paused because gateway health is unavailable or too few validators are reachable; retry in a few minutes.
 expired - the offer expired or was cancelled.
 invalid - the take didn't match the offer, the registry or the clock; refresh dex_book, check the clock.
 version - software below the registry minimum; check updateRequired.

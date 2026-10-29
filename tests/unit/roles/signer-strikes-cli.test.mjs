@@ -60,3 +60,19 @@ test('control requires authentication, validates clear arguments, and exposes no
   assert.equal((await request(trader, 'GET', '/seller-strikes')).code, 404);
   assert.equal((await request(trader, 'POST', '/seller-strikes/clear', seller)).code, 404);
 });
+
+test('signer run validates the strike switch before network, proof or key setup', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'strike-config-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configFile = join(dir, 'role.json');
+  for (const strikes of [null, 'false', false, { enabled: 'false' }, { enabled: 1 }, { enable: true }]) {
+    writeFileSync(configFile, JSON.stringify({ role: 'signer', strikes }));
+    const result = spawnSync(process.execPath, ['bin/dex.mjs', '--config', configFile], { encoding: 'utf8', timeout: 15000 });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ZodError/);
+    assert.doesNotMatch(result.stderr, /ENOENT|ECONNREFUSED|keyring|network profile/i);
+  }
+  writeFileSync(configFile, JSON.stringify({ role: 'trader', strikes: { enabled: false } }));
+  const wrong = spawnSync(process.execPath, ['bin/dex.mjs', '--config', configFile], { encoding: 'utf8', timeout: 15000 });
+  assert.notEqual(wrong.status, 0); assert.match(wrong.stderr, /signer-only/);
+});

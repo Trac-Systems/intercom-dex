@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.42
+
+- Offers and takes keep working while existing trades or withdrawal status update during a balance read.
+  Available funds use the larger reservation from before or after the read, including loan and option funds.
+- Missing Trac balance blocks trigger replica recovery before the five-second read deadline. Read timing and
+  failures are recorded in the peer's `[trac-read]` logs.
+- Seller strikes are disabled by default. When enabled, transfer infrastructure failures exempt the affected
+  trade. Settlement still requires verified payment.
+- Works with 0.1.34 and later; no minimum-version change.
+
 ## 0.1.41
 
 - Balance reads recover on their own when the Trac or RESET connection stalls. Before, a stalled read could keep

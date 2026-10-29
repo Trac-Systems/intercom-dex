@@ -50,11 +50,23 @@ makers end these offers on their next announcement or restart and log the reason
 proofs cannot obtain new signer acknowledgements. Already committed signer shares remain available through the
 trade's normal claim/refund lifecycle, even after upgrade or proof expiry. Do not reset role storage during rollout.
 
-Two confirmed no-send trades within seven days pause the proven seller Trac address for seven days from the second
+Seller strikes are **disabled by default**. The signer role setting `"strikes": { "enabled": false }` prevents both
+new strikes and refusals based on existing records. `GET /status` reports `strikes.enabled`; startup logs say
+`seller strikes disabled` or `seller strikes enabled`. Only a boolean is accepted. Keep strikes off until the
+infrastructure is reliable. See [signer strike settings and update guidance](STRIKE-PAUSE.md).
+
+When explicitly enabled, two confirmed no-send trades within seven days pause the proven seller Trac address for seven days from the second
 strike, across DEX identity changes. One strike never pauses trading. Entries recorded without proof are ignored;
 otherwise a forged address could penalize its actual holder. Only trades with proof verified before acknowledgement
 can create new strikes. A failed escrow read, a missing/mismatched lock, or any authenticated transfer attempt never
 creates a strike. Later transfer evidence cancels its strike. No collateral, deposit, bond or stake is required.
+An own-node seller balance/transfer read failure or timeout during the observed window permanently exempts that
+trade. Enabled signers check seller balances and RESET gateway health every 15 seconds while holding; fewer than
+three eligible validators, unavailable health, or an unconfigured gateway exempts RESET trades. Reads are bounded
+to 30 seconds and a pending in-window read delays strike evaluation. The window includes the finality grace period.
+An existing signed seller abort identifying a read/gateway failure also exempts the trade, including late forwarded
+notices; generic send failures do not. Exemptions survive recovery and restart. Windows interrupted by a signer
+restart or observed with strikes disabled are not punished retrospectively. Settlement still requires verified payment.
 The list is local to each signer and persists across restarts. Operators can inspect and clear it through the
 running signer's authenticated local control API:
 
@@ -65,7 +77,8 @@ node bin/dex.mjs strikes clear --seller <Trac-address> --identity <DEX-public-ke
 
 Clearing applies to the address across all its DEX identities; `--identity` remains an audit field. Repeat a clear on
 each signer that recorded the seller. Clearing also prevents those overdue trades from recreating their strikes.
-Retain the data folder on rollback; older code ignores the extra ledger. Already acknowledged trades keep their
+Retain the data folder on rollback. Older strike-capable code does not honor the disabled switch or exemptions;
+review its strike enforcement before rolling back to it. Already acknowledged trades keep their
 existing settlement and recovery paths.
 
 Traders see refusal explanations in the dashboard, `dex_status` trade reasons, foreground logs, and
@@ -150,6 +163,7 @@ Role config (`signer.json`):
 {
   "network": "mainnet",
   "role": "signer",
+  "strikes": { "enabled": false },
   "dataDir": "/path/to/signer-data/signer",
   "serviceKey": "<venue key from the release page>",
   "servicePeerKey": "<venue peer key from the release page>",

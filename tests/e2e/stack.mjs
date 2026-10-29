@@ -249,7 +249,8 @@ try {
     control[n] = { url: `http://127.0.0.1:${await port()}`, tokenFile: path.join(dirs[n], 'control.token') };
     config.control = { port: Number(control[n].url.split(':').pop()), tokenFile: control[n].tokenFile };
     if (role === 'service') Object.assign(config, { registry, solana });
-    if (role === 'signer') Object.assign(config, { solana });
+    if (role === 'signer') Object.assign(config, { solana, strikes: { enabled: strikeMode },
+      trac: { resetGatewayUrl: manifest.gateways[0].gatewayUrl } });
     if (role === 'trader') {
       Object.assign(config, { solana, proof: { zkey: zkeyPath },
         trac: { walletFile: path.join(dirs[n], 'trac-wallet.json'), passwordEnv: 'DEX_WALLET_PASSWORD', resetGatewayUrl: manifest.gateways[0].gatewayUrl } });

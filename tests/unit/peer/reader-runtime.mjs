@@ -1,6 +1,7 @@
 import { cooperativeApply, summarizeApplyLogs } from '../../../peer/runtime/reader-scheduling.js';
 import { signedBalanceRead } from '../../../peer/src/trac/balances.js';
 import { createReadRecovery } from '../../../peer/runtime/read-recovery.js';
+import { createReadMetrics } from '../../../peer/runtime/read-metrics.js';
 import b4a from '../../../peer/node_modules/b4a/index.js';
 
 let responsive = false;
@@ -20,6 +21,16 @@ const base = { view: { core: { signedLength: 2 }, checkout: () => ({
 if ((await signedBalanceRead(base, 'balance', 'RESET', 20)).value !== '12') throw new Error('Read mismatch');
 await new Promise(resolve => setTimeout(resolve, 0));
 if (closed !== 1) throw new Error('Snapshot not closed');
+let serve;
+const sparse = { view: { core: { signedLength: 1746752 }, checkout: () => ({
+  get(_key, { onseq, onwait }) { onseq(1746751); onwait(1746751); return new Promise(resolve => { serve = resolve; }); },
+  close: async () => {},
+}) } };
+const metrics = [];
+const observe = createReadMetrics({ base: sparse, label: 'RESET', log: line => metrics.push(line) });
+const recovered = await signedBalanceRead(sparse, 'bal/a', 'RESET', 500, { stallMs: 10, onRead: observe,
+  onStall: event => { if (event.waitingSeq !== 1746751) throw new Error('Missing block mismatch'); serve({ value: '15' }); } });
+if (recovered.value !== '15' || !metrics[0]?.includes('"event":"balance_read"')) throw new Error('Early recovery/metrics mismatch');
 const lines = [], logger = { log: value => lines.push(value) }, restore = summarizeApplyLogs(logger);
 logger.log('#1 | ' + 'a'.repeat(64) + ': {}'); restore();
 if (lines.length !== 1 || lines[0] !== 'RESET reader applied 1 messages') throw new Error('Log summary mismatch');

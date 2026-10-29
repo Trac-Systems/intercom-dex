@@ -195,3 +195,14 @@ test('a slow channel join cannot announce a missing deal at or after sendBy', as
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sent.filter(e => e.kind === 'present').length, 0);
 });
+
+test('signer role defaults strikes off and reports the effective setting', async () => {
+  const { signer } = await setup();
+  assert.equal(signer.strikes.enabled, false);
+  assert.deepEqual(signer.status().strikes, { enabled: false });
+  const enabled = new Signer({ bridge: signer.bridge, identity: signer.identity, box: signer.box, store: signer.store,
+    trac: null, serviceKey: signer.serviceKey, strikes: { enabled: true } });
+  assert.equal(enabled.host.signerStrikes.enabled, true);
+  assert.deepEqual(enabled.status().strikes, { enabled: true });
+  assert.throws(() => new Signer({ strikes: { enabled: 'true' } }));
+});

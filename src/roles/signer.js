@@ -6,7 +6,7 @@ import { RegistryView, publicReceiver, nowSec, verifySummon } from './common.js'
 import { SOFTWARE, meetsVersion } from '../core/software.js';
 import { registryPair, pairStatus } from '../market/assets.js';
 import { checkProfileTerms } from '../net/profile.js';
-import { SellerStrikes } from './signer-strikes.js';
+import { SellerStrikes, strikeSettings } from './signer-strikes.js';
 import { addressProofRequired } from '../core/address-proof.js';
 
 const MAIN = 'intercom-dex', SIGNERS = 'intercom-dex:signers';
@@ -21,9 +21,9 @@ export const OLD_REGISTRY_SEC = 31 * 86400;
 // A committee signer: joins trades it is summoned to (only when it is really in the signed terms' committee and the
 // registry it trusts lists it), holds its encrypted share, verifies the seller's transfer on its own node, publishes.
 export class Signer {
-  constructor({ bridge, identity, box, store, trac, solana = null, serviceKey, profile = null, log = console.log }) {
+  constructor({ bridge, identity, box, store, trac, solana = null, serviceKey, profile = null, strikes, log = console.log }) {
     Object.assign(this, { bridge, identity, box, store, serviceKey, profile, log });
-    this.strikes = new SellerStrikes({ store, log });
+    this.strikes = new SellerStrikes({ store, log, ...strikeSettings(strikes) });
     this.host = new TradeHost({ bridge, identity, store, solana: null, trac, profile, serviceKey, log,
       addressProofRequired: () => !this.registry.usable || addressProofRequired(this.registry.usable),
       signerStrikes: this.strikes, signerSolana: solana });
@@ -33,6 +33,7 @@ export class Signer {
   }
 
   async start() {
+    this.log(`seller strikes ${this.strikes.enabled ? 'enabled' : 'disabled'}`);
     this.#rescue(process.env.DEX_RESCUE_TRADES);
     await this.relays.update(this.registry.usable);
     for (const ch of [MAIN, SIGNERS]) await this.bridge.join(ch);
@@ -118,7 +119,7 @@ export class Signer {
   }
 
   status() {
-    return { software: SOFTWARE, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
+    return { software: SOFTWARE, strikes: { enabled: this.strikes.enabled }, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '', pairs: pairStatus(this.registry.usable), dexKey: this.identity.publicKey, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       trades: [...this.host.trades.values()].map(t => ({ tradeId: t.state.tradeId, phase: t.state.phase, reason: t.state.reason ?? null })) };
   }

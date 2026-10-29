@@ -285,11 +285,45 @@ The two signed reads run concurrently with a five-second deadline each; timed-ou
 checkouts close and failures identify MSB or RESET. Concurrent requests for one
 address share a pending read, but completed balance results are not reused for
 trading or withdrawal checks. Missing signed blocks are unavailable data, not a
-zero balance. A RESET read timeout refreshes replica discovery and frees one
-reader connection, at most once per 30 seconds, without restarting the reader.
+zero balance. After one second waiting on the same missing block, the peer requests
+background transport recovery while that signed checkout is still open. Progress
+to another tree block cancels the stall alarm. Only Hypercore's missing-block
+callback arms it; completion of the lookup cancels it before checkout cleanup.
+The original five-second deadline remains in force,
+including cleanup, and there is no read restart or scan from block zero. Failure
+at the deadline still requests recovery for paths without a missing-block callback.
+Recovery refreshes discovery and explicitly retries a known replica even if the
+lookup hangs or normal connection retries were exhausted, at most once per 30
+seconds. RESET frees one connection only when its three slots are full; MSB never
+retires validator connections for a read. No missing data becomes a zero or a
+cached balance, and a successful read proves only the captured signed view, not
+that the process has reached the network's latest state.
 Dashboard values may be retained for display after a failed refresh, with a
 warning and the original successful-read timestamp; the trade ticket does not
 use those stale values as available funds.
+
+The peer emits `[trac-read]` JSON with `event:"balance_read",version:2` on the
+first sample, on transitions between success and failure, and otherwise every
+30 seconds of read activity. Group by host/service, `pid`, `since`, and `chain`.
+`reads`, `failures`, `timeouts`, `busy`, and `elapsedMsTotal` are cumulative;
+`elapsedMsMax` is the process maximum, and `elapsedMs` is the current sample.
+`lastSuccessAt` and `consecutiveFailures` expose sustained outages. `coreKey`,
+`signedLength`, `currentSignedLength`, `viewLength`, `blockReads`, `blockWaits`,
+`waitingSeq`, `corePeers`, `connected`, `connecting`, and `known` distinguish an
+unserved tree block from an empty swarm, unsigned progress or slow local work.
+The lines contain no wallet addresses or balance values. Recovery's `stalled`
+event reports the missing sequence before the read deadline, then `retry` or
+`discovery_failed` describes the transport attempt; a retry is not proof of a
+successful read.
+
+A watcher can alert on repeated timeouts (for example, at least three failures
+and over 20% failed reads in a rolling minute), or no successful read for 60
+seconds while reads continue. Derive average latency from deltas of
+`elapsedMsTotal / reads`; repeated samples over one second are a latency warning.
+Correlate persistent `waitingSeq`/`coreKey` and frozen signed lengths with replica
+counts. No line during idle periods is not an outage signal; these metrics add
+no polling, heartbeat, wallet read or timer. Collector polling/alerting is an
+operational follow-up, separate from the gateway's validator health monitor.
 
 `withdrawalStatus({id, asset, to, amount}) -> {ok, unknown, txHash?, reason?}`
 checks the matching durable intent and signed finality. Without a journaled intent
