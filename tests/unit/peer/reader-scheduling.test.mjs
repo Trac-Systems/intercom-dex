@@ -76,9 +76,9 @@ test('per-entry message logs are summarized while diagnostics survive unchanged'
 test('stalled reader recovery rotates one replica per cooldown and never touches the reader store or a closing swarm', async () => {
   let time = 0, refreshed = 0, destroyed = 0;
   class Swarm extends EventEmitter {
-    constructor() {
-      super(); this.maxPeers = 3;
-      this.connections = new Set(Array.from({ length: 3 }, () => Object.assign(new EventEmitter(), {
+    constructor(options) {
+      super(); this.maxPeers = options.maxPeers;
+      this.connections = new Set(Array.from({ length: this.maxPeers }, () => Object.assign(new EventEmitter(), {
         destroy() { this.destroyed = true; destroyed++; this.emit('close'); }
       })));
     }
@@ -88,7 +88,8 @@ test('stalled reader recovery rotates one replica per cooldown and never touches
   const reader = { config: { dhtBootstrap: [], channel: Buffer.alloc(32) }, base: {} };
   const logs = [];
   await replicateReader(reader, null, { Swarm, now: () => time, log: value => logs.push(value) });
-  assert.equal(reader.recoverRead(), true); assert.equal(reader.recoverRead(), false);
+  assert.equal(reader.recoverSubnet, reader.recoverRead);
+  assert.equal(reader.recoverSubnet({ code: 'SUBNET_APPLY_STALLED' }), true); assert.equal(reader.recoverRead(), false);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(destroyed, 1); assert.equal(refreshed, 1);
   reader.swarm.connections.add(Object.assign(new EventEmitter(), { destroy() { this.destroyed = true; destroyed++; this.emit('close'); } }));

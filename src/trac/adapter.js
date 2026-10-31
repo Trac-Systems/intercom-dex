@@ -320,7 +320,7 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
             return { ...event(), ok: false, final: proof?.final === true, amount: proof?.amount ?? null,
               reason: proof?.reason ?? 'not_final', ...(fresh ? { notApplied } : {}) };
           }
-          // A previously recorded final transfer cannot become unapplied when a replica falls behind.
+          // Recorded final transfers remain final when a replica falls behind.
         }
         const now = seconds();
         if (finalizedAt > now) reject('clock_regressed');

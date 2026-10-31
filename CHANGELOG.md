@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.47
+
+- Peers keep reading when a Trac network replica is slow (bounded reads, automatic reconnect, stalled-reader recovery). Update recommended for all peer operators.
+
 ## 0.1.46
 
 - Completed trade reports now retry less often, with at most three attempts a minute across all trades. After seven

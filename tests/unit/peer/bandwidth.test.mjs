@@ -218,7 +218,7 @@ test('real Autobase counters include per-core proofs and blocks without download
   assert.ok(result.reader.every(row => /^[0-9a-f]{64}$/.test(row.detail)));
 });
 
-test('RESET discovery has three outgoing slots, no seed announcement, bounded flush and unchanged Autobase replication', async () => {
+test('RESET discovery has sixteen outgoing slots, no seed announcement, bounded flush and unchanged Autobase replication', async () => {
   class Swarm extends EventEmitter {
     constructor(options) { super(); this.options = options; }
     join(topic, options) { this.topic = topic; this.discovery = options; }
@@ -227,7 +227,9 @@ test('RESET discovery has three outgoing slots, no seed announcement, bounded fl
   const replicated = [], reader = { config: { dhtBootstrap: ['127.0.0.1:1'], channel: Buffer.alloc(32) },
     base: { replicate: connection => { replicated.push(connection); return new EventEmitter(); } } };
   await replicateReader(reader, null, { Swarm, timeoutMs: 1 });
+  assert.equal(RESET_CONNECTIONS, 16);
   assert.equal(reader.swarm.options.maxPeers, RESET_CONNECTIONS);
+  assert.equal(reader.swarm.options.maxClientConnections, RESET_CONNECTIONS);
   assert.equal(reader.swarm.options.firewall(null, null), false);
   assert.equal(reader.swarm.options.firewall(null, {}), true);
   assert.deepEqual(reader.swarm.discovery, { server: false, client: true });

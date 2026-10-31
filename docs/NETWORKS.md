@@ -28,7 +28,7 @@ The shared fields are:
   The peer verifies the manifest hash/commit and every file before importing the
   protocol or contract. Relative imports stay within the vendored tree; bare
   imports resolve through `peer/node_modules` (the RESET-compatible trac-peer
-  commit `2e6f458cb1baa075bc52230c6eb9a3a349d91421`).
+  commit `d0e3e5fd5fb971bf69289f2c6dc21194a4edae15`).
 - Only local tests may override `peer.trac.reset.source.directory` with an
   absolute vendored fixture directory (and its commit/manifest hash).
 - Local alone allows `peer.trac.reset.beaconOptions` for the existing test chain.

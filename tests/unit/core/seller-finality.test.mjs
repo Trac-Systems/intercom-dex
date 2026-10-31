@@ -118,7 +118,7 @@ test('seller checks at most once a minute after sendBy and cannot close before t
   s = step(r.state, checked(r.state)).state;
   assert.equal(s.phase, 'transferring');
   s = step(s, settlement(s)).state;
-  assert.equal(s.phase, 'transferring', 'a previous negative lookup is never used to close');
+  assert.equal(s.phase, 'transferring', 'a stale negative lookup cannot close the trade');
 });
 
 for (const phase of ['transferring', 'awaitShares']) {
