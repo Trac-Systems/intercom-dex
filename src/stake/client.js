@@ -10,6 +10,16 @@ import { identicalReady, openShare } from '../locks/dkg.js';
 import { reconstruct, publicOf, verifyShare } from '../locks/crypto/edvss.js';
 
 const random = () => randomBytes(32).toString('hex');
+const tnkText = units => { const v = BigInt(units), whole = v / 10n ** 18n, frac = (v % 10n ** 18n).toString().padStart(18, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : `${whole}`; };
+// Each piece is its own Trac lock: the deposit pays two transfer fees per piece and leaves a reserve in it, so the
+// lock can pay its own fee when the RESET goes back out. The unspent part of the reserve comes back.
+export function tnkShort(count, reserve, fee, free) {
+  const need = count * (reserve + 2n * fee), back = reserve > 2n * fee ? count * (reserve - 2n * fee) : 0n;
+  return `This deposit needs ${tnkText(need)} TNK and the wallet has ${tnkText(free)} TNK free. The stake is split into ${count} ` +
+    `piece${count === 1n ? '' : 's'}; each piece pays two Trac network fees (${tnkText(2n * fee)} TNK) and keeps ${tnkText(reserve)} TNK so it can pay ` +
+    `its own fee when the RESET is returned. About ${tnkText(back)} TNK comes back when you withdraw. Buy TNK on intercom-dex or send TNK to this wallet, then try again.`;
+}
 const positive = x => typeof x === 'string' && /^[1-9][0-9]{0,30}$/.test(x);
 export class StakeClient {
   constructor({ store, identity, box, me, registry, clock, trac, price, request, funding, collector, exclusive = fn => fn(), freeBalances = null }) {
@@ -85,9 +95,10 @@ export class StakeClient {
     const depositUsd = usdForReset(amount, q, true), active = Object.values(this.ledger().read().pieces).filter(p => p.state !== 'retired');
     const heldUsd = active.reduce((sum, p) => sum + BigInt(p.exposureUsd), 0n);
     const markedUsd = active.reduce((sum, p) => sum + BigInt(usdForReset(p.descriptor.principalReset, q, true)), 0n);
-    if (BigInt(depositUsd) > 200000000n || active.length + pieces.length > 200 ||
+    if (active.length + pieces.length > 200 ||
         [heldUsd, markedUsd].some(held => held + BigInt(depositUsd) > BigInt(settings.stake.maxUsdPerAddress))) throw new Error('This deposit exceeds the stake cap. Reduce the amount.');
-    if (reserve < 3n * fee || BigInt(available.TNK.free) < count * (reserve + 2n * fee)) throw new Error('Add TNK to cover stake funding fees and collection reserves.');
+    if (reserve < 3n * fee) throw new Error('The Trac network fee is above the stake lock reserve right now. Try again later.');
+    if (BigInt(available.TNK.free) < count * (reserve + 2n * fee)) throw new Error(tnkShort(count, reserve, fee, available.TNK.free));
     if (BigInt(available.RESET.free) < BigInt(amount)) throw new Error('The wallet does not have enough free RESET for this deposit.');
     return { amount, pieces: pieces.length, tnkFee: (2n * fee * count).toString(), tnkReserve: (reserve * count).toString(),
       tnkTotal: (count * (reserve + 2n * fee)).toString(), maintenanceTnk: (count * (reserve + 2n * fee)).toString(), depositUsd, capUsd: settings.stake.maxUsdPerAddress,
@@ -110,7 +121,8 @@ export class StakeClient {
         const pieces = splitDeposit(amount, q), balances = await this.trac.balances(this.me.tracAddr);
         const available = this.freeBalances ? await this.freeBalances() : { TNK: { free: balances.TNK }, RESET: { free: balances.RESET } };
         const reserve = BigInt(policy.custody.tnkReserve), fee = BigInt(balances.feeTnk);
-        if (reserve < 3n * fee || BigInt(available.TNK.free) < BigInt(pieces.length) * (reserve + 2n * fee)) throw new Error('Add TNK to cover stake funding fees and collection reserves.');
+        if (reserve < 3n * fee) throw new Error('The Trac network fee is above the stake lock reserve right now. Try again later.');
+        if (BigInt(available.TNK.free) < BigInt(pieces.length) * (reserve + 2n * fee)) throw new Error(tnkShort(BigInt(pieces.length), reserve, fee, available.TNK.free));
         if (BigInt(available.RESET.free) < BigInt(amount)) throw new Error('The wallet does not have enough free RESET for this deposit.');
         const batchId = random(), owner = { dexKey: this.identity.publicKey, tracAddr: this.me.tracAddr, boxKey: this.box.publicKey };
         this.store.put(`stake-client-epoch-${policy.epoch.id}`, policy);

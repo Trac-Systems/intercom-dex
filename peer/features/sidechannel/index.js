@@ -2,6 +2,7 @@ import Feature from 'trac-peer/src/artifacts/feature.js';
 import b4a from 'b4a';
 import c from '../../node_modules/compact-encoding/index.js';
 import { PublicSend } from './public-send.js';
+import { StakeRoutes } from './stake-routes.js';
 
 // Charge the frame before decoding; skip oversized or deeply nested JSON before parsing its text. A frame that is not
 // well-formed JSON fails with a plain Error, so protomux closes only that connection: it rethrows SyntaxError and
@@ -142,6 +143,9 @@ class Sidechannel extends Feature {
     this.discovery = config.discovery ?? { server: true, client: true };
     this.bandwidth = config.bandwidth ?? null;
     this.publicDelivery = config.publicDelivery ?? null;
+    this.stakeRoutes = config.stakeRouting ? new StakeRoutes({ venueKey: config.publicDelivery?.venueKey,
+      now: () => this._now(), verifyOuter: (p, key) => this._verifySig(p, key) }) : null;
+    this.stakeWaiting = new Map(); this.stakeWaitingBytes = 0;
     this.networkLog = config.networkLog ?? (event => console.log(`[dex-network] ${JSON.stringify(event)}`));
     this.publicChannels = new Set(this.publicDelivery?.channels ?? []);
     this.publicSendVerified = new WeakMap();
@@ -371,6 +375,8 @@ class Sidechannel extends Feature {
     // Message-level signatures allow receivers to enforce "owner-only write" even when
     // messages are relayed (the transport peer can be a relay, not the original sender).
     this._attachSig(payload);
+    const localStakeKey = this.stakeRoutes?.local(channel, payload);
+    if (localStakeKey) for (const [id, item] of this.stakeWaiting) if (item.to === localStakeKey) this._dropStakeWaiting(id);
     return payload;
   }
 
@@ -415,6 +421,17 @@ class Sidechannel extends Feature {
   }
 
   _send(record, channel, payload, direction = 'originated') {
+    if (this.stakeRoutes && channel === 'intercom-dex:bonds' && !payload?.message?.control) {
+      if (!this.stakeRoutes.allows(channel, payload, record.connection)) {
+        this._holdStake(channel, payload, direction); return false;
+      }
+      const page = ['stakeManifest', 'stakePage'].includes(payload.message.kind);
+      // Keep the public budget for ordinary leaf replies and untrusted relayed
+      // traffic. Only the local authenticated server app can originate a paged
+      // payout reply; its transport already restricts paging to configured peers.
+      if (!this.publicLeaves.has(record.connection) || direction === 'originated' && page)
+        return this._sendNow(record, channel, payload, direction);
+    }
     if (this.publicSend && this.publicChannels.has(channel)) {
       const state = { start: 0, end: 0 }; c.json.preencode(state, payload);
       // Coalescing must not let a spoofed sender replace another maker's queued offer. Verify once per frame,
@@ -423,6 +440,41 @@ class Sidechannel extends Feature {
       return this.publicSend.push(record, channel, payload, direction, state.end, this.publicSendVerified.get(payload));
     }
     return this._sendNow(record, channel, payload, direction);
+  }
+
+  _holdStake(channel, payload, direction) {
+    if (normalizeKeyHex(this.peer?.wallet?.publicKey) !== this.stakeRoutes.venueKey) return;
+    const m = this.stakeRoutes.message(channel, payload);
+    if (!m || this.stakeRoutes.localKeys.has(m.to) || this.stakeRoutes.route(m.to) || this.stakeWaiting.has(payload.id)) return;
+    const bytes = b4a.byteLength(JSON.stringify(payload));
+    // Large held frames may originate only from the authenticated local app.
+    // Strangers can reserve only a small ordinary request while a signer boots.
+    if (direction !== 'originated' && (m.kind !== 'stakeRequest' || bytes > 4096) ||
+        this.stakeWaiting.size >= 64 || this.stakeWaitingBytes + bytes > 8 * 1024 * 1024) return;
+    const timer = setTimeout(() => this._dropStakeWaiting(payload.id), 30000); timer.unref?.();
+    this.stakeWaiting.set(payload.id, { channel, payload, direction, to: m.to, bytes, timer }); this.stakeWaitingBytes += bytes;
+  }
+
+  _dropStakeWaiting(id) {
+    const item = this.stakeWaiting.get(id);
+    if (!item) return;
+    clearTimeout(item.timer); this.stakeWaitingBytes -= item.bytes; this.stakeWaiting.delete(id);
+  }
+
+  _flushStakeWaiting(to) {
+    const route = this.stakeRoutes.route(to);
+    if (!route) return;
+    for (const [id, item] of this.stakeWaiting) {
+      if (item.to !== to) continue;
+      for (const [connection, channels] of this.connections) {
+        const record = channels.get(item.channel);
+        if (this._getRemoteKey(connection) !== route.peerKey || !this._usableRecord(connection, item.channel, record)) continue;
+        this._dropStakeWaiting(id);
+        if (this._remoteAuthorized(item.channel, connection) && this._checkPow(item.payload, item.channel))
+          this._send(record, item.channel, item.payload, item.direction);
+        break;
+      }
+    }
   }
 
   _sendNow(record, channel, payload, direction = 'originated') {
@@ -1080,6 +1132,8 @@ class Sidechannel extends Feature {
           }
           return;
         }
+        const stakeRoute = this.stakeRoutes?.learn(entry.name, payload, connection);
+        if (stakeRoute) this._flushStakeWaiting(stakeRoute);
         const control = payload?.message?.control;
         const requestedChannel = payload?.message?.channel;
         const isWelcome = this._isWelcomeMessage(payload);
@@ -1644,6 +1698,8 @@ class Sidechannel extends Feature {
   }
 
   async stop() {
+    this.stakeRoutes?.clear();
+    for (const id of this.stakeWaiting.keys()) this._dropStakeWaiting(id);
     clearInterval(this._publicRepairTimer); this._publicRepairTimer = null;
     this.publicSend?.close();
     this.publicSendVerified = new WeakMap();

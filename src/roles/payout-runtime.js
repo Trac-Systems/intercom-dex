@@ -61,9 +61,13 @@ export class PayoutRole {
     await this.syncAwards(context);
     await this.service.payout();
     if (counted > cursor.height) {
-      const facts = await this.stakeRuntime.request(context.venueKey, 'rewardBlock', { height: cursor.height + 1 });
+      // Checkpoints exist only for the current counted height. After a missed height the cursor moves on to the
+      // current one; the skipped heights earn nothing instead of stopping rewards for good.
+      const height = counted === cursor.height + 1 ? cursor.height + 1 : counted;
+      const facts = await this.stakeRuntime.request(context.venueKey, 'rewardBlock', { height });
       const head = verifyCertificate(facts.headCertificate, context, 'reward-head').body;
-      if (head.height !== cursor.height + 1 || head.blockHash !== await this.blockClock.hash(head.height) || head.previousHash !== cursor.blockHash ||
+      if (head.height !== height || head.blockHash !== await this.blockClock.hash(head.height) ||
+          head.height === cursor.height + 1 && head.previousHash !== cursor.blockHash ||
           head.at > this.now() || head.policyId !== this.policy(head.at).settings.policyId) throw new Error('Reward checkpoint does not follow the counted chain');
       for (const field of ['height', 'blockHash', 'previousHash', 'at']) if (facts[field] !== head[field]) throw new Error('Reward head mismatch');
       for (const kind of ['inventory', 'book', 'price']) if (head[kind + 'Digest'] !== factDigest(verifyCertificate(facts[kind + 'Certificate'], context, kind)))
@@ -139,7 +143,7 @@ export class PayoutRole {
   }
   poolStatus() {
     const snapshot = this.poolSnapshot, r = this.service?.ledger.read();
-    if (!snapshot || !r || this.now() < snapshot.at || this.now() - snapshot.at > 30)
+    if (!snapshot || !r || this.now() < snapshot.at || this.now() - snapshot.at > 900)
       return { poolState: 'unknown', poolBalance: null };
     const unpaid = Object.values(r.accounts).reduce((sum, a) => sum + BigInt(a.unpaid), 0n);
     const daily = BigInt(this.policy().settings.settings.rewards.dailyReset), next = BigInt((r.height ?? 0) + 1);

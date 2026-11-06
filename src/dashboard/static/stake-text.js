@@ -150,7 +150,7 @@ export const saleBondKey = (sale, stake, now = Date.now()) => (sale ? JSON.strin
 
 // Notes under the stake row: what it is for, coverage, the suggested amount, the cap and what is on its way.
 const STAKE_REASONS = {
-  price_unavailable: 'There is no RESET price for today yet: it comes from a RESET trade completed today. Deposits and the stake’s dollar value wait for it.',
+  price_unavailable: 'The RESET price cannot be checked right now. It comes from RESET trades on intercom-dex that the stake signers have confirmed; deposits and the stake’s dollar value wait for it. This usually clears within a minute.',
   over_cap: 'Stake above the limit per address covers no sales and earns no rewards.',
   tnk_short: 'Your wallet does not hold enough TNK for the stake transfers.',
 };
@@ -190,6 +190,6 @@ export function weightText(r, stake = null) {
 }
 export function poolText(r) {
   if (r.poolState === 'empty') return 'Rewards paused, pool empty';
-  if (r.poolState === 'unknown') return 'Pool balance unknown right now';
+  if (r.poolState === 'unknown') return 'Checking the reward pool…';
   return r.dailyBudget ? `Paying ${r.dailyBudget.text} RESET a day` : 'Paying rewards';
 }

@@ -14,7 +14,7 @@ test('constants and PDA seeds match the Rust program', () => {
   assert.equal(USDC_MINT.toBase58(), 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
   assert.equal(USDC_DECIMALS, 6);
   assert.equal(PROGRAM_ERRORS[17], 'FeeMismatch');
-  assert.equal(DEFAULT_ENDPOINTS.length, 6);
+  assert.equal(DEFAULT_ENDPOINTS.length, 5);
   assert.ok(e.deriveConfigPda().pda.equals(PLATFORM_CONFIG));
   for (const [seeds, actual] of [
     [[Buffer.from('escrow'), Buffer.from(options.paymentHashHex, 'hex')], e.deriveEscrowPda(options.paymentHashHex)],

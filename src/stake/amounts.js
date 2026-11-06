@@ -31,7 +31,7 @@ export function penaltyTarget({ base, baseAmount, quoteAmount, fees }, q, settin
 export function splitDeposit(amount, q, maxPieces = 100) {
   positive.parse(amount);
   if (!Number.isSafeInteger(maxPieces) || maxPieces < 1 || maxPieces > 100) throw new Error('Invalid piece cap');
-  const sizes = ['500000', '5000000', '50000000'].map(u => BigInt(resetForUsd(u, q)));
+  const nominal = ['500000', '5000000', '50000000', '500000000'], sizes = nominal.map(u => BigInt(resetForUsd(u, q)));
   let left = BigInt(amount); const pieces = [];
   const take = (size, count, nominalTargetUsd) => {
     for (let i = 0; i < count && left >= size; i++) {
@@ -41,9 +41,9 @@ export function splitDeposit(amount, q, maxPieces = 100) {
   };
   take(sizes[0], 10, '500000');
   if (sizes[1] !== sizes[0]) take(sizes[1], 10, '5000000');
-  for (const i of [2, 1, 0]) {
+  for (const i of [3, 2, 1, 0]) {
     if (sizes.indexOf(sizes[i]) !== i) continue;
-    take(sizes[i], maxPieces + 1, ['500000', '5000000', '50000000'][i]);
+    take(sizes[i], maxPieces + 1, nominal[i]);
   }
   if (left > 0n) { if (pieces.length === maxPieces) throw new Error('bond_setup_unavailable'); pieces.push({ principalReset: left.toString(), nominalTargetUsd: null }); }
   return pieces;

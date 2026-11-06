@@ -1,5 +1,5 @@
 import { stakeAdmissionRequired } from '../stake/prevention.js';
-import { validatePolicyTransition } from '../stake/settings.js';
+import { validatePolicyTransition, earlierActivationNotice } from '../stake/settings.js';
 import { buildRegistry } from '../core/registry.js';
 import { tradeId as termsTradeId, transferNonce, validateTerms } from '../core/terms.js';
 import { stableJSON, sha256Hex, hexToBytes, fromLe32, le32 } from '../core/canonical.js';
@@ -146,6 +146,7 @@ export class Service {
     const registry = buildRegistry({ ...content, version: highest + 1, issuedAt: this.now() });
     if (previous?.sellerBond && !registry.sellerBond) throw new Error('Cannot remove stake policy');
     if (registry.sellerBond) validatePolicyTransition(previous?.sellerBond, registry.sellerBond, this.now());
+    earlierActivationNotice(previous?.sellerBond, registry.sellerBond, this.now(), registry.params.sendWindowSec);
     this.store.put(`service-registry-v${registry.version}`, registry);
     this.store.put('service-registry', registry);
     return registry;

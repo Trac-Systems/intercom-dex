@@ -5,9 +5,10 @@ import { StakeLedger, unitId, reservationId } from '../../../src/stake/ledger.js
 import { defaultSettings } from '../../../src/stake/settings.js';
 import { registryPolicy, secrets, memoryStore } from './helpers.mjs';
 import { tracAddress } from '../core/helpers.mjs';
+const cap400 = () => { const s = defaultSettings(); s.stake.maxUsdPerAddress = '400000000'; return s; }; // the first mainnet cap, which these cases measure
 const hex = n => n.toString(16).padStart(64, '0');
 const address = tracAddress(hex(41)), buyer = tracAddress(hex(42));
-const settings = defaultSettings(), price = { numerator: '20000000', denominator: '1' };
+const settings = cap400(), price = { numerator: '20000000', denominator: '1' };
 const context = { networkId: 1, venueKey: hex(8), epoch: registryPolicy().epoch };
 const cert = (kind, body) => secrets.slice(0, 3).map(s => signFact({ v: 1, networkId: 1, venueKey: context.venueKey, epochId: context.epoch.id, kind, body }, s));
 function fixture({ purpose = 'seller', amount = '2500000', store = memoryStore() } = {}) {

@@ -389,7 +389,16 @@ test('a repriced deposit cannot spend TNK already held by ordinary wallet operat
     trac: { balances: async () => ({ RESET: '10000000', TNK: '10000', feeTnk: '30' }),
       proveAddress: async () => { proofs++; } },
     freeBalances: async () => ({ RESET: { free: '10000000' }, TNK: { free: '200' } }) });
-  await assert.rejects(client.deposit('2500000'), /Add TNK/);
+  await assert.rejects(client.deposit('2500000'), /This deposit needs [0-9.]+ TNK and the wallet has 0\.0000000000000002 TNK free/);
   assert.equal(prices, 2); assert.equal(proofs, 0);
   assert.equal(store.get('stake-client-operation'), null, 'refusal precedes capacity, DKG and funding');
+});
+
+test('finalized clock: the oldest agreeing pair wins; one lone reader does not block it', async () => {
+  const read = async endpoint => { if (endpoint === 'down') throw Error('rate limited');
+    const data = Buffer.alloc(40); data.writeBigInt64LE(BigInt(endpoint), 32);
+    return { slot: Math.floor(Number(endpoint) / 10), value: { owner: 'Sysvar1111111111111111111111111111111111111', data } }; };
+  assert.deepEqual(await finalizedStakeClock({ endpoints: ['100', '200', '203', 'down'], read }), { at: 200, slot: 20 });
+  assert.deepEqual(await finalizedStakeClock({ endpoints: ['200', '203', '900', '904'], read }), { at: 200, slot: 20 }, 'never the later pair');
+  await assert.rejects(finalizedStakeClock({ endpoints: ['100', '200', 'down'], read }), /disagree/);
 });

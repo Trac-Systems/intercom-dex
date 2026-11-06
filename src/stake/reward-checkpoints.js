@@ -7,6 +7,25 @@ import { rewardWeights } from './rewards.js';
 import { effectiveSettings } from './settings.js';
 import { CompletionLog } from './price.js';
 
+// A slow or old fourth member must not consume the proposal's freshness window
+// after three matching original members have answered. All outstanding promises
+// retain rejection handlers; their transport deadlines still bound their lifetime.
+function firstQuorum(requests, select) {
+  return new Promise((resolve, reject) => {
+    const values = []; let remaining = requests.length, finished = false, error = new Error('Three matching stake votes are required');
+    const settle = (value, fulfilled) => {
+      if (finished) return;
+      if (fulfilled) values.push(value);
+      if (values.length >= 3) {
+        try { const result = select(values); values.length = 0; finished = true; resolve(result); return; }
+        catch (e) { error = e; }
+      }
+      if (--remaining === 0) { values.length = 0; finished = true; reject(error); }
+    };
+    for (const request of requests) Promise.resolve(request).then(value => settle(value, true), () => settle(null, false));
+  });
+}
+
 // Checkpoints are taken only at the current signed RESET height. An unavailable
 // historical checkpoint is never reconstructed from today's inventory or book.
 export class RewardCheckpoints {
@@ -63,8 +82,8 @@ export class RewardCheckpoints {
     const accounts = new Map(capture.inventory.accounts.map(a => [a.address, [...a.pieces]])), certificates = [];
     for (const origin of history) {
       const old = origin.context;
-      const replies = await Promise.allSettled(old.epoch.members.map(m => this.request(m.dexKey, 'rewardOriginalInventory', { ...head, epochId: old.epoch.id })));
-      const certificate = matchingCertificate(replies.flatMap(r => r.status === 'fulfilled' ? [r.value] : []), old, 'inventory');
+      const certificate = await firstQuorum(old.epoch.members.map(m => this.request(m.dexKey, 'rewardOriginalInventory', { ...head, epochId: old.epoch.id })),
+        values => matchingCertificate(values, old, 'inventory'));
       const inventory = verifyCertificate(certificate, old, 'inventory').body;
       if (inventory.height !== head.height || inventory.blockHash !== head.blockHash) throw new Error('Original reward inventory differs');
       certificates.push(certificate);
@@ -94,18 +113,18 @@ export class RewardCheckpoints {
       const head = await this.block(input.height), capture = this.store.get(`stake-reward-capture-${context.epoch.id}-${input.height}`);
       if (!capture) throw new Error('Contemporaneous reward checkpoint is unavailable');
       const { at } = capture;
-      const inventoryReplies = await Promise.allSettled(context.epoch.members.map(m => this.request(m.dexKey, 'rewardInventory', head)));
-      const inventoryCertificate = matchingCertificate(inventoryReplies.flatMap(r => r.status === 'fulfilled' ? [r.value] : []), context, 'inventory');
+      const inventoryCertificate = await firstQuorum(context.epoch.members.map(m => this.request(m.dexKey, 'rewardInventory', head)),
+        values => matchingCertificate(values, context, 'inventory'));
       const inventory = verifyCertificate(inventoryCertificate, context, 'inventory').body;
       const price = await this.price.handle('priceSnapshot', {}, from), q = await this.price.import(price);
       const offers = capture.offers.filter(o => o.side === 'sell');
       const book = signFact(fact('book', liveRewardBook({ inventory, offers, registry: this.registry(), settings: effectiveSettings(policy, at).settings, price: q, at })), this.identity.secretKey);
       const proposal = { ...head, at, book, price, offers };
-      const results = await Promise.allSettled(context.epoch.members.map(m => this.request(m.dexKey, 'rewardVote', proposal)));
-      const values = results.flatMap(r => r.status === 'fulfilled' ? [r.value] : []);
-      const certificates = Object.fromEntries(['inventory', 'book', 'price'].map(kind =>
-        [kind + 'Certificate', matchingCertificate(values.map(v => v[kind]), context, kind)]));
-      const headCertificate = matchingCertificate(values.map(v => v.head), context, 'reward-head');
+      const { certificates, headCertificate } = await firstQuorum(context.epoch.members.map(m => this.request(m.dexKey, 'rewardVote', proposal)), values => ({
+        certificates: Object.fromEntries(['inventory', 'book', 'price'].map(kind =>
+          [kind + 'Certificate', matchingCertificate(values.map(v => v?.[kind]), context, kind)])),
+        headCertificate: matchingCertificate(values.map(v => v?.head), context, 'reward-head'),
+      }));
       const certified = verifyCertificate(headCertificate, context, 'reward-head').body;
       for (const kind of ['inventory', 'book', 'price']) if (certified[kind + 'Digest'] !== factDigest(verifyCertificate(certificates[kind + 'Certificate'], context, kind)))
         throw new Error('Reward checkpoint components differ');

@@ -292,13 +292,14 @@ test('retry delivery: only a failing or overdue sale, shows what is at risk, cal
 });
 
 test('sell previews and the sell ticket show the bond the trader would sign, or why the sale cannot start', async t => {
-  const fx = traderFixture(), s = await startFor(t, fx);
+  // Both venues price at the same second: their price references must match exactly.
+  const fx = traderFixture(), s = await startFor(t, fx), now = nowSec();
   const preview = (action, input) => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action, input } }).then(r => r.json());
   const ticket = input => httpCall(s.port, { path: `/api/sale-bond?${new URLSearchParams(input)}`, cookie: s.cookie }).then(r => r.json());
   const sale = { pair: 'TNK/USDC', side: 'sell', amount: '1.5', price: '0.5', ttlMin: 30 };
   assert.ok(!(await preview('offer', sale)).lines.some(([k]) => k.startsWith('Bond')), 'the venue does not bond sales yet');
   assert.deepEqual(await ticket({ pair: 'TNK/USDC', amount: '1.5', price: '0.5' }), { bond: null });
-  armBonds(fx);
+  armBonds(fx, { now });
   const sell = await preview('offer', sale);
   assert.deepEqual(sell.lines[3], ['Bond reserved for this sale', '$0.50 (0.00025 RESET)']);
   assert.equal(sell.warning, null);
@@ -316,7 +317,7 @@ test('sell previews and the sell ticket show the bond the trader would sign, or 
   const takeBuy = await preview('take', { offerId: fx.theirs[0].offerId });
   assert.ok(!takeBuy.lines.some(([k]) => /bond/i.test(k)), "no seller's bond while the core cannot tell it");
   assert.doesNotMatch(takeBuy.warning ?? '', /Update the app/, 'this app can receive a bond');
-  const seller = bondedVenue({ me: fx.theirs[0].maker, registry: fx.f.registry, now: nowSec(), boxKey: 'b2'.repeat(32) });
+  const seller = bondedVenue({ me: fx.theirs[0].maker, registry: fx.f.registry, now, boxKey: 'b2'.repeat(32) });
   fx.role.stakeRuntime.admission.cache.set(fx.theirs[0].maker.dexKey, seller.runtime.admission.cache.get(fx.theirs[0].maker.dexKey));
   assert.deepEqual((await preview('take', { offerId: fx.theirs[0].offerId, amount: '1.5' })).lines.at(-1),
     ['Seller’s bond', "$0.50 (0.00025 RESET) from the seller's stake, paid to you if the seller does not deliver in time"]);

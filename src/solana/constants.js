@@ -9,7 +9,6 @@ export const DEFAULT_ENDPOINTS = Object.freeze([
   'https://public.rpc.solanavibestation.com',
   'https://solana.api.pocket.network',
   'https://solana.leorpc.com/?api_key=FREE',
-  'https://rpc.solanatracker.io/public',
   'https://solana-rpc.publicnode.com',
 ]);
 export const DEFAULT_SLOT_TOLERANCE = 32;

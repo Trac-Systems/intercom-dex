@@ -18,7 +18,7 @@ export const settingsSchema = z.object({
   penaltyBps: uint.min(50).max(1000), minPenaltyUsd: units('50000', '5000000'),
   overdueDelaySec: uint.min(300).max(21600), proofWindowSec: uint.min(3600).max(259200),
   stake: z.object({ withdrawDelaySec: uint.min(3600).max(604800), suggestBufferBps: uint.min(10000).max(30000),
-    maxUsdPerAddress: units('500000', '400000000') }).strict(),
+    maxUsdPerAddress: units('500000', '1000000000000') }).strict(),
   rewards: z.object({ dailyReset: units('0', '100000000000'), activeWeightBps: uint.min(10000).max(50000),
     payoutMinReset: units('1', '10000000000'), payoutIntervalSec: uint.min(3600).max(2592000) }).strict(),
 }).strict();
@@ -26,7 +26,7 @@ export const settingsSchema = z.object({
 export function defaultSettings() {
   return settingsSchema.parse({ admissionFreshSec: 180, priceLookbackSec: 604800, randomnessWaitSec: 240, penaltyBps: 300, minPenaltyUsd: '500000', overdueDelaySec: 1800, proofWindowSec: 86400,
     proofClock: { sampleGapSec: 60, sampleFreshSec: 90, checkpointFreshSec: 180 },
-    stake: { withdrawDelaySec: 86400, suggestBufferBps: 15000, maxUsdPerAddress: '400000000' },
+    stake: { withdrawDelaySec: 86400, suggestBufferBps: 15000, maxUsdPerAddress: '10000000000' },
     rewards: { dailyReset: '500000000', activeWeightBps: 20000, payoutMinReset: '10000000', payoutIntervalSec: 604800 } });
 }
 
@@ -90,6 +90,13 @@ export function effectiveSettings(policy, now) {
   return structuredClone(economics.pending && economics.pending.effectiveAt <= now ? economics.pending : economics.active);
 }
 
+// The publishing venue's own rule for moving activation earlier: unbonded trades admitted before the change
+// keep their full send window, exactly as with the original schedule.
+export function earlierActivationNotice(previous, next, now, sendWindowSec) {
+  if (previous && next && next.enforceAfter < previous.enforceAfter && now < previous.enforceAfter && next.enforceAfter < now + sendWindowSec + 120)
+    throw new Error(`Earlier stake activation needs ${sendWindowSec + 120} seconds of notice`);
+}
+
 export function validatePolicyTransition(previous, next, now) {
   uint.parse(now);
   const n = stakeRegistrySchema.parse(next);
@@ -99,8 +106,9 @@ export function validatePolicyTransition(previous, next, now) {
   if (!previous) return n;
   const p = stakeRegistrySchema.parse(previous);
   if (n.networkId !== p.networkId || n.venueKey !== p.venueKey) throw new Error('Stake publication scope cannot change');
-  if (n.enforceAfter < p.enforceAfter) throw new Error('Stake activation cannot move earlier');
-  if (n.enforceAfter !== p.enforceAfter && now >= p.enforceAfter) throw new Error('Cannot disable active stake enforcement');
+  // Activation may move earlier (the venue gives one send window of notice when it publishes); it never moves
+  // later once active.
+  if (n.enforceAfter > p.enforceAfter && now >= p.enforceAfter) throw new Error('Cannot disable active stake enforcement');
   if (p.epoch.id === n.epoch.id) {
     const { stopNewAt: oldStop, ...oldEpoch } = p.epoch, { stopNewAt: nextStop, ...nextEpoch } = n.epoch;
     if (stableJSON(oldEpoch) !== stableJSON(nextEpoch)) throw new Error('Epoch identity is immutable');

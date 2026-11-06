@@ -12,6 +12,7 @@ import { StakeLedger, unitId } from '../../../src/stake/ledger.js';
 import { signFact } from '../../../src/stake/certificates.js';
 import { registryPolicy, memoryStore, secrets } from './helpers.mjs';
 import { tracAddress } from '../core/helpers.mjs';
+const cap400 = () => { const s = defaultSettings(); s.stake.maxUsdPerAddress = '400000000'; return s; }; // the first mainnet cap, which these cases measure
 const h = '1'.repeat(64);
 const piece = (state, principalReset) => ({ state, descriptor: { principalReset } });
 
@@ -26,7 +27,7 @@ test('withdrawal status separates deferred, returning, returned and forfeited pr
 });
 
 test('stake contract uses strings, separate formatting, subsets and unknown coverage', () => {
-  const status = stakeStatus({ settings: defaultSettings(), openOffersUsd: '100000000',
+  const status = stakeStatus({ settings: cap400(), openOffersUsd: '100000000',
     pieces: [piece('free', '100000000'), piece('reserved', '20000000'), piece('withdrawing', '30000000'), piece('retired', '90000000')] });
   assert.equal(status.locked, '150000000'); assert.equal(status.reserved, '20000000'); assert.equal(status.free, '100000000');
   assert.equal(status.formatted.locked, '1.5'); assert.equal(status.suggestedUsd, '4500000'); assert.equal(status.capUsd, '400000000');
@@ -56,11 +57,11 @@ test('trader reads stake inventory in its authenticated publication scope withou
     address: tracAddress('3'.repeat(64)), fundingDigest: h } };
   delete fact.epoch;
   new StakeLedger({ store, context, address }).admitFunded(secrets.slice(0, 3).map(s => signFact(fact, s)),
-    { now: 4000, settings: defaultSettings(), price: { numerator: '20000000', denominator: '1' } });
+    { now: 4000, settings: cap400(), price: { numerator: '20000000', denominator: '1' } });
   const status = Trader.prototype.stakeView.call({ registry: { usable: { sellerBond: policy } }, store,
     me: { tracAddr: address }, mine: new Map() });
   assert.equal(status.stake.locked, '2500000'); assert.equal(status.stake.free, '2500000');
-  assert.equal(status.stake.capUsd, '400000000'); assert.equal(status.rewards.poolState, 'unknown');
+  assert.equal(status.stake.capUsd, '10000000000'); assert.equal(status.rewards.poolState, 'unknown');
 });
 test('delivery states and warnings bind deadline and fixed amount at risk; negotiation has none', () => {
   const trade = { role: 'seller', state: { tradeId: h, phase: 'transferring', escrowOk: true, terms: { sendBy: 1000,
@@ -128,7 +129,7 @@ test('control routes keep auth, reject unknown fields and return movement-aware 
 });
 
 test('dashboard stake fields retain exact units, policy weights, maturity and safe links', () => {
-  const settings = defaultSettings(), status = stakeStatus({ settings, price: { numerator: '2000000000', denominator: '1' },
+  const settings = cap400(), status = stakeStatus({ settings, price: { numerator: '2000000000', denominator: '1' },
     pieces: [{ ...piece('withdrawing', '25000'), availableAt: 90000 }] });
   assert.equal(status.withdrawDelaySec, 86400); assert.equal(status.withdrawingUntil, 90000);
   assert.equal(status.penaltyBps, 300); assert.equal(status.minPenaltyUsd, '500000'); assert.equal(status.priceUsd, '2000');
@@ -153,7 +154,7 @@ test('reward status can cross authenticated RPC twice without trusting formatted
 });
 
 test('stake status uses the fixed dashboard reason list for missing price and excess marked value', () => {
-  const settings = defaultSettings();
+  const settings = cap400();
   assert.equal(stakeStatus({ settings }).reason, 'price_unavailable');
   const piece = { state: 'free', descriptor: { principalReset: '3000000000' } };
   assert.equal(stakeStatus({ settings, pieces: [piece], price: { numerator: '20000000', denominator: '1' } }).reason, 'over_cap');

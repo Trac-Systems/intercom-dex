@@ -78,7 +78,7 @@ test('configured payout listener starts with the next block, pauses empty, pays 
   assert.equal(role.status().summary.body.state, 'active', 'the block audit remains immutable');
   assert.equal(role.rewardRead('rewardStatus', { address: f.owner }).rewards.poolBalance, '0');
   assert.equal(role.status().poolState, 'empty', 'live status uses the newest confirmed pool read');
-  role.now = () => 10031;
+  role.now = () => 10901;
   assert.equal(role.rewardRead('rewardStatus', { address: f.owner }).rewards.poolState, 'unknown');
   assert.equal(role.status().poolBalance, null);
   const readsBeforeReorg = poolReads;
@@ -127,4 +127,18 @@ test('live nonempty book checkpoints give covered seller pieces 2x and reject un
   assert.throws(() => verifyObservedOffers([{ ...offer, baseAmount: '50001' }], [offer], 4000), /independently observed/);
   f.setOffers([offer, { ...offer, offerId: h(93) }]); await f.setHeight(3);
   assert.equal(verifyCertificate((await f.request('rewardBlock', { height: 3 })).bookCertificate, f.context, 'book').body.backing.length, 1, 'one piece cannot back two offers twice');
+});
+
+test('three matching checkpoint members finish without waiting for an old or silent fourth member', async () => {
+  const f = await fixture();
+  const original = f.venue.request;
+  f.venue.request = (to, method, body) => to === f.context.epoch.members[3].dexKey ? new Promise(() => {}) : original(to, method, body);
+  let timer;
+  try {
+    const block = await Promise.race([f.request('rewardBlock', { height: 1 }), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('Quorum waited for the fourth member')), 1000);
+    })]);
+    assert.equal(block.headCertificate.length, 3);
+    assert.equal(verifyCertificate(block.inventoryCertificate, f.context, 'inventory').body.height, 1);
+  } finally { clearTimeout(timer); }
 });

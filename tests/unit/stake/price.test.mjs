@@ -41,8 +41,9 @@ test('lookback is inclusive by last completion age, keeps its full-day median an
   log.append(entry(log, 2, '90', at), at);
   const boundary = at + lookback, checkpoint = head(log, boundary);
   assert.deepEqual(log.reference(checkpoint, boundary, 180, lookback).q, { numerator: '50', denominator: '1' });
-  assert.throws(() => log.reference(checkpoint, boundary + 1, 180, lookback), /unavailable/);
-  assert.throws(() => log.reference(head(log, boundary + 1), boundary + 1, 180, lookback), /unavailable/);
+  // Past the lookback the latest certified day stays the price: staking never waits for a new trade.
+  assert.deepEqual(log.reference(head(log, boundary + 1), boundary + 1, 180, lookback).q, { numerator: '50', denominator: '1' });
+  assert.deepEqual(log.reference(head(log, boundary + 86400 * 60), boundary + 86400 * 60, 180, lookback).q, { numerator: '50', denominator: '1' });
   assert.throws(() => log.reference(head(log, 172800), 172800, 180, 0), /unavailable/);
   for (const invalid of [-1, 1.5, 2592001, '604800']) assert.throws(() => log.reference(checkpoint, boundary, 180, invalid));
   const empty = make(); assert.throws(() => empty.reference(head(empty, boundary), boundary, 180, lookback));

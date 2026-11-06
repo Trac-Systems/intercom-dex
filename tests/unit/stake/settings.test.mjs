@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSettings, settingsSchema, stakeRegistrySchema, effectiveSettings, validatePolicyTransition, policyId, publicationBytes, proofClockSettings } from '../../../src/stake/settings.js';
+import { defaultSettings, settingsSchema, stakeRegistrySchema, effectiveSettings, validatePolicyTransition, earlierActivationNotice, policyId, publicationBytes, proofClockSettings } from '../../../src/stake/settings.js';
 import { registryPolicy, policy, memoryStore } from './helpers.mjs';
 
 test('SB4 defaults use exact base units and are fresh copies', () => {
   const s = defaultSettings();
   assert.equal(s.penaltyBps, 300); assert.equal(s.minPenaltyUsd, '500000');
   assert.equal(s.priceLookbackSec, 604800);
-  assert.deepEqual(s.stake, { withdrawDelaySec: 86400, suggestBufferBps: 15000, maxUsdPerAddress: '400000000' });
+  assert.deepEqual(s.stake, { withdrawDelaySec: 86400, suggestBufferBps: 15000, maxUsdPerAddress: '10000000000' });
   assert.deepEqual(s.rewards, { dailyReset: '500000000', activeWeightBps: 20000, payoutMinReset: '10000000', payoutIntervalSec: 604800 });
   s.stake.withdrawDelaySec = 0; assert.equal(defaultSettings().stake.withdrawDelaySec, 86400);
 });
@@ -16,7 +16,7 @@ test('all numeric settings enforce inclusive app bounds and strict fields', () =
   for (const [path, low, high] of [ ['penaltyBps', 50, 1000], ['minPenaltyUsd', '50000', '5000000'],
     ['admissionFreshSec', 60, 600], ['priceLookbackSec', 0, 2592000], ['randomnessWaitSec', 120, 600], ['overdueDelaySec', 300, 21600], ['proofWindowSec', 3600, 259200], ['stake.withdrawDelaySec', 3600, 604800],
     ['proofClock.sampleGapSec', 15, 120], ['proofClock.sampleFreshSec', 15, 180], ['proofClock.checkpointFreshSec', 30, 300],
-    ['stake.suggestBufferBps', 10000, 30000], ['stake.maxUsdPerAddress', '500000', '400000000'],
+    ['stake.suggestBufferBps', 10000, 30000], ['stake.maxUsdPerAddress', '500000', '1000000000000'],
     ['rewards.dailyReset', '0', '100000000000'], ['rewards.activeWeightBps', 10000, 50000],
     ['rewards.payoutMinReset', '1', '10000000000'], ['rewards.payoutIntervalSec', 3600, 2592000] ]) {
     const check = v => { const s = defaultSettings(), bits = path.split('.'); (bits.length === 2 ? s[bits[0]] : s)[bits.at(-1)] = v; return settingsSchema.safeParse(s).success; };
@@ -93,7 +93,12 @@ test('cannot remove pending policy, rewrite active policy or roll back enforceme
   assert.throws(() => validatePolicyTransition(n, promoted, 5000), /not effective/);
   assert.deepEqual(validatePolicyTransition(n, promoted, 7600), promoted);
   assert.throws(() => validatePolicyTransition(r, promoted, 7600), /pending/);
-  assert.throws(() => validatePolicyTransition(r, { ...r, enforceAfter: 99999 }, 4000));
+  const earlier = { ...r, enforceAfter: 5920 };
+  assert.deepEqual(validatePolicyTransition(r, earlier, 4000), earlier, 'activation may move earlier');
+  assert.deepEqual(validatePolicyTransition(r, earlier, 100500), earlier, 'a receiver that learns of it after the old activation still accepts it');
+  assert.throws(() => earlierActivationNotice(r, { ...r, enforceAfter: 5000 }, 4000, 1800), /notice/);
+  assert.doesNotThrow(() => earlierActivationNotice(r, earlier, 4000, 1800));
+  assert.doesNotThrow(() => earlierActivationNotice(r, { ...r, enforceAfter: 5000 }, 100500, 1800), 'already active: nothing to announce');
   assert.throws(() => validatePolicyTransition(r, { ...r, enforceAfter: 100001 }, 100000));
   const stopped = { ...r, epoch: { ...r.epoch, stopNewAt: 5000 } };
   assert.deepEqual(validatePolicyTransition(r, stopped, 4000), stopped);

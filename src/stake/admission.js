@@ -36,7 +36,7 @@ export function prepareBond({ terms, policy, context, inventoryCertificate, pric
   const targetReset = penaltyTarget(terms, q, s).targetReset;
   const expiresNotBefore = Math.max(terms.refundAfter, terms.sendBy + s.overdueDelaySec + s.proofWindowSec) + 600;
   const chosen = allocatePieces(inventory.pieces.filter(p => p.state === 'free' && !p.blocked && p.purpose === 'seller' && p.expiresAt > expiresNotBefore), targetReset);
-  if (!chosen || BigInt(usdForReset(chosen.payoutReset, q, true)) > 200000000n) throw new Error('bond_not_reserved');
+  if (!chosen || BigInt(usdForReset(chosen.payoutReset, q, true)) > BigInt(s.stake.maxUsdPerAddress)) throw new Error('bond_not_reserved');
   return bondSchema.parse({ protocol: 1, policyId: current.policyId, policyDigest: sha256Hex(stableJSON(policy)), epochId: context.epoch.id,
     targetReset, payoutReset: chosen.payoutReset, payoutUsd: usdForReset(chosen.payoutReset, q, true), expiresNotBefore, historyFromSlot, overdueDelaySec: s.overdueDelaySec, proofWindowSec: s.proofWindowSec,
     pieces: chosen.pieces.map(({ unitId, generation }) => ({ unitId, generation })).sort((a, b) => a.unitId.localeCompare(b.unitId)),

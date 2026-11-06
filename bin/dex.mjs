@@ -20,7 +20,7 @@ import { Trader } from '../src/roles/trader.js';
 import { Signer } from '../src/roles/signer.js';
 import { Service } from '../src/roles/service.js';
 import { createSolanaAdapter } from '../src/solana/adapter.js';
-import { solanaSettings } from '../src/solana/settings.js';
+import { solanaSettings, stakeClockSettings } from '../src/solana/settings.js';
 import { createTracAdapter } from '../src/trac/adapter.js';
 import { ensureWallets, setupWallets, exportWallets } from '../src/wallets/setup.js';
 import { restoreVenue } from '../src/wallets/venue-backup.js';
@@ -274,7 +274,7 @@ if (locksRole) {
     role = new PayoutRole({ bridge, identity, store, profile, serviceKey: config.serviceKey, address: wallet.address, log,
       adapter: createPayoutWallet({ bridge, wallet, profile, store, trac, resetGatewayUrl: config.trac?.resetGatewayUrl }) });
   } else throw new Error('role must be service, signer, trader or payout');
-  role.stakeRuntime = createStakeRuntime({ type: config.role, role, bridge, identity, box: keys.box, store, solana, trac, rpc, wallet, profile,
+  role.stakeRuntime = createStakeRuntime({ type: config.role, role, bridge, identity, box: keys.box, store, solana, trac, rpc: stakeClockSettings(config, rpc), wallet, profile,
     resetGatewayUrl: config.trac?.resetGatewayUrl, log });
   wallets = ['signer', 'payout'].includes(config.role) ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
     addresses: { solana: keypair.publicKey.toBase58(), trac: wallet?.address ?? null } });

@@ -6,9 +6,10 @@ import { defaultSettings } from '../../../src/stake/settings.js';
 import { registryPolicy, secrets, members, memoryStore } from './helpers.mjs';
 import { tracAddress } from '../core/helpers.mjs';
 import { ed25519 } from '@noble/curves/ed25519.js';
+const cap400 = () => { const s = defaultSettings(); s.stake.maxUsdPerAddress = '400000000'; return s; }; // the first mainnet cap, which these cases measure
 const h = n => n.toString(16).padStart(64, '0');
 const context = { networkId: 1, venueKey: h(30), epoch: registryPolicy().epoch };
-const options = { settings: defaultSettings(), price: { numerator: '20000000', denominator: '1' }, now: 100 };
+const options = { settings: cap400(), price: { numerator: '20000000', denominator: '1' }, now: 100 };
 const identity = i => ({ publicKey: members[i].dexKey, secretKey: secrets[i] });
 const make = (i = 0, store = memoryStore(), limits) => new CapacityLedger({ store, context, identity: identity(i), ...(limits ? { limits } : {}) });
 const descriptor = (n, owner = 40, amount = '2500000') => ({ networkId: 1, venueKey: context.venueKey, epochId: context.epoch.id,
@@ -157,4 +158,25 @@ test('failed write publishes no vote; old epoch state cannot reset limits under 
   const closing = new CapacityLedger({ store, context: { ...context, epoch: { ...context.epoch, stopNewAt: 100 } }, identity: identity(0) });
   assert.throws(() => closing.propose([descriptor(2)], options), /closed/);
   assert.equal(closing.vote(grant, d, options).fact.body.grantId, grant.grantId, 'original votes remain recoverable');
+});
+
+test('reward paging does not raise signed funding capacity', () => {
+  const current = make(); assert.equal(current.limits.pieces, 2000);
+  assert.throws(() => make(0, memoryStore(), { ...current.limits, pieces: 5000 }));
+});
+
+test('a record written under the first limits is raised in place: held ranges, tokens and generations stay', () => {
+  const store = memoryStore(), first = make(0, store, { pieces: 2000, addressPieces: 200, usd: '4000000000', depositUsd: '200000000' });
+  const d = [descriptor(1, 40, '1000000000')], grant = first.propose(d, options); first.vote(grant, d, options);
+  const old = store.get(first.name); delete old.addressPool; old.owners[d[0].owner.tracAddr].free = [{ from: '200000000', to: '400000000', generation: 0 }];
+  store.put(first.name, old);
+  const raised = make(0, store), state = raised.read(), owner = state.owners[d[0].owner.tracAddr];
+  assert.equal(state.limits.usd, '10000000000000'); assert.equal(state.addressPool, '1000000000000');
+  assert.deepEqual(state.pieces, old.pieces); assert.deepEqual(state.tokens, old.tokens);
+  assert.deepEqual(owner.free, [{ from: '200000000', to: '400000000', generation: 0 }, { from: '400000000', to: '1000000000000', generation: 0 }]);
+  assert.deepEqual(state.free.at(-1), { from: '4000000000', to: '10000000000000', generation: 0 });
+  const big = { ...options, settings: { ...options.settings, stake: { ...options.settings.stake, maxUsdPerAddress: '10000000000' } } };
+  const more = [descriptor(2, 40, '40000000000')], next = raised.propose(more, big); raised.vote(next, more, big);
+  assert.equal(raised.read().pieces[next.units[0].unitId].exposureUsd, '8000000000', 'an $8,000 piece fits under a $10,000 cap');
+  assert.throws(() => make(0, store, { pieces: 2000, addressPieces: 200, usd: '4000000000', depositUsd: '200000000' }).read(), /handoff/, 'limits never fall in place');
 });

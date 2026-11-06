@@ -118,7 +118,9 @@ export class CompletionLog {
       entries.push(record);
     }
     if (!entries.length || hash !== head.headHash) throw new Error('bond_price_unavailable');
-    if (priceDay !== utcDay(now) && (!lookbackSec || now - completedAt > lookbackSec)) throw new Error('bond_price_unavailable');
+    // With a lookback the latest certified trading day stays the price until a newer trade replaces it: staking and
+    // bonded sales must never wait for a trade that needs a bond to happen.
+    if (priceDay !== utcDay(now) && !lookbackSec) throw new Error('bond_price_unavailable');
     const prices = entries.map(r => price(r.entry)).sort(compare), mid = Math.floor(prices.length / 2);
     const median = prices.length % 2 ? prices[mid] : fraction(
       BigInt(prices[mid - 1].numerator) * BigInt(prices[mid].denominator) + BigInt(prices[mid].numerator) * BigInt(prices[mid - 1].denominator),

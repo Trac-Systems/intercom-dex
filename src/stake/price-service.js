@@ -81,7 +81,14 @@ export class StakePriceService {
   }
   async finishPending() {
     const proposal = this.store.get('stake-price-pending'); if (!proposal) return;
-    const certificate = await this.quorum('priceVote', proposal);
+    let certificate;
+    try { certificate = await this.quorum('priceVote', proposal); }
+    catch (error) {
+      // Signers refuse completions older than ten minutes. Past fifteen the trade no longer counts for the price,
+      // instead of blocking every later price snapshot.
+      if ((await this.clock()).at - proposal.venue.fact.body.completedAt <= 900) throw error;
+      this.store.put('stake-price-pending', null); return;
+    }
     const record = { venue: proposal.venue, certificate };
     this.log().append(record, (await this.clock()).at);
     await Promise.allSettled(this.context().epoch.members.map(m => this.request(m.dexKey, 'priceCommit', record)));
@@ -169,9 +176,13 @@ export class StakePriceService {
           e.deliveryDigest !== sha256Hex(stableJSON({ txHash: report.txHash, nonce: transferNonce(tradeId) }))) throw new Error('Completion binding differs');
       await this.catchUp(e.logPosition - 1);
       const now = (await this.clock()).at, head = log.read(), name = `stake-price-vote-${e.logPosition}`;
-      const prior = this.store.get(name);
-      if (prior && factDigest(prior.fact) !== factDigest(f)) throw new Error('Conflicting completion order');
-      if (!prior && (e.completedAt > now || now - e.completedAt > 60 || e.logPosition !== head.position + 1 || e.prevHash !== head.hash))
+      let prior = this.store.get(name);
+      // A proposal that never reached three votes is abandoned by the venue after 15 minutes; its position is reused.
+      if (prior && factDigest(prior.fact) !== factDigest(f)) {
+        if (now - prior.fact.body.completedAt <= 900 || head.position >= e.logPosition) throw new Error('Conflicting completion order');
+        prior = null;
+      }
+      if (!prior && (e.completedAt > now || now - e.completedAt > 600 || e.logPosition !== head.position + 1 || e.prevHash !== head.hash))
         throw new Error('Stale completion or missing prefix');
       const [escrow, transfer] = await Promise.all([
         this.solana.checkEscrow({ terms, hashHex: report.hashHex, purpose: 'settlement' }),

@@ -403,7 +403,7 @@ test('stake notes: required for sellers, optional for buyers, coverage shortfall
   const unknownWait = stakeView(stakeStatus({ pieces: [piece('withdrawing', '20000000')] }), { selling: false });
   assert.equal(text(stakeNotes(unknownWait, T).at(-1).parts), '0.2 RESET is being withdrawn and earns no rewards; it comes back to your wallet after the wait.');
   assert.equal(text(stakeNotes(stakeView(stakeStatus({ price: null }), { selling: false }), T)[1].parts),
-    'There is no RESET price for today yet: it comes from a RESET trade completed today. Deposits and the stake’s dollar value wait for it.');
+    'The RESET price cannot be checked right now. It comes from RESET trades on intercom-dex that the stake signers have confirmed; deposits and the stake’s dollar value wait for it. This usually clears within a minute.');
   const closed = stakeNotes(stakeView(stakeStatus({ settings: null }), { selling: true }), T).map(n => text(n.parts));
   assert.ok(closed.includes('The venue does not take new stakes right now.'));
 });
@@ -447,7 +447,7 @@ test('rewards in words: weight with the venue multiplier, pool state with "Rewar
   assert.equal(poolText(r()), 'Paying 5 RESET a day');
   assert.equal(poolText(r({ dailyBudget: null })), 'Paying rewards');
   assert.equal(poolText(r({ poolState: 'empty' })), 'Rewards paused, pool empty');
-  assert.equal(poolText(r({ poolState: 'unknown' })), 'Pool balance unknown right now');
+  assert.equal(poolText(r({ poolState: 'unknown' })), 'Checking the reward pool…');
 });
 
 test('money and waits as text', () => {

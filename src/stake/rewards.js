@@ -12,10 +12,11 @@ const hex = z.string().regex(/^[0-9a-f]{64}$(?![\s\S])/);
 const units = z.string().regex(/^(0|[1-9][0-9]{0,30})$(?![\s\S])/);
 const address = z.string().refine(a => a === a.toLowerCase() && isTracAddress(a));
 const snapshot = { height: uint, blockHash: hex };
+const MAX_REWARD_PIECES = 5000;
 const inventorySchema = z.object({ ...snapshot, accounts: z.array(z.object({ address,
   pieces: z.array(z.object({ unitId: hex, generation: uint, principalReset: units, purpose: z.enum(['buyer', 'seller']),
-    state: z.enum(['free', 'reserved', 'withdrawing', 'decided-buyer', 'decided-seller', 'retired']) }).strict()).max(200) }).strict()).max(2000) }).strict();
-const bookSchema = z.object({ ...snapshot, backing: z.array(z.object({ address, unitId: hex, amount: units }).strict()).max(2000) }).strict();
+    state: z.enum(['free', 'reserved', 'withdrawing', 'decided-buyer', 'decided-seller', 'retired']) }).strict()).max(200) }).strict()).max(MAX_REWARD_PIECES) }).strict();
+const bookSchema = z.object({ ...snapshot, backing: z.array(z.object({ address, unitId: hex, amount: units }).strict()).max(MAX_REWARD_PIECES) }).strict();
 const priceSchema = z.object({ ...snapshot, price: z.object({ numerator: units.refine(n => BigInt(n) > 0n),
   denominator: units.refine(n => BigInt(n) > 0n) }).strict() }).strict();
 const summaryBytes = body => utf8('intercom-dex/rewards/v1/summary\n' + stableJSON(body));
@@ -34,7 +35,9 @@ export function rewardWeights({ inventory, book, price, settings }) {
     if (all.has(unit.unitId)) throw new Error('Duplicate stake piece');
     all.set(unit.unitId, { ...unit, address: a.address });
   }
-  if (all.size > 2000) throw new Error('Reward inventory exceeds piece cap');
+  // Bound reward verification independently of admission capacity. Paging can
+  // carry the complete retained inventory; this does not grant funding slots.
+  if (all.size > MAX_REWARD_PIECES) throw new Error('Reward inventory exceeds piece cap');
   for (const row of b.backing) {
     const unit = all.get(row.unitId);
     if (!unit || unit.address !== row.address || unit.purpose !== 'seller' || !['free', 'reserved'].includes(unit.state) ||
@@ -98,7 +101,8 @@ export class RewardLedger {
       if (!existing || existing.inputHash !== inputHash) throw new Error('Reward block replay differs');
       return existing.summary;
     }
-    if (r.height !== null && (height !== r.height + 1 || previousHash !== r.blockHash || at < r.at)) throw new Error('Reward chain gap or reorganization');
+    // A height without a contemporaneous checkpoint is skipped and earns nothing, like time with an empty pool.
+    if (r.height !== null && (height === r.height + 1 && previousHash !== r.blockHash || at < r.at)) throw new Error('Reward chain reorganization');
     const unpaid = Object.values(r.accounts).reduce((n, a) => n + BigInt(a.unpaid), 0n);
     // Integer atom rounding is spread over 144 consecutive Bitcoin heights, totaling exactly the daily budget.
     const daily = BigInt(s.rewards.dailyReset), h = BigInt(height);

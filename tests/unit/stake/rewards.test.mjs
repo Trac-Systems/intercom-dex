@@ -8,10 +8,11 @@ import { registryPolicy, memoryStore, secrets } from './helpers.mjs';
 import { tracAddress } from '../core/helpers.mjs';
 import { bytesToHex } from '../../../src/core/canonical.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
+const cap400 = () => { const s = defaultSettings(); s.stake.maxUsdPerAddress = '400000000'; return s; }; // the first mainnet cap, which these cases measure
 const h = n => n.toString(16).padStart(64, '0'), owner = tracAddress(h(1)), buyer = tracAddress(h(2));
 const context = { networkId: 1, venueKey: h(3), epoch: registryPolicy().epoch }, identity = { secretKey: new Uint8Array(32).fill(9) };
 const payoutKey = bytesToHex(ed25519.getPublicKey(identity.secretKey));
-const settings = { ...defaultSettings(), rewards: { ...defaultSettings().rewards, payoutMinReset: '1' } };
+const settings = { ...cap400(), rewards: { ...defaultSettings().rewards, payoutMinReset: '1' } };
 const certificate = (kind, body) => secrets.slice(0, 3).map(s => signFact({ v: 1, networkId: 1, venueKey: h(3), epochId: context.epoch.id, kind, body }, s));
 function snapshots(height = 1) {
   const head = { height, blockHash: h(height + 100) };
@@ -45,7 +46,8 @@ test('accrual is deterministic, signed, conserves budget and rejects unsigned or
   assert.equal(result.body.allocations.reduce((n, a) => n + BigInt(a.amount), 0n).toString(), result.body.budget);
   assert.deepEqual(l.accrue(b), result);
   assert.throws(() => l.accrue({ ...b, poolBalance: '1' }), /replay/);
-  assert.throws(() => l.accrue(block(3)), /gap/);
+  const skipped = ledger(); skipped.accrue(b);
+  assert.equal(skipped.accrue(block(3)).body.height, 3, 'a missed height is skipped instead of stopping rewards');
   assert.throws(() => ledger().accrue({ ...b, inventoryCertificate: b.inventoryCertificate.slice(0, 2) }));
   assert.throws(() => ledger().accrue({ ...b, bookCertificate: block(2).bookCertificate }), /disagree/);
 });
@@ -169,4 +171,28 @@ test('award while a prepared transfer is unresolved suppresses every further bro
   assert.equal(service.ledger.read().pending.address, owner);
   await service.forfeit(penalty(b.inventoryCertificate));
   assert.equal((await service.payout()).reason, 'forfeit_reconciliation'); assert.equal(sends, 1);
+});
+
+test('reward verification accepts 5000 pieces with unchanged weights and rejects larger or duplicate inventories', () => {
+  const s = snapshots(); s.book.backing = [];
+  s.inventory.accounts = Array.from({ length: 25 }, (_, account) => ({ address: tracAddress(h(20000 + account)),
+    pieces: Array.from({ length: 200 }, (_, piece) => ({ unitId: h(10000 + account * 200 + piece), generation: 0,
+      principalReset: '25000', purpose: 'seller', state: 'free' })) }));
+  const weights = rewardWeights({ ...s, settings });
+  assert.equal(weights.length, 25);
+  assert.equal(weights.reduce((sum, w) => sum + BigInt(w.eligibleReset), 0n), 125000000n);
+  assert.equal(weights.reduce((sum, w) => sum + BigInt(w.weight), 0n), 1250000000000n);
+  const active = structuredClone(s);
+  active.book.backing = active.inventory.accounts.flatMap(a => a.pieces.map(p => ({ address: a.address, unitId: p.unitId, amount: p.principalReset })));
+  assert.equal(rewardWeights({ ...active, settings }).reduce((sum, w) => sum + BigInt(w.weight), 0n), 2500000000000n);
+  const separate = structuredClone(s);
+  separate.inventory.accounts = s.inventory.accounts.flatMap(a => a.pieces).map((piece, n) => ({ address: tracAddress(h(50000 + n)), pieces: [piece] }));
+  assert.equal(rewardWeights({ ...separate, settings }).length, 5000);
+  const larger = structuredClone(s);
+  larger.inventory.accounts.push({ address: tracAddress(h(30000)), pieces: [{ ...s.inventory.accounts[0].pieces[0], unitId: h(40000) }] });
+  assert.throws(() => rewardWeights({ ...larger, settings }), /piece cap/);
+  const duplicate = structuredClone(s); duplicate.inventory.accounts[1].pieces[0].unitId = duplicate.inventory.accounts[0].pieces[0].unitId;
+  assert.throws(() => rewardWeights({ ...duplicate, settings }), /Duplicate stake piece/);
+  const perAccount = structuredClone(s); perAccount.inventory.accounts[0].pieces.push(perAccount.inventory.accounts[1].pieces.pop());
+  assert.throws(() => rewardWeights({ ...perAccount, settings }));
 });

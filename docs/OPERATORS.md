@@ -410,6 +410,11 @@ endpoints. An operator's own paid endpoint is trusted on its own (`solana.need: 
 public endpoints, payment checks require two agreeing reads. Do not rely on the public shared servers' capacity for a busy signer. An RPC outage
 must leave a payment undecided, never be treated as proof that no payment exists.
 
+The stake clock always needs two independent finalized readers that agree. A role whose trade reads use one own
+endpoint (`need: 1`) names its clock readers separately, for example its own endpoint plus one public endpoint:
+`"solana": { "endpoints": ["<own>"], "need": 1, "clockEndpoints": ["<own>", "https://api.mainnet-beta.solana.com"] }`.
+Only the stake clock uses `clockEndpoints`; trade reads and sends keep using `endpoints`.
+
 Back up the complete encrypted data directory and keep its password or store key separately. The backup must
 include DKG state, final shares, registry snapshots, reservations, verified payments and durable decisions.
 Store a share durably before `lockReady`, and a decision durably before release. Restore exactly that decision

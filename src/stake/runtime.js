@@ -10,6 +10,7 @@ import { StakeAdmission } from './admission-runtime.js';
 import { verifyStakeFunding } from './funding.js';
 import { requireResetGateway } from '../market/gateway-status.js';
 import { StakeTransport, STAKE_CHANNEL } from './transport.js';
+import { STAKE_PAYOUT_RATE } from './paging.js';
 import { finalizedStakeClock } from './chain.js';
 import { StakePriceService, stakeContext } from './price-service.js';
 import { StakeCustodySigner } from './custody-signer.js';
@@ -95,8 +96,21 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
     }
     throw new Error('Unsupported stake request');
   };
-  const transport = new StakeTransport({ bridge, identity, handle });
-  const request = (to, method, body) => to === identity.publicKey ? handle(method, body, identity.publicKey) : transport.request(to, method, body);
+  const allowPagingPeer = key => {
+    if (!['service', 'signer', 'payout'].includes(type)) return false;
+    const current = registry()?.sellerBond;
+    if (!current) return false;
+    const policies = [current, ...['stake-retained-epoch-', 'stake-venue-epoch-'].flatMap(prefix => store.list(prefix).map(name => store.get(name)))];
+    return key === current.venueKey || key === current.rewardService?.dexKey || policies.some(p =>
+      p?.networkId === current.networkId && p?.venueKey === current.venueKey && p.epoch?.members.some(m => m.dexKey === key));
+  };
+  const transport = new StakeTransport({ bridge, identity, handle, allowPagingPeer,
+    // Payout retains its existing 64 kB/s receive limit alongside public traffic.
+    pageRate: to => to === registry()?.sellerBond?.rewardService?.dexKey ? STAKE_PAYOUT_RATE : 0 });
+  // Nested quorum rounds plus the rate-limited archive may outlast one RPC.
+  // This does not extend proposal freshness or any individual page transfer.
+  const request = (to, method, body) => to === identity.publicKey ? handle(method, body, identity.publicKey) :
+    transport.request(to, method, body, method === 'rewardBlock' ? 60000 : 30000);
   if (type === 'service') {
     const handoff = new StakeEpochHandoff({ store, registry, clock, request, publish: policy => role.publishStake(policy),
       prepare: () => price.handle('priceSnapshot', {}, identity.publicKey) });

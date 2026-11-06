@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.49 (unreleased)
+
+- Large stake reward requests and replies travel in signed, verified pages within the existing message and rate
+  limits. The venue routes them away from unrelated traders and market feeds. Update venue, stake signers and
+  payout servers; released 0.1.48 trader apps keep working unchanged.
+- Reward checkpoints proceed when three original members agree, without waiting for a slow or older fourth member.
+- Stake limits: the per-address cap is a signed setting up to $1,000,000 (default $10,000). The fixed $200
+  per-deposit and $4,000 venue-wide limits are gone (venue-wide now $10,000,000); signers raise their existing
+  capacity records in place. Deposits add $500 pieces, so a $10,000 stake needs about 60 pieces instead of 200+.
+- A deposit short of TNK says how much TNK it needs, how much the wallet has free, and why (two network fees and a
+  return reserve per piece), and how much comes back on withdrawal.
+- The stake clock takes the oldest two agreeing Solana readers instead of failing when any one public reader lags,
+  rate-limits or answers badly. A dead public reader was removed from the defaults.
+- The RESET price no longer expires: past the lookback the latest certified trading day stays the price until a
+  newer trade replaces it. A completion the signers could not confirm within 15 minutes is dropped instead of
+  blocking every later price.
+- Rewards skip a Bitcoin height that has no checkpoint instead of stopping for good; the pool balance stays known
+  between blocks.
+- The venue may move stake enforcement earlier with one send window of notice. Every role must run 0.1.49:
+  0.1.48 apps refuse the raised cap and the earlier activation and must update.
+
 ## 0.1.48
 
 - Sellers stake RESET to list on every pair. A deposit is split into small pieces; one stake per account address

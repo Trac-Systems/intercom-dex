@@ -12,7 +12,7 @@ export const DEX_POW_BITS = 20;
 // A signer whose heartbeat waited behind its trade messages looked offline to traders (90 s), and
 // every trade needs the whole committee. Declines answer strangers: stamped last, and dropped while one is waiting.
 export const DEX_POW_CLASSES = [['heartbeat', 'transferSent', 'ack', 'sharePublish', 'shareRequest', 'claimed', 'refunded', 'summon'],
-  ['take', 'accept', 'reveal', 'terms', 'termsSig', 'working', 'abort'], ['deal', 'stakeReply', 'stakeRequest']];
+  ['take', 'accept', 'reveal', 'terms', 'termsSig', 'working', 'abort'], ['deal', 'stakeReply', 'stakeRequest', 'stakeManifest', 'stakePage']];
 export const DEX_POW_LOW = ['decline'];
 // Per-connection inbound limit. A signer or venue receives the whole network's traffic over a few connections (offers,
 // the venue's book, chat and every trade); at 64 kB/s those connections were blocked for 30 s at a time and the
@@ -29,7 +29,7 @@ export function dexTransport(config) {
   const chat = new MarketChat({ chatRelays: config.chatRelays ?? [] });
   return {
     relay: { serve: !['trader', 'market-feed', 'payout'].includes(config.role) && config.serveRelay !== false, relays: config.relayKeys ?? [] },
-    sidechannel: { channels: DEX_CHANNELS, openChannels: DEX_CHANNELS, welcomeRequired: false,
+    sidechannel: { stakeRouting: ['service', 'signer', 'payout'].includes(config.role), channels: DEX_CHANNELS, openChannels: DEX_CHANNELS, welcomeRequired: false,
       ...(config.role === 'service' ? { publicSend: { rate: 32000, burst: 224000, maxQueue: 512000 } } : {}),
       // Public leaf protocols use only the pinned venue, including when their other connections run old releases.
       // Servers retain forwarding to legacy neighbors; private trade relays are unaffected.

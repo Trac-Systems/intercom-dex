@@ -11,15 +11,19 @@ const revision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }
 if (execFileSync('git', ['diff', '--name-only', 'HEAD'], { encoding: 'utf8' }).trim()) throw Error('Commit final code before acceptance');
 const loadMode = process.env.DEX_STAKE_ACCEPTANCE_MODE === 'timing-load';
 if (process.env.DEX_STAKE_ACCEPTANCE_MODE && !loadMode) throw Error('Unknown acceptance mode');
-const rows = loadMode ? ['after-grace', 'inside-grace', 'bonded-delivery'].map(name =>
+const availableRows = loadMode ? ['after-grace', 'inside-grace', 'bonded-delivery'].map(name =>
   ({ name, scenario: 'stake-penalty-cases', cases: name, expected: [name] })) : [
   { name: 'stake-exact-withdraw', scenario: 'stake-exact-withdraw', expected: ['stake-exact-withdraw'] },
   { name: 'handoff', scenario: 'stake-epoch-handoff', expected: ['epoch-handoff', 'epoch-handoff-new-trade-and-reward', 'mixed-epoch-return'] },
   { name: 'penalties', scenario: 'stake-penalty-cases', expected: ['no-show', 'reward-forfeiture', 'award-restart', 'bonded-delivery', 'inside-grace', 'after-grace', 'outage', 'buyer-late-lock', 'buyer-never-lock'] },
   ...['stake-free-expiry', 'stake-withdraw', 'stake-rewards', 'stake-late-funding', 'stake-partial-funding'].map(name => ({ name, scenario: name, expected: [name] })),
   { name: 'deferred', scenario: 'stake-penalty-cases', cases: 'deferred-withdraw', expected: ['deferred-withdraw'] },
-  { name: 'released-v0.1.47', scenario: 'stake-release-refusal', expected: ['stake-release-refusal'], old: true }
+  { name: 'released-v0.1.47', scenario: 'stake-release-refusal', expected: ['stake-release-refusal'], old: '0.1.47' },
+  { name: 'released-v0.1.48', scenario: 'stake-rewards', expected: ['stake-rewards'], old: '0.1.48' }
 ];
+const selected = (process.env.DEX_STAKE_ACCEPTANCE_ROWS ?? '').split(',').filter(Boolean);
+if (selected.some(name => !availableRows.some(row => row.name === name))) throw Error('Unknown acceptance row');
+const rows = selected.length ? availableRows.filter(row => selected.includes(row.name)) : availableRows;
 await mkdir(area, { recursive: true });
 const state = { revision, pid: process.pid, mode: loadMode ? 'timing-load' : 'sequential', startedAt: new Date().toISOString(), stopAt: new Date(stopAt).toISOString(), rows: rows.map(r => ({ ...r, state: 'queued' })) };
 const save = () => writeFile(path.join(area, 'acceptance.json'), JSON.stringify(state, null, 2));
@@ -30,7 +34,12 @@ async function run(row) {
   const env = { ...process.env, DEX_E2E_TEST_DIR: dir, DEX_SOLANA_TEST_DIR: path.join(dir, 'solana'), DEX_TRAC_TEST_DIR: path.join(dir, 'trac'), TMPDIR: area };
   delete env.DEX_E2E_STAKE_CASES; delete env.DEX_E2E_OLD; delete env.DEX_E2E_OLD_REPO;
   if (row.cases) env.DEX_E2E_STAKE_CASES = row.cases;
-  if (row.old) { env.DEX_E2E_OLD = 'alice,legacy'; env.DEX_E2E_OLD_REPO = process.env.DEX_STAKE_OLD_REPO; }
+  if (row.old) {
+    env.DEX_E2E_OLD = row.old === '0.1.48' ? 'alice,bob' : 'alice,legacy';
+    env.DEX_E2E_OLD_REPO = row.old === '0.1.48' ? process.env.DEX_STAKE_OLD_48_REPO : process.env.DEX_STAKE_OLD_REPO;
+    if (!env.DEX_E2E_OLD_REPO || JSON.parse(await readFile(path.join(env.DEX_E2E_OLD_REPO, 'package.json'), 'utf8')).version !== row.old)
+      throw Error('Released checkout required for ' + row.name);
+  }
   row.state = 'running'; row.startedAt = new Date().toISOString(); await save();
   console.log(row.startedAt, 'start', row.name, revision);
   const stream = createWriteStream(path.join(dir, 'stack.log'));

@@ -9,6 +9,7 @@ import { StakeAdmission } from '../../../src/stake/admission-runtime.js';
 import { stableJSON } from '../../../src/core/canonical.js';
 import { registryPolicy, secrets, memoryStore } from '../stake/helpers.mjs';
 import { tracAddress } from '../core/helpers.mjs';
+const cap400 = () => { const s = defaultSettings(); s.stake.maxUsdPerAddress = '400000000'; return s; }; // the first mainnet cap, which these cases measure
 
 const hex64 = n => n.toString(16).padStart(64, '0');
 
@@ -19,7 +20,7 @@ export const PRICE = { numerator: '250000000', denominator: '1' };
 // An active seller: 1.2 RESET at $250 ($300), a little reserved for one open sale, nothing on its way.
 export function stakeStatus(input = {}) {
   return core.stakeStatus({ pieces: [piece('free', '119800000'), piece('reserved', '200000')], openOffersUsd: '4400000',
-    settings: defaultSettings(), price: PRICE, ...input });
+    settings: cap400(), price: PRICE, ...input });
 }
 
 export function rewardsStatus(now, input = {}) {

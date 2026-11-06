@@ -15,7 +15,10 @@ const rangesSchema = z.array(rangeSchema).min(1).max(4001).refine(a => a.every((
 const grantUnit = z.object({ unitId: hex, ownerAddress: z.string(), principalReset: units, exposureUsd: units,
   globalToken: tokenSchema, addressToken: tokenSchema, globalRanges: rangesSchema, addressRanges: rangesSchema }).strict();
 const grantSchema = z.object({ grantId: hex, units: z.array(grantUnit).min(1).max(100) }).strict();
-const LIMITS = Object.freeze({ pieces: 2000, addressPieces: 200, usd: '4000000000', depositUsd: '200000000' });
+const LIMITS = Object.freeze({ pieces: 2000, addressPieces: 200, usd: '10000000000000', depositUsd: '1000000000000' });
+// Each address draws from its own USD interval up to the highest per-address cap a policy can sign; the signed cap
+// limits what is used of it. Records written before 0.1.49 hold a $400 interval and the first, smaller limits.
+const ADDRESS_POOL = '1000000000000', FIRST_ADDRESS_POOL = '400000000';
 const limitSchema = z.object({ pieces: uint.min(1).max(LIMITS.pieces), addressPieces: uint.min(1).max(LIMITS.addressPieces),
   usd: units.refine(n => BigInt(n) > 0n && BigInt(n) <= BigInt(LIMITS.usd)),
   depositUsd: units.refine(n => BigInt(n) > 0n && BigInt(n) <= BigInt(LIMITS.depositUsd)) }).strict();
@@ -89,6 +92,20 @@ function retireState(state, certificate, current) {
   return piece;
 }
 
+// Raising limits only adds free USD at the top of the venue and address intervals; held ranges, tokens and
+// generations stay as they are. Lowering any limit still needs an epoch handoff.
+function raiseLimits(state, limits) {
+  const old = state.limits, oldPool = state.addressPool ?? FIRST_ADDRESS_POOL;
+  if (stableJSON(old) === stableJSON(limits) && oldPool === ADDRESS_POOL) return state;
+  if (!old || limits.pieces < old.pieces || limits.addressPieces < old.addressPieces || BigInt(limits.usd) < BigInt(old.usd) ||
+      BigInt(limits.depositUsd) < BigInt(old.depositUsd) || BigInt(ADDRESS_POOL) < BigInt(oldPool)) throw new Error('Capacity lease handoff required');
+  const next = structuredClone(state);
+  if (BigInt(limits.usd) > BigInt(old.usd)) next.free.push({ from: old.usd, to: limits.usd, generation: 0 });
+  if (BigInt(ADDRESS_POOL) > BigInt(oldPool)) for (const owner of Object.values(next.owners)) owner.free.push({ from: oldPool, to: ADDRESS_POOL, generation: 0 });
+  next.limits = structuredClone(limits); next.addressPool = ADDRESS_POOL;
+  return next;
+}
+
 // A single atomic record serializes numbered count tokens and exact USD intervals across every owner.
 // A handoff transfers the complete capacity map, including all held and pending
 // units. Original custody stays with its original committee; it never resets caps.
@@ -104,11 +121,11 @@ export class CapacityLedger {
   }
   read() {
     const state = this.store.get(this.name) ?? { epochId: this.context.epoch.id, epochDigest: this.epochDigest, limits: this.limits, tokens: {},
-      free: pool(this.limits.usd), owners: {}, pieces: {}, grants: {} };
-    if (state.epochId !== this.context.epoch.id || state.epochDigest !== this.epochDigest || stableJSON(state.limits) !== stableJSON(this.limits)) throw new Error('Capacity lease handoff required');
-    return state;
+      free: pool(this.limits.usd), owners: {}, pieces: {}, grants: {}, addressPool: ADDRESS_POOL };
+    if (state.epochId !== this.context.epoch.id || state.epochDigest !== this.epochDigest) throw new Error('Capacity lease handoff required');
+    return raiseLimits(state, this.limits);
   }
-  owner(state, address) { return state.owners[address] ??= { tokens: {}, free: pool('400000000') }; }
+  owner(state, address) { return state.owners[address] ??= { tokens: {}, free: pool(state.addressPool ?? FIRST_ADDRESS_POOL) }; }
   inputs(descriptors, { settings, price, now }) {
     assertEpochAdmission(this.store, this.context);
     uint.parse(now); const s = settingsSchema.parse(settings);

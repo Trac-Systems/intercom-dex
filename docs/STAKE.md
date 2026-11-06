@@ -14,10 +14,54 @@ forfeiture, exact surplus replacement, deferred and mixed-epoch returns,
 late-funding refunds and history reconciliation. The full local acceptance pass
 (every named penalty, withdrawal, funding, handoff, reward and released-0.1.47
 case) passed twice in a row on the release revision, followed by the timing-load
-run. A reward checkpoint still carries the whole stake inventory and live sell-offer
-list in one signed message of at most 180000 bytes; paging it is required before
-the book grows to a few hundred live sell offers. Release all required roles
-together before arming an enforcing production registry.
+run. Release 0.1.49 pages large reward checkpoint bodies between the venue,
+stake members and payout service. Every signed wire message remains at most
+180000 bytes, under the unchanged 200000-byte sidechannel limit. Release all
+required roles together before arming an enforcing production registry.
+
+Small RPCs retain the v0.1.48 format. Larger bodies use a signed manifest and
+signed pages containing at most 90000 binary bytes each, encoded as base64.
+Brotli compression removes repeated certificate bodies; the signed manifest
+binds the SHA-256 of the exact canonical, uncompressed UTF-8 body, original
+request/reply kind, byte lengths, page count and transfer identity. The receiver
+checks all pages and the digest before invoking a handler. Neither compression
+nor paging grants funding slots. Reward verification is bounded at 5000 pieces;
+the existing signed funding-capacity maximum remains 2000 pieces. Per-account
+limits, ownership, duplicate detection and reward weight calculations are unchanged.
+
+Paging is enabled only between configured venue, payout and current or retained
+stake member identities. A body is at most 8 MiB before and after compression.
+Each receiver reserves at most 32 MiB across 16 incomplete transfers, at most four
+per sender, with a 30-second absolute reassembly deadline. Duplicate pages do not
+advance progress, foreign or unsolicited reply pages allocate nothing, and a
+bounded replay cache suppresses completed transfers. Stopping the transport or
+expiring a request releases its partial replies. Individual pages carry the same
+PoW difficulty and priority as stake RPCs.
+
+The venue learns expiring routes from signed DEX identities inside signed peer
+messages, including unchanged trader requests and signer heartbeats. Addressed
+stake traffic goes to its recipient's route. Server checkpoint pages bypass the
+venue's public send queue; ordinary leaf replies and relayed leaf traffic retain
+that queue's budget. Unknown recipients are never flooded to trader or market-feed
+leaves. While a signer starts or reconnects, the venue holds up to 64 addressed
+frames and 8 MiB for at most 30 seconds, then sends them only when a signed route
+arrives. Relayed strangers can reserve only ordinary requests of at most 4096
+bytes; larger held frames must come from the authenticated local server app. Payout pages are paced at 24000 bytes/s, charging before the first page,
+to leave room for the public queue's 32000 bytes/s within the existing 64000-byte
+receive rate. No sidechannel size or rate limit changes.
+
+0.1.49 raises the stake cap and lets the venue move enforcement earlier; 0.1.48 apps refuse both registry
+changes, so every trader updates to 0.1.49. Paging itself needs no trader update: It rejects unknown
+page kinds silently, and unrelated checkpoint pages never reach its connection.
+Servers may roll forward one at a time: RPCs that fit remain interoperable;
+oversized exchanges with old servers time out. Three matching updated original
+members suffice for a large checkpoint once the venue and payout service are
+updated. The collector proceeds as soon as three matching votes arrive instead
+of waiting for an old or unavailable fourth member. Without that quorum the
+checkpoint remains unavailable; no partial body or partial certificate is used.
+The payout's rewardBlock request allows 60 seconds for the nested rounds and
+paced archive; proposal freshness remains 60 seconds and capture agreement
+remains within 15 seconds.
 
 Local validation on 2026-11-03 passed free expiry with exact principal return and
 a nonempty reward checkpoint: 25000 active stake atoms received 2x weight and
@@ -46,11 +90,11 @@ buyer without `stakeVersion: 1` and its receiving box key is refused with exactl
 otherwise eligible signers. The ledger supports reward-only buyer stake, which cannot
 be reserved or penalized; the current deposit action creates seller-purpose
 pieces and does not yet expose that choice. One account address shares a stake cap across all trading identities
-and pairs. The default cap is $400 at admission. Rising value stops new exposure,
+and pairs. The default cap is $10,000 at admission (signed setting, at most $1,000,000). Rising value stops new exposure,
 not existing recovery. There is no minimum deposit beyond one RESET base unit.
 
 The deposit calculation divides the exact requested amount into internal lock
-pieces near $0.50, $5 and $50, plus an exact residual. At $20 per RESET, a 1 RESET
+pieces near $0.50, $5, $50 and $500, plus an exact residual. At $20 per RESET, a 1 RESET
 deposit creates thirteen pieces. Principals add up exactly to the requested
 amount. Allocation chooses the smallest sufficient whole-piece sum, then fewer
 pieces, earliest expiry and unit identity. An exhausted search budget refuses
@@ -237,8 +281,8 @@ contemporaneous authenticated maker announcements. Signers reject unobserved or
 enlarged offers and independently check balances and non-overlapping piece backing.
 The payout role imports the venue's paginated certified-award archive before
 payments, binding each forfeiture to original funded-piece ownership. Unavailable
-award synchronization stops new sends. Missing historical captures, large-inventory
-pagination and complete epoch inventory reconciliation remain release work.
+award synchronization stops new sends. Missing historical captures and complete
+epoch inventory reconciliation remain release work; transport paging does not reconstruct missed captures.
 
 Authenticated `rewardStatus` and `rewardAudit` reads expose account totals and
 per-block summaries with source certificates. Traders poll the signed service
@@ -329,7 +373,8 @@ for each ordered entry and checkpoint. It computes exact rational medians from
 the complete latest trading day's prefix and checks the latest known completion.
 The bounded historical fallback never truncates that day's median, re-dates an
 entry or extends checkpoint freshness. A still-fresh checkpoint may cross midnight
-only with the signed fallback enabled and the last completion within its lookback.
+only with the signed fallback enabled. With a lookback the latest certified day stays the price however old it is,
+until a newer completion replaces it; staking never waits for a new trade.
 `priceReference.utcDay` identifies the source trading day; `cutoffAt` remains the
 certified head's actual cutoff. A new day's first certified completion supersedes
 the historical day in the next snapshot. Admission uses the venue-signed

@@ -6,15 +6,20 @@ import { readAccount } from '../solana/rpc.js';
 export async function finalizedStakeClock({ endpoints, need = 2, timeoutMs = 3000, read = readAccount }) {
   if (!Array.isArray(endpoints) || !Number.isSafeInteger(need) || need < 2 || endpoints.length < need || new Set(endpoints).size !== endpoints.length) throw new Error('Two distinct finalized readers required');
   const results = await Promise.allSettled(endpoints.map(endpoint => read(endpoint, SYSVAR_CLOCK_PUBKEY, { timeoutMs, commitment: 'finalized' })));
-  const clocks = results.filter(r => r.status === 'fulfilled').map(r => {
+  // A malformed answer counts like a missing one.
+  const clocks = results.filter(r => r.status === 'fulfilled').flatMap(r => {
     const c = r.value;
-    if (!c.value || c.value.owner !== 'Sysvar1111111111111111111111111111111111111' || c.value.data.length !== 40 ||
-        !Number.isSafeInteger(c.slot) || c.slot < 0) throw new Error('Invalid finalized clock');
+    if (!c?.value || c.value.owner !== 'Sysvar1111111111111111111111111111111111111' || c.value.data?.length !== 40 ||
+        !Number.isSafeInteger(c.slot) || c.slot < 0) return [];
     const at = Number(c.value.data.readBigInt64LE(32));
-    if (!Number.isSafeInteger(at) || at < 0) throw new Error('Invalid finalized time');
-    return { at, slot: c.slot };
+    return Number.isSafeInteger(at) && at >= 0 ? [{ at, slot: c.slot }] : [];
   });
-  if (clocks.length < need || Math.max(...clocks.map(c => c.at)) - Math.min(...clocks.map(c => c.at)) > 5)
-    throw new Error('Finalized clocks unavailable or disagree');
-  return { at: Math.min(...clocks.map(c => c.at)), slot: Math.min(...clocks.map(c => c.slot)) };
+  // The oldest group of readers within five seconds of each other wins, so time never runs ahead of the agreeing
+  // readers; one lone reader that lags or runs ahead is left out instead of blocking all others.
+  const sorted = clocks.sort((a, b) => a.at - b.at);
+  for (const low of sorted) {
+    const group = sorted.filter(c => c.at >= low.at && c.at - low.at <= 5);
+    if (group.length >= need) return { at: low.at, slot: Math.min(...group.map(c => c.slot)) };
+  }
+  throw new Error('Finalized clocks unavailable or disagree');
 }
