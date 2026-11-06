@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.52
+
+- Venue, signers and payout stamp their messages on eight proof-of-work threads instead of one. Every stake request
+  and reply carries a 20-bit stamp; one thread queued replies past the 30 s stake timeout, which slowed deposits
+  and stake checks to minutes. Traders keep one thread. Server update only.
+
 ## 0.1.51
 
 - The venue checks sellers' stake three at a time, well inside the transport's limit of open requests, renews only

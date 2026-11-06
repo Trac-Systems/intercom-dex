@@ -19,7 +19,7 @@ for (let n = 0; n < 48; n++) {
   check(sc._checkPow(actual, actual.channel), `verification ${n}`);
 }
 
-const suspended = await powWorker.open('{"nonce":', '}', 256), old = powWorker.worker;
+const suspended = await powWorker.open('{"nonce":', '}', 256), old = powWorker.workers[0].worker;
 await powWorker.slice(suspended);
 const exited = new Promise(resolve => old.once('exit', resolve));
 old.ref(); old.terminate(); await exited;
@@ -27,9 +27,16 @@ let rejected = false;
 try { await powWorker.slice(suspended); } catch { rejected = true; }
 check(rejected, 'dead worker rejects its old jobs');
 const replacement = await powWorker.open('{"nonce":', '}', 0);
-check(powWorker.worker !== old, 'worker replaced');
+check(powWorker.workers[0].worker !== old, 'worker replaced');
 check((await powWorker.slice(replacement)).nonce === 0, 'replacement works');
 powWorker.release(replacement);
+
+// A server pool spreads concurrent stamps over its threads; each still finds the same nonce as one worker.
+powWorker.resize(4);
+const pooled = await Promise.all([0, 1, 2, 3].map(() => powWorker.open('{"nonce":', '}', 0)));
+check(new Set(pooled.map(job => powWorker.owner.get(job))).size === 4, 'four jobs on four threads');
+for (const job of pooled) { check((await powWorker.slice(job)).nonce === 0, 'pooled stamp'); powWorker.release(job); }
+check(pooled.every(job => !powWorker.owner.has(job)), 'released jobs leave the pool');
 
 const sc = new Sidechannel({}, { powEnabled: true, powDifficulty: 9, powClasses: [['urgent']] });
 let now = 100000, held = true;

@@ -18,6 +18,8 @@ export const DEX_POW_LOW = ['decline'];
 // the venue's book, chat and every trade); at 64 kB/s those connections were blocked for 30 s at a time and the
 // buyers' dealings on them were dropped, so most trades never reached the whole committee.
 export const SERVER_ROLES = ['service', 'signer'];
+// Venue, signers and payout stamp every stake request and reply; eight threads keep replies inside the stake timeout.
+export const SERVER_POW_WORKERS = 8;
 export const SERVER_RATE = { rateBytesPerSecond: 2_000_000, rateBurstBytes: 8_000_000 };
 export const TRADER_RATE = { rateBytesPerSecond: 64_000, rateBurstBytes: 256_000 };
 
@@ -41,7 +43,7 @@ export function dexTransport(config) {
       } : {}),
       acceptMessage: (channel, payload) => channel !== CHAT_CHANNEL || chat.receive(payload?.message) !== null,
       ownerWriteChannels: ['intercom-dex'], ownerKeys: { 'intercom-dex': config.servicePeerKey },
-      powEnabled: true, powDifficulty: DEX_POW_BITS,
+      powEnabled: true, powDifficulty: DEX_POW_BITS, ...(['service', 'signer', 'payout'].includes(config.role) ? { powWorkers: SERVER_POW_WORKERS } : {}),
       powClasses: DEX_POW_CLASSES, powLowKinds: DEX_POW_LOW,
       powRequiredChannels: ['intercom-dex:offers', 'intercom-dex:signers', CHAT_CHANNEL, 'intercom-dex:bonds'], powRequiredPrefixes: ['intercom-dex:t:'],
       maxMessageBytes: 200_000, ...(SERVER_ROLES.includes(config.role) ? SERVER_RATE : TRADER_RATE) },

@@ -27,16 +27,16 @@ test('old, allocation-free and worker stamping produce the same first nonce and 
   }
 });
 
-test('all sidechannels share one worker and never hash on the main thread', async t => {
+test('all sidechannels share one worker pool and never hash on the main thread', async t => {
   t.mock.method(sodium, 'crypto_hash_sha256_final', () => { throw Error('main-thread hashing'); });
   const channels = [new Sidechannel({}, { powEnabled: true, powDifficulty: 9 }), new Sidechannel({}, { powEnabled: true, powDifficulty: 9 })];
   for (const sc of channels) sc._now = () => 100000;
   const payloads = [fixture(0), fixture(1)];
   await Promise.all(channels.map((sc, i) => sc._attachPow(payloads[i])));
-  const worker = powWorker.worker;
+  const worker = powWorker.workers[0].worker;
   await channels[0]._attachPow(fixture(2));
-  assert.equal(powWorker.worker, worker);
-  assert.equal(powWorker.jobs.size, 0);
+  assert.equal(powWorker.workers[0].worker, worker);
+  assert.ok(powWorker.workers.every(w => w.jobs.size === 0));
   for (let i = 0; i < channels.length; i++) assert.equal(channels[i]._checkPow(payloads[i], payloads[i].channel), true);
 });
 

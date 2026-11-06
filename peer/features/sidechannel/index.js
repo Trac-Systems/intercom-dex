@@ -187,6 +187,7 @@ class Sidechannel extends Feature {
     // A few lowest-class stamps may wait (several takers declined at once); more are refused, never queued.
     this.powLowPending = Number.isSafeInteger(config.powLowPending) && config.powLowPending > 0 ? config.powLowPending : 4;
     this.powDifficulty = Number.isInteger(config.powDifficulty) ? config.powDifficulty : 0;
+    if (config.powWorkers !== undefined && config.powWorkers > powWorker.size) powWorker.resize(config.powWorkers);
     if (this.powDifficulty < 0 || this.powDifficulty > 30) throw new Error('Invalid PoW difficulty');
     this.powRequireEntry = config.powRequireEntry === true;
     this.powRequiredChannels = Array.isArray(config.powRequiredChannels)

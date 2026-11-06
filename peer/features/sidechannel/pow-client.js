@@ -90,5 +90,27 @@ export class PowWorker {
   }
 }
 
-// All sidechannels in a peer process share one lazily started, reusable worker.
-export const powWorker = new PowWorker();
+// Several lazily started workers behind the PowWorker interface. A job stays on the worker it opened on; a new job
+// goes to the worker with the fewest open jobs. Servers stamp every stake request and reply, so one worker thread
+// queued their replies past the 30 s stake timeout on machines with dozens of idle cores.
+export class PowPool {
+  constructor(size = 1) { this.workers = []; this.owner = new Map(); this.resize(size); }
+  resize(size) {
+    if (!Number.isSafeInteger(size) || size < 1 || size > 64) throw new Error('Invalid PoW worker count');
+    while (this.workers.length < size) this.workers.push(new PowWorker());
+    this.size = size;
+  }
+  async open(prefix, suffix, difficulty) {
+    const active = this.workers.slice(0, this.size);
+    const worker = active.reduce((best, w) => (w.jobs.size < best.jobs.size ? w : best), active[0]);
+    const job = await worker.open(prefix, suffix, difficulty);
+    this.owner.set(job, worker); return job;
+  }
+  prepare(job, prefix, suffix, difficulty) { (this.owner.get(job) ?? this.workers[0]).prepare(job, prefix, suffix, difficulty); }
+  slice(job) { return (this.owner.get(job) ?? this.workers[0]).slice(job); }
+  release(job) { const worker = this.owner.get(job); this.owner.delete(job); (worker ?? this.workers[0]).release(job); }
+  async close() { await Promise.all(this.workers.map(w => w.close())); }
+}
+
+// All sidechannels in a peer process share one pool; it starts with one worker and server roles widen it.
+export const powWorker = new PowPool(1);
