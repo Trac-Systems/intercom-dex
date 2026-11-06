@@ -3,7 +3,7 @@
 import { h, fill, amt, when, whenLong, copyButton, panel, tile } from './dom.js';
 import { virtualList } from './vlist.js';
 import { review, form, field } from './dialogs.js';
-import { stakeNotes, coverageText, usd, duration, weightText, earningNow, poolText } from './stake-text.js';
+import { stakeNotes, coverageText, usd, duration, weightText, earningNow, poolText, yieldText } from './stake-text.js';
 
 function withdrawForm(a) {
   form(`Withdraw ${a.asset}`, [
@@ -57,6 +57,7 @@ function rewardsPanel(r, stake) {
       tile('Unpaid', r.unpaid.text, 'RESET', 'sent to your Trac wallet automatically'),
       tile('Paid so far', r.paidTotal.text, 'RESET', last ? ['last ', last.amount.text, ' RESET ', when(last.at), last.link ? [' · ', h('a', { href: last.link, target: '_blank', rel: 'noopener noreferrer' }, 'transaction')] : null] : 'no payout yet'),
       tile('Earning now', earningNow(r, stake), 'RESET / day', weightText(r, stake)),
+      ((y) => tile('Yield (APY)', y.value, y.value === '—' ? '' : 'a year', y.note))(yieldText(r, stake)),
       tile('Reward pool', r.poolBalance ? r.poolBalance.text : 'unknown', r.poolBalance ? 'RESET' : '', r.dailyBudget ? `${r.dailyBudget.text} RESET a day shared by all stakers` : 'shared by all stakers')));
 }
 

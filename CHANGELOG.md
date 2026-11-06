@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.51
+
+- The venue checks sellers' stake three at a time, well inside the transport's limit of open requests, renews only
+  checks older than a minute (sellers never checked first) and renews the price part of every check each round.
+  0.1.50 asked about eight sellers at once and ran into that limit, so bonded offers could stay unlisted.
+- Wallets show the yearly yield (APY) of the stake at its current share of the reward pool, next to the RESET it
+  earns a day.
+
 ## 0.1.50
 
 - The venue checks every seller's stake in small parallel batches with a fresh clock reading, instead of at most 20

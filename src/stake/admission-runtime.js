@@ -25,17 +25,25 @@ export class StakeAdmission {
     const c = this.context(), snapshot = await this.request(c.venueKey, 'priceSnapshot', {});
     await this.price.import(snapshot);
     if (this.trader) owners = [this.role.me];
-    // Signers answer only for a clock reading at most 30 s old, so every batch reads the clock afresh and asks for
-    // several sellers at once; a long book never leaves its last sellers with a stale or missing check.
-    owners = owners.slice(0, 400);
-    for (let i = 0; i < owners.length; i += 8) {
-      const at = (await this.clock()).at;
-      await Promise.all(owners.slice(i, i + 8).map(async owner => {
+    // The price part of every check is renewed each round; the signed inventory only once it is a minute old, sellers
+    // never checked first. Signers answer only for a clock reading at most 30 s old, so each small batch reads the
+    // clock afresh; three sellers at a time stay well inside the transport's 32 open requests.
+    for (const entry of this.cache.values()) Object.assign(entry, { priceCheckpoint: snapshot.checkpoint, priceReference: snapshot.reference });
+    const checkedAt = owner => this.cache.get(owner.dexKey)?.inventoryCertificate?.[0]?.fact?.body?.at ?? -Infinity;
+    const start = (await this.clock()).at;
+    if (!this.trader) owners = owners.filter(o => start - checkedAt(o) >= 60).sort((a, b) => checkedAt(a) - checkedAt(b)).slice(0, 400);
+    for (let i = 0; i < owners.length; i += 3) {
+      const at = i ? (await this.clock()).at : start;
+      await Promise.all(owners.slice(i, i + 3).map(async owner => {
         const results = await Promise.allSettled(c.epoch.members.map(m => this.request(m.dexKey, 'admissionInventory', { owner, at })));
         try {
           const inventoryCertificate = matchingCertificate(results.flatMap(r => r.status === 'fulfilled' ? [r.value] : []), c, 'admission-inventory');
           this.cache.set(owner.dexKey, { inventoryCertificate, priceCheckpoint: snapshot.checkpoint, priceReference: snapshot.reference });
-        } catch { this.cache.delete(owner.dexKey); }
+        } catch (error) {
+          // A failed read keeps a check that is still usable; prepareBond refuses it once it is too old.
+          if (!this.cache.has(owner.dexKey)) this.failures = (this.failures ?? 0) + 1;
+          this.lastFailure = String(error?.message ?? error).slice(0, 200);
+        }
       }));
     }
   }

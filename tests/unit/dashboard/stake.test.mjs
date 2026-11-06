@@ -9,7 +9,7 @@ import { deliveryStatus as coreDelivery } from '../../../src/stake/status.js';
 import { traderFixture } from './fixtures.mjs';
 import { stakeStatus, rewardsStatus, deliveryStatus, piece, armBonds, bondedVenue, penaltyResult, PAUSE_CODES } from './stake-fixtures.mjs';
 const STATIC = new URL('../../../src/dashboard/static', import.meta.url).href;
-const { pauseText, deliveryText, toNotify, saleBondText, buyBondText, paymentsLabel, saleBondKey, tradeBondText, stakeNotes, coverageText, weightText, earningNow, poolText, duration, dollars, usd, ALARM, DECIDED } = await import(`${STATIC}/stake-text.js`);
+const { pauseText, deliveryText, toNotify, saleBondText, buyBondText, paymentsLabel, saleBondKey, tradeBondText, stakeNotes, coverageText, weightText, earningNow, yieldText, poolText, duration, dollars, usd, ALARM, DECIDED } = await import(`${STATIC}/stake-text.js`);
 
 const NOW = 1_800_000_000;
 const T = unix => `<${unix}>`;
@@ -444,6 +444,10 @@ test('rewards in words: weight with the venue multiplier, pool state with "Rewar
   // Seen live: the whole stake went to a buyer after the last reward round; it earns nothing more.
   assert.deepEqual([earningNow(r(), staked({ pieces: [] })), weightText(r(), staked({ pieces: [] }))], ['0', 'None: stake RESET to earn rewards']);
   assert.deepEqual([earningNow(r(), staked()), weightText(r(), staked())], ['0.0125', 'Active (2×): your stake backs live sell offers']);
+  // Yield at the current share: 0.0125 RESET a day on 1.2 RESET staked, of a 5 RESET daily pool.
+  assert.deepEqual(yieldText(r(), staked()), { value: '380%', note: "your share now: 0.25% of the pool's 5 RESET a day; it changes as others stake or withdraw" });
+  assert.deepEqual(yieldText(r({ weight: 'none', ratePerDay: '0' }), staked()), { value: '—', note: 'shows once your stake is counted in a reward round' });
+  assert.equal(yieldText(r(), staked({ pieces: [] })).value, '—');
   assert.equal(poolText(r()), 'Paying 5 RESET a day');
   assert.equal(poolText(r({ dailyBudget: null })), 'Paying rewards');
   assert.equal(poolText(r({ poolState: 'empty' })), 'Rewards paused, pool empty');

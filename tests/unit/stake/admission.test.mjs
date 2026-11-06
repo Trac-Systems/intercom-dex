@@ -78,3 +78,24 @@ test('reservation replay after a crash before epoch retention uses the original 
   assert.equal(f.ledger.read().reservations[ack.reservationId].admission.fromSlot, 12);
   assert.equal(Object.keys(f.ledger.read().reservations).length, 1);
 });
+
+test('venue stake checks: small batches inside the transport limit, recently checked sellers skipped, prices renewed', async () => {
+  const policy = registryPolicy(); let open = 0, most = 0; const asked = [];
+  const a = new StakeAdmission({ store: memoryStore(), identity: {}, registry: () => ({ sellerBond: policy }), clock: async () => ({ at: 1000 }),
+    price: { import: async () => ({}) },
+    request: async (to, method, body) => {
+      if (method === 'priceSnapshot') return { checkpoint: 'new-checkpoint', reference: 'new-reference' };
+      asked.push(body.owner.dexKey); open++; most = Math.max(most, open);
+      await new Promise(resolve => setTimeout(resolve, 2)); open--; throw new Error('Stake response timed out');
+    } });
+  const owner = n => ({ dexKey: hex(n), tracAddr: `trac-${n}` }), cert = at => [{ fact: { body: { at } } }];
+  a.cache.set(hex(1), { inventoryCertificate: cert(990), priceCheckpoint: 'old', priceReference: 'old' });
+  a.cache.set(hex(2), { inventoryCertificate: cert(900), priceCheckpoint: 'old', priceReference: 'old' });
+  await a.refresh([1, 2, ...Array.from({ length: 20 }, (_, i) => i + 3)].map(owner));
+  assert.ok(most <= 12, `at most three sellers (12 requests) at once, saw ${most}`);
+  assert.equal(asked.includes(hex(1)), false, 'checked 10 s ago: not asked again');
+  assert.equal(asked.filter(k => k === hex(2)).length, 4, 'checked 100 s ago: asked again');
+  assert.equal(new Set(asked).size, 21);
+  assert.deepEqual([a.cache.get(hex(1)).priceReference, a.cache.get(hex(2)).priceCheckpoint], ['new-reference', 'new-checkpoint']);
+  assert.ok(a.cache.has(hex(2)), 'a failed read keeps a check that may still be usable');
+});

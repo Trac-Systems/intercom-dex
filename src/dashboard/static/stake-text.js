@@ -180,6 +180,15 @@ export const coverageText = s => (s.coverage ? `Covers up to ${usd(s.coverage)} 
 // against the stake row now (`stake`): a stake that became active after it is not counted yet, one that is gone since
 // (withdrawn, or paid to a buyer) earns nothing more, and none accrues while the venue drains.
 export const earningNow = (r, stake = null) => (stake?.draining || r.weight !== 'none' && stake?.state === 'none' ? '0' : r.ratePerDay.text);
+// Yearly yield at the current share: this address's RESET a day from the last reward round, a year of it, against the
+// RESET it has staked now. The share moves whenever anyone stakes, withdraws or lists, so it is a reading, not a promise.
+export function yieldText(r, stake = null) {
+  const daily = Number(String(earningNow(r, stake)).replaceAll(',', '')), staked = stake ? num(stake.locked) : 0;
+  const budget = r.dailyBudget ? num(r.dailyBudget) : 0, share = budget > 0 ? daily / budget : 0;
+  if (!(daily > 0) || !(staked > 0)) return { value: '—', note: staked > 0 ? 'shows once your stake is counted in a reward round' : 'stake RESET to earn a share of the pool' };
+  const apy = daily * 365 / staked * 100, round = x => (x >= 100 ? Math.round(x).toLocaleString('en-US') : x >= 10 ? x.toFixed(1) : x.toFixed(2));
+  return { value: `${round(apy)}%`, note: `your share now: ${round(share * 100)}% of the pool's ${r.dailyBudget.text} RESET a day; it changes as others stake or withdraw` };
+}
 export function weightText(r, stake = null) {
   if (stake?.draining && stake.state !== 'none') return 'Paused while the venue moves stakes to new signers';
   if (r.weight !== 'none' && stake?.state === 'none') return 'None: stake RESET to earn rewards';
