@@ -61,12 +61,11 @@ export class PayoutRole {
     await this.syncAwards(context);
     await this.service.payout();
     if (counted > cursor.height) {
-      // Checkpoints exist only for the current counted height. After a missed height the cursor moves on to the
-      // current one; the skipped heights earn nothing instead of stopping rewards for good.
-      const height = counted === cursor.height + 1 ? cursor.height + 1 : counted;
-      const facts = await this.stakeRuntime.request(context.venueKey, 'rewardBlock', { height });
+      // The venue certifies each height it captured; the payout takes the newest certified height after its cursor.
+      // Heights without a checkpoint are skipped and earn nothing, instead of stopping rewards for good.
+      const facts = await this.stakeRuntime.request(context.venueKey, 'rewardBlock', { height: counted, after: cursor.height });
       const head = verifyCertificate(facts.headCertificate, context, 'reward-head').body;
-      if (head.height !== height || head.blockHash !== await this.blockClock.hash(head.height) ||
+      if (head.height <= cursor.height || head.height > counted || head.blockHash !== await this.blockClock.hash(head.height) ||
           head.height === cursor.height + 1 && head.previousHash !== cursor.blockHash ||
           head.at > this.now() || head.policyId !== this.policy(head.at).settings.policyId) throw new Error('Reward checkpoint does not follow the counted chain');
       for (const field of ['height', 'blockHash', 'previousHash', 'at']) if (facts[field] !== head[field]) throw new Error('Reward head mismatch');

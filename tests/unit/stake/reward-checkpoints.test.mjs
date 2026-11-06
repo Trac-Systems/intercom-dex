@@ -142,3 +142,21 @@ test('three matching checkpoint members finish without waiting for an old or sil
     assert.equal(verifyCertificate(block.inventoryCertificate, f.context, 'inventory').body.height, 1);
   } finally { clearTimeout(timer); }
 });
+
+test('the venue keeps certified heights; the payout gets the newest one after its cursor; stale captures are not certified', async () => {
+  const policy = registryPolicy({ networkId: 1, venueKey: key(venueSecret), epochId: h(8) });
+  policy.rewardService = { dexKey: key(payoutSecret), tracAddr: tracAddress(h(4)) };
+  const registry = { ...tradeFixture().registry, sellerBond: policy }, store = memoryStore(), prefix = `stake-reward-block-${h(8)}-`;
+  let now = 5000;
+  const venue = new RewardCheckpoints({ store, identity: { publicKey: key(venueSecret), secretKey: venueSecret }, registry: () => registry, venue: true,
+    clock: async () => ({ at: now }), blockClock: { counted: async () => 20, hash: async n => h(n + 100) }, request: async () => { throw Error('unexpected'); } });
+  store.put(prefix + 10, { height: 10 }); store.put(prefix + 12, { height: 12 });
+  const ask = body => venue.handle('rewardBlock', body, key(payoutSecret));
+  assert.equal((await ask({ height: 13, after: 9 })).height, 12);
+  assert.equal((await ask({ height: 11, after: 9 })).height, 10);
+  assert.equal((await ask({ height: 12 })).height, 12, 'an exact height is served as before');
+  await assert.rejects(ask({ height: 13, after: 12 }), /counted reward height/);
+  store.put(`stake-reward-capture-${h(8)}-20`, { height: 20, at: 4900 }); venue.unsigned = 20;
+  assert.equal(await venue.certifyCaptured(), null, 'a capture older than 60 s is not certified');
+  assert.equal(venue.unsigned, null);
+});

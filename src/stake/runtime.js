@@ -248,7 +248,7 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
         const observe = async () => {
           if (observing || !registry()?.sellerBond?.rewardService) return;
           observing = true;
-          try { await rewards.observe(); } catch (e) { log('reward checkpoint waiting', e.message); }
+          try { await rewards.observe(); await rewards.certifyCaptured(); } catch (e) { log('reward checkpoint waiting', e.message); }
           finally { observing = false; }
         };
         void observe(); rewardTimer = setInterval(observe, 5000); rewardTimer.unref?.();

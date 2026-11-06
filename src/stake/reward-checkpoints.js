@@ -45,6 +45,7 @@ export class RewardCheckpoints {
         const head = await this.block(height);
         const capture = { ...head, at, offers: this.offers(), ...(!this.venue ? { inventory: this.inventory(head) } : {}) };
         this.store.put(`stake-reward-capture-${context.epoch.id}-${height}`, capture);
+        if (this.venue) this.unsigned = height;
         if (!this.venue) {
           const policies = [this.registry().sellerBond, ...this.store.list('stake-retained-epoch-').map(name => this.store.get(name))];
           for (const policy of policies.filter(p => p?.epoch.members.some(m => m.dexKey === this.identity.publicKey)))
@@ -55,6 +56,16 @@ export class RewardCheckpoints {
       // never a historical inventory reconstructed after the fact.
       this.store.put(name, { height, at });
     }); this.queue = run.catch(() => {}); return run;
+  }
+  // Venue: certify a captured height at once. Signers sign only within 60 s of the capture, and the payout may count
+  // the height later than that; the certified checkpoint is kept for it. A height not certified in time is skipped.
+  async certifyCaptured() {
+    if (!this.venue || !this.unsigned) return null;
+    const height = this.unsigned, context = stakeContext(this.registry());
+    const capture = this.store.get(`stake-reward-capture-${context.epoch.id}-${height}`);
+    if (!capture || (await this.clock()).at - capture.at > 60) { this.unsigned = null; return null; }
+    const archive = await this.handle('rewardBlock', { height }, this.registry().sellerBond.rewardService.dexKey);
+    this.unsigned = null; return archive;
   }
   async block(height) {
     if (!Number.isSafeInteger(height) || height < 1 || await this.blockClock.counted() !== height) throw new Error('Current counted reward height required');
@@ -108,8 +119,13 @@ export class RewardCheckpoints {
     }
     if (method === 'rewardBlock' && this.venue) {
       if (from !== policy.rewardService.dexKey) throw new Error('Configured payout service required');
-      const name = `stake-reward-block-${context.epoch.id}-${input.height}`, saved = this.store.get(name);
+      const prefix = `stake-reward-block-${context.epoch.id}-`, name = prefix + input.height, saved = this.store.get(name);
       if (saved) return saved;
+      // The payout asks for the newest certified height after its cursor and at most its own counted height.
+      if (Number.isSafeInteger(input.after)) {
+        const heights = this.store.list(prefix).map(n => Number(n.slice(prefix.length))).filter(h => h > input.after && h <= input.height);
+        if (heights.length) return this.store.get(prefix + Math.max(...heights));
+      }
       const head = await this.block(input.height), capture = this.store.get(`stake-reward-capture-${context.epoch.id}-${input.height}`);
       if (!capture) throw new Error('Contemporaneous reward checkpoint is unavailable');
       const { at } = capture;

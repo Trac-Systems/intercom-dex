@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.53
+
+- Rewards are counted again. The venue asks the signers to certify a block's reward checkpoint right when it captures
+  it (they sign only within 60 s) and keeps the result; the payout takes the newest certified block after its cursor.
+  Before, the venue asked only when the payout had counted exactly that block, usually too late, so no block was ever
+  certified. Venue and payout update; signers and apps need nothing.
+
 ## 0.1.52
 
 - Venue, signers and payout stamp their messages on eight proof-of-work threads instead of one. Every stake request
