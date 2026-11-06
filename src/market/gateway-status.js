@@ -1,6 +1,7 @@
 export const RESET_PAUSED_MESSAGE = "RESET transfers are paused: the RESET gateway can't reach enough validators right now. Try again in a few minutes.";
 export const RESET_READY_MESSAGE = 'RESET transfers are available.';
-export const GATEWAY_STATUS_SEC = 15;
+// The venue says it every 10 s; one late or lost status message must not flip the market to paused.
+export const GATEWAY_STATUS_SEC = 45;
 
 // Use the existing signed status text: older apps can still read the warning.
 export function venueGatewayHealth(status, now) {

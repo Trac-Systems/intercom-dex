@@ -30,8 +30,8 @@ test('only authenticated venue status changes the paused market; offers stay lis
   assert.equal(pair(s).status, 'paused');
   assert.ok(await s.send('status', status(RESET_READY_MESSAGE)));
   assert.equal(pair(s).status, 'open'); assert.equal(s.view().offers[0].paused, false);
-  const healthy = s.feed.view(); s.clock.t += 14;
-  assert.equal(s.feed.view(), healthy);
+  const healthy = s.feed.view(); s.clock.t += 44;
+  assert.equal(s.feed.view(), healthy, 'one or two late status messages keep the market open');
   s.clock.t++;
   assert.equal(pair(s).status, 'paused'); assert.notEqual(s.feed.view().etag, healthy.etag);
   assert.equal(s.view().offers[0].reason, RESET_PAUSED_MESSAGE);

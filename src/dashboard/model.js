@@ -41,7 +41,8 @@ export function refreshing(fn, ms, clock = () => Date.now(), firstWaitMs = 2000)
   let last = null;
   return () => {
     const next = read().then(result => (last = result));
-    if (last) return Promise.resolve(clock() - last.at >= ms && last.ok
+    // A refresh that is merely due is not news: warn only once the last good read is two periods old.
+    if (last) return Promise.resolve(clock() - last.at >= 2 * ms && last.ok
       ? { ...last, ok: false, error: 'Balances are being refreshed; the displayed values may be out of date' } : last);
     let timer;
     const waited = new Promise(resolve => { timer = setTimeout(() => resolve({ ok: false, error: 'still being read', value: null, at: null }), firstWaitMs); });

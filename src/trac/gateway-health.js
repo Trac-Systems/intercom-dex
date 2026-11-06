@@ -44,11 +44,20 @@ export function createGatewayHealth({ resetGatewayUrl = null, request = (...args
         ? 'The RESET gateway health check timed out.' : 'The RESET gateway health check failed.');
     }
   }
+  // The gateway briefly reports an unknown validator count while it re-samples, and single reads can time out. Such
+  // an unknown answer keeps a healthy reading from the last minute; a reported count below three pauses at once.
+  let lastOk = null;
+  const settle = value => {
+    if (value.ok) lastOk = value;
+    else if (value.eligible === null && lastOk && now() >= lastOk.checkedAt && now() - lastOk.checkedAt < 60000)
+      return Object.freeze({ ...lastOk, checkedAt: now() });
+    return value;
+  };
   return {
     read({ fresh: force = false } = {}) {
       if (pending) return pending;
       if (!force && fresh()) return Promise.resolve(last);
-      pending = sample().then(value => (last = value)).finally(() => { pending = null; });
+      pending = sample().then(value => (last = settle(value))).finally(() => { pending = null; });
       return pending;
     },
     peek() { return fresh() ? last : { ok: false, eligible: null, checkedAt: last?.checkedAt ?? null, reason: 'RESET gateway health has not been checked recently.' }; }

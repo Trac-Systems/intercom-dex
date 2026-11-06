@@ -270,7 +270,15 @@ export class Service {
     const pairs = this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open');
     const listedByPair = new Map(pairs.map(p => [p.pair,
       this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))
-        .filter(o => o.side !== 'sell' || !stakeAdmissionRequired(this.registry, now) || this.stakeRuntime?.admission.covered(o, now))]));
+        .filter(o => {
+          const covered = o.side !== 'sell' || !stakeAdmissionRequired(this.registry, now) || !!this.stakeRuntime?.admission.covered(o, now);
+          if (covered === (this.stakeHidden ??= new Set()).has(o.offerId)) {
+            if (covered) this.stakeHidden.delete(o.offerId); else this.stakeHidden.add(o.offerId);
+            this.log(covered ? 'offer covered by stake again' : 'offer hidden, stake does not cover it', p.pair, o.offerId.slice(0, 12), o.maker.tracAddr,
+              covered ? '' : JSON.stringify(this.stakeRuntime?.admission.coverage(o, now) ?? 'no stake runtime'));
+          }
+          return covered;
+        })]));
     this.funds.refresh([...listedByPair.values()].flat());
     const sizes = this.funds.allocate(pairs.flatMap(p => listedByPair.get(p.pair).filter(o => o.side !== 'buy' || !this.buyerPauses.refusal(o.maker)).map(offer => ({ offer, pair: p,
       fees: this.registries.get(offer.registryVersion).fee, firstSeen: this.book.get(offer.offerId, now).firstSeen }))),

@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.1.49 (unreleased)
+## 0.1.50
+
+- The venue checks every seller's stake in small parallel batches with a fresh clock reading, instead of at most 20
+  sellers one after another; sellers late in the book were left unchecked and their offers silently unlisted. The venue
+  logs when stake stops or starts covering an offer.
+- The balance warning shows only when a refresh is really late, not every 30 s while the next read runs.
+- RESET transfers no longer flicker to paused: a momentary unknown validator count from the RESET gateway keeps the
+  last healthy reading from the last minute, and the venue's status counts for 45 s instead of 15 s. A reported count
+  below three still pauses at once.
+- Works with 0.1.49; no update is forced.
+
+## 0.1.49
 
 - Large stake reward requests and replies travel in signed, verified pages within the existing message and rate
   limits. The venue routes them away from unrelated traders and market feeds. Update venue, stake signers and

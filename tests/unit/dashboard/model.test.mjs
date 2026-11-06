@@ -225,8 +225,11 @@ test('refreshing returns the last result at once while the next read runs, and w
   gate.open(); await new Promise(r => setTimeout(r, 0));
   assert.equal((await read()).value, 1);
   clock.t = 30000;
-  const started = Date.now(), stale = await read();
-  assert.equal(stale.value, 1); assert.ok(Date.now() - started < 15, 'a due refresh does not hold the caller');
+  const started = Date.now(), due = await read();
+  assert.equal(due.value, 1); assert.ok(Date.now() - started < 15, 'a due refresh does not hold the caller');
+  assert.equal(due.ok, true, 'a refresh that is merely due shows no warning');
+  clock.t = 60000;
+  const stale = await read();
   assert.equal(stale.ok, false); assert.match(stale.error, /being refreshed/); assert.equal(stale.at, 0);
   assert.equal(n, 2); gate.open(); await new Promise(r => setTimeout(r, 0));
   assert.equal((await read()).value, 2);
@@ -237,7 +240,7 @@ test('a slow or failed wallet refresh retains values with their successful read 
   const first = await m.state(), info = await fx.wallets.info();
   let finish;
   fx.wallets.info = () => new Promise(resolve => { finish = resolve; });
-  clock.t += BALANCE_CACHE_MS;
+  clock.t += 2 * BALANCE_CACHE_MS;
   const pending = await m.state();
   assert.deepEqual(pending.wallets.assets, first.wallets.assets);
   assert.equal(pending.wallets.readAt, first.wallets.readAt);

@@ -25,13 +25,18 @@ export class StakeAdmission {
     const c = this.context(), snapshot = await this.request(c.venueKey, 'priceSnapshot', {});
     await this.price.import(snapshot);
     if (this.trader) owners = [this.role.me];
-    const at = (await this.clock()).at;
-    for (const owner of owners.slice(0, 20)) {
-      const results = await Promise.allSettled(c.epoch.members.map(m => this.request(m.dexKey, 'admissionInventory', { owner, at })));
-      try {
-        const inventoryCertificate = matchingCertificate(results.flatMap(r => r.status === 'fulfilled' ? [r.value] : []), c, 'admission-inventory');
-        this.cache.set(owner.dexKey, { inventoryCertificate, priceCheckpoint: snapshot.checkpoint, priceReference: snapshot.reference });
-      } catch { this.cache.delete(owner.dexKey); }
+    // Signers answer only for a clock reading at most 30 s old, so every batch reads the clock afresh and asks for
+    // several sellers at once; a long book never leaves its last sellers with a stale or missing check.
+    owners = owners.slice(0, 400);
+    for (let i = 0; i < owners.length; i += 8) {
+      const at = (await this.clock()).at;
+      await Promise.all(owners.slice(i, i + 8).map(async owner => {
+        const results = await Promise.allSettled(c.epoch.members.map(m => this.request(m.dexKey, 'admissionInventory', { owner, at })));
+        try {
+          const inventoryCertificate = matchingCertificate(results.flatMap(r => r.status === 'fulfilled' ? [r.value] : []), c, 'admission-inventory');
+          this.cache.set(owner.dexKey, { inventoryCertificate, priceCheckpoint: snapshot.checkpoint, priceReference: snapshot.reference });
+        } catch { this.cache.delete(owner.dexKey); }
+      }));
     }
   }
   propose(terms, now, historyFromSlot = terms.bond?.historyFromSlot ?? 0) {
