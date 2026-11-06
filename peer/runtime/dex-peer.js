@@ -145,6 +145,11 @@ export async function runDexPeer(flags, { makeHandlers, configurePeer } = {}) {
       error => { console.error(`RESET reader failed: ${error.message}`); void close().finally(() => process.exit(1)); });
     const handlers = makeHandlers ? await makeHandlers({ bus, peer, config, resetPeer: resetReady }) : {};
     if (hasLocks(config)) Object.assign(handlers, makeLocksHandlers({ bus, config, resetPeer: resetReady }));
+    else if (['service', 'signer', 'payout'].includes(config.role)) {
+      const reads = makeLocksHandlers({ bus, config, resetPeer: resetReady });
+      // Stake rewards read the signed RESET clock without joining Locks channels.
+      for (const name of ['locks_clock', 'locks_header']) handlers[name] = reads[name];
+    }
     bridge = new DexBridge(peer, { host: '127.0.0.1', port: config.bridge.port, token, requireAuth: true, handlers,
       info: { peerPubkey: peer.wallet.publicKey, swarmPublicKey: peer.swarm.keyPair.publicKey.toString('hex'),
         msbAddress: bus.wallet?.address ?? null, environment: config.environment, networkProfile: profile, servicePeerKey: config.servicePeerKey, role: config.role, locks: joinsLocks(config) } });

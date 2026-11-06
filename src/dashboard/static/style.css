@@ -111,18 +111,20 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .row { display: grid; gap: 10px; align-items: center; padding: 0 12px; height: 38px; border-bottom: 1px solid var(--grid); }
 .row:last-child { border-bottom: 0; }
 
-.cols-offers :is(.thead, .cells) { grid-template-columns: 90px 44px minmax(70px, 1fr) repeat(4, minmax(80px, 1fr)) 110px 70px; }
+.cols-offers :is(.thead, .cells) { grid-template-columns: 150px 44px minmax(70px, 1fr) repeat(4, minmax(80px, 1fr)) 110px 70px 16px; }
 .cols-running :is(.thead, .cells) { grid-template-columns: 90px 44px minmax(90px, 1fr) minmax(90px, 1fr) minmax(200px, 3fr) 110px 16px; }
 .cols-history :is(.thead, .cells) { grid-template-columns: 100px 90px 44px minmax(70px, 1fr) minmax(90px, 1fr) minmax(90px, 1fr) minmax(200px, 3fr) 16px; }
 .cols-trades :is(.thead, .cells) { grid-template-columns: 100px repeat(3, minmax(90px, 1fr)) 60px; }
 .cols-alerts :is(.thead, .cells) { grid-template-columns: 18px minmax(0, 1fr) 100px 16px; }
-.cols-assets :is(.thead, .row) { grid-template-columns: 90px repeat(3, minmax(100px, 1fr)) 100px; }
+.cols-assets :is(.thead, .row) { grid-template-columns: 90px repeat(3, minmax(100px, 1fr)) 150px; }
 .cols-withdrawals :is(.thead, .cells) { grid-template-columns: 140px minmax(0, 2fr) minmax(0, 2fr) 110px; }
 .cols-traffic :is(.thead, .cells) { grid-template-columns: 90px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.4fr) 70px 64px 16px; }
 .cols-pieces :is(.thead, .cells) { grid-template-columns: 100px 90px minmax(80px, 1fr) minmax(0, 2fr) 90px; }
 .cols-recent :is(.thead, .cells) { grid-template-columns: 90px 100px 90px minmax(80px, 1fr) minmax(0, 2fr); }
 .cols-signers :is(.thead, .cells) { grid-template-columns: minmax(0, 2fr) 80px repeat(4, minmax(80px, 1fr)) 90px; }
 .alert .icon { color: var(--warning); }
+.delivery-red .cells .icon { color: var(--down); }
+.icon.ok { color: var(--up); }
 .alert.bad .icon { color: var(--down); }
 
 /* ---- Trading screen */
@@ -213,6 +215,31 @@ a#tv-attr-logo[data-dark] { --fill: #D1D4DC; --stroke: #131722; }
 .meter .fill.bad { background: var(--down); }
 .page .rates { max-height: 196px; }
 
+/* ---- Stake and rewards */
+.row.stake { border-bottom: 0; }
+.row.stake .actions { gap: 4px; flex-wrap: nowrap; }
+.stake-more { display: grid; gap: 6px; padding: 0 12px 10px; font-size: 12px; color: var(--text-2); }
+.facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 16px; color: var(--muted); }
+.facts .badge { margin-left: 0; }
+.pad { padding: 10px 12px; }
+.notes.pad { padding-bottom: 0; }
+.warn-text { color: var(--warning); }
+
+/* ---- Sale deliveries: banners pinned under the header, and the same message in a running trade */
+.banners { position: sticky; top: 46px; z-index: 4; display: grid; gap: 6px; max-width: 1240px; margin: 0 auto; padding: 8px 16px 0; }
+.banners.wide { max-width: none; padding: 6px 6px 0; }
+.banners:empty { display: none; }
+.delivery { display: flex; gap: 12px; align-items: center; justify-content: space-between; border-radius: 6px; padding: 8px 12px; white-space: normal; }
+.delivery .msg { min-width: 0; }
+.delivery button { flex: none; }
+.delivery.red { background: var(--bad-bg); }
+.delivery.yellow { background: var(--warn-bg); }
+.delivery:is(.info, .good) { background: var(--sunken); }
+.delivery.banner { border: 1px solid var(--line); }
+.delivery.banner.red { border-color: var(--down); }
+.delivery.banner.yellow { border-color: var(--warning); }
+.delivery.banner:is(.info, .good) { background: var(--panel); }
+
 /* ---- Dialogs */
 dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); padding: 0; width: min(500px, calc(100vw - 24px)); }
 dialog::backdrop { background: rgb(0 0 0 / .5); }
@@ -248,7 +275,7 @@ label.inline { display: flex; gap: 8px; align-items: center; }
   .bottom { height: 460px; }
   .bottom-body .table { min-width: 0; }
   .hide-s { display: none; }
-  .cols-offers :is(.thead, .cells) { grid-template-columns: 80px 36px repeat(3, minmax(0, 1fr)) 64px; }
+  .cols-offers :is(.thead, .cells) { grid-template-columns: 80px 36px repeat(3, minmax(0, 1fr)) 64px 12px; }
   .cols-running :is(.thead, .cells) { grid-template-columns: 76px 36px minmax(0, 1fr) minmax(0, 1.4fr) 14px; }
   .cols-history :is(.thead, .cells) { grid-template-columns: 62px 82px 32px minmax(0, 1fr) minmax(0, 1.2fr) 12px; gap: 6px; }
   .cols-trades :is(.thead, .cells) { grid-template-columns: 60px repeat(3, minmax(0, 1fr)); }
@@ -265,6 +292,8 @@ label.inline { display: flex; gap: 8px; align-items: center; }
   .cols-recent :is(.thead, .cells) > :nth-child(3) { display: none; }
   .cols-withdrawals :is(.thead, .cells) { grid-template-columns: 100px minmax(0, 1fr) minmax(0, 1fr) 80px; }
   .cols-assets :is(.thead, .row) { grid-template-columns: 56px repeat(2, minmax(0, 1fr)) 76px; gap: 6px; }
+  .row.stake { height: auto; padding-block: 6px; }
+  .row.stake .actions { flex-direction: column; align-items: flex-end; }
   .rates .meter { grid-template-columns: minmax(0, 1fr) 70px; }
   .rates .meter .track { display: none; }
 }

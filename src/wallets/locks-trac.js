@@ -41,14 +41,13 @@ export function createLocksTrac({ bridge, wallet, profile, store, resetGatewayUr
       if (receipt.ok !== true || receipt.result?.txo?.tx !== intent.txHash) throw new Error('Wrong transfer receipt');
     }
   };
-  async function transfer({ id, asset, to, amount, nonce }) {
+  async function prepare({ id, asset, to, amount, nonce }) {
     hex(id); hex(nonce); const from = wallet.address, fromKey = key(from), toKey = key(to);
     if (wallet.publicKey !== fromKey || from === to || !['RESET', 'TNK'].includes(asset) || !/^[1-9][0-9]*$/.test(amount) || BigInt(amount) >= 2n ** 128n) throw new Error('Invalid lock transfer');
     const name = `locks-trac-${id}`, terms = { asset, from, to, amount, nonce };
     let intent = store.get(name);
     if (intent) {
       if (stableJSON(intent.terms) !== stableJSON(terms)) throw new Error('Lock transfer intent mismatch');
-      const result = await verify(intent); if (result.ok) return result;
     } else {
       const context = await bridge.call(asset === 'TNK' ? 'dex_msb_info' : 'dex_reset_context', {});
       if (context.addressPrefix !== 'trac' || context.networkId !== profile.peer.msbNetworkId ||
@@ -75,10 +74,22 @@ export function createLocksTrac({ bridge, wallet, profile, store, resetGatewayUr
       intent = { ...terms, terms, payload, ...(submission ? { submission } : {}), txHash: Buffer.from(hash).toString('hex') };
       store.put(name, intent);
     }
+    return structuredClone(intent);
+  }
+  const savedIntent = supplied => {
+    const intent = store.get(`locks-trac-${supplied.id}`);
+    if (!intent || stableJSON(intent) !== stableJSON(supplied.intent)) throw new Error('Prepared transfer journal mismatch');
+    return intent;
+  };
+  async function transfer(args) {
+    const intent = await prepare(args), result = await verify(intent);
+    if (result.ok) return result;
     await broadcast(intent); return verify(intent);
   }
   return {
-    transfer,
+    transfer, prepare,
+    sendPrepared: input => broadcast(savedIntent(input)),
+    outcome: input => verify(savedIntent(input)),
     balances: address => bridge.call('locks_balances', { address }),
     async reconcile({ id }) { const intent = store.get(`locks-trac-${id}`); if (!intent) return { ok: false }; const result = await verify(intent); if (!result.ok) await broadcast(intent); return result; },
     sendTransfer: ({ tradeId, terms }) => transfer({ id: tradeId, asset: terms.base.id, to: terms.buyer.tracAddr, amount: terms.baseAmount, nonce: transferNonce(tradeId) }),

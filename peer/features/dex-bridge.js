@@ -3,7 +3,7 @@ import { peerPresent } from './dex-presence.js';
 import b4a from 'b4a';
 import { handleLocksJoin } from './locks-bridge.js';
 
-export const DEX_CHANNELS = ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signers', 'intercom-dex:chat'];
+export const DEX_CHANNELS = ['intercom-dex', 'intercom-dex:offers', 'intercom-dex:signers', 'intercom-dex:chat', 'intercom-dex:bonds'];
 const TRADE_CHANNEL = /^intercom-dex:t:[0-9a-f]{64}$/;
 const MAX_MAKER_PINS = 16;
 // Makers a client keeps connected before any take (the best offers of the market it shows), so a take starts at once.

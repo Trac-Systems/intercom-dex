@@ -321,6 +321,7 @@ A maker answers a take it can't serve with a decline. Your trade then ends `abor
 | `busy` | The offer already has 3 trades before their lock, or you have 3 with this maker. | Wait a minute and try again, or take another offer. |
 | `insufficient` | Less is left on the offer than you asked for, or your wallet cannot cover the trade and fees. | Check your balance and fees, or take a smaller amount from `dex_book` levels. |
 | `signers` | The maker sees fewer eligible signers online than a trade needs. | Wait a few minutes and try again. |
+| `update the app` | The armed stake policy requires an updated buyer with stake capability. | Update the buyer app before taking a covered offer. |
 | `reset-gateway` | The RESET gateway cannot deliver transfers or its health is unavailable. | Wait a few minutes and retry when RESET transfers are available. |
 | `expired` | The offer expired or was cancelled. | Pick another offer. |
 | `invalid` | The amount is below the smallest trade (`minBaseAmount`) of the registry version the offer was made under, or the take doesn't match the offer, the registry or the clock (makers before 0.1.18 don't answer those, and your trade times out). | Take at least `minBaseAmount`; a rest below it cannot be traded. Otherwise refresh `dex_book` and check this computer's clock. |
@@ -655,3 +656,29 @@ At 50 loan bps, 100 USDC splits into 99.50 for the borrower and 0.50 for the col
 At 1000 option bps and a 0.05 USDC minimum, 5 USDC splits into 4.50 and 0.50. A 0.01 premium is capped at 0.01.
 Show `openingTotal`, `makerReceives`, and `openingFee`. No service fee applies on repayment, exercise, cancel or sweep.
 Put writers pay only the global escrow platform fee; `escrowCollector` has zero trade bps.
+
+### dex_stake
+
+Arguments: `action`, `amount` (optional).
+
+Use `action: "status"` without amount to inspect RESET stake. `deposit` requires a
+positive decimal RESET amount with at most eight places. `withdraw` accepts that
+amount or `all`, and defaults to all. Deposits need TNK fees; withdrawals wait the
+venue-signed delay and cannot preempt reserved trades. Local custody requires
+signed custody settings and a current certified RESET price. Poll the returned
+operation id while background recovery continues; a new request after completion
+creates a new deposit. Never send funds manually. Exact surplus replacement and
+reserved-piece deferred withdrawals are still unavailable. Bonded admission,
+penalties and the executable payout role are not ready for production activation.
+Read the structured money fields before retrying an uncertain operation. See
+[stake policy and errors](docs/STAKE.md).
+
+### dex_rewards
+
+Arguments: `action`.
+
+Use `action: "status"` for unpaid/paid RESET, weight, estimated daily rate and pool
+state. An empty pool accrues no debt; unknown pool data is null. The status
+uses the configured signed payout identity; disconnected or stale pool data stays unknown. Live seller-offer backing is certified for active weight, and certified seller awards forfeit unpaid rewards before payout. `dex_status` also exposes
+stake, rewards, offer pause reasons, per-trade delivery and warnings with deadline
+and amounts at risk. Never originate a second transfer to fix a missing proof.

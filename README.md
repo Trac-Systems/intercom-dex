@@ -367,3 +367,10 @@ The protocol is in [`docs/SPEC.md`](docs/SPEC.md), and building and testing are 
 ## License
 
 [MIT](LICENSE.md).
+
+## RESET stake and delivery status
+
+The trader now exposes stake, reward, delivery-deadline and warning fields through
+status, MCP and CLI. Stake funding is unavailable until custody and compatibility
+integration passes the release checks. See [RESET stake](docs/STAKE.md) for the
+3%/$0.50 policy, buyer reward-only stake, withdrawal wait, rewards and exact errors.

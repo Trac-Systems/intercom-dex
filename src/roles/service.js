@@ -1,3 +1,5 @@
+import { stakeAdmissionRequired } from '../stake/prevention.js';
+import { validatePolicyTransition } from '../stake/settings.js';
 import { buildRegistry } from '../core/registry.js';
 import { tradeId as termsTradeId, transferNonce, validateTerms } from '../core/terms.js';
 import { stableJSON, sha256Hex, hexToBytes, fromLe32, le32 } from '../core/canonical.js';
@@ -75,7 +77,8 @@ export class Service {
     this.bookFeed = new BookFeed();
     this.relays = new RegistryRelays(bridge);
     const savedFee = store.get('service-fee-policy');
-    this.registry = this.#registry({ ...registryInput, ...(savedFee ? { fee: savedFee.fee } : {}) });
+    const savedStake = store.get('service-stake-policy');
+    this.registry = this.#registry({ ...registryInput, ...(savedFee ? { fee: savedFee.fee } : {}), ...(savedStake ? { sellerBond: savedStake.policy } : {}) });
     this.buyerPauses = new BuyerPauses({ store, registry: () => this.registry, now });
     this.registryQueue = Promise.resolve();
     this.registries = new Map();
@@ -119,7 +122,8 @@ export class Service {
       for (const m of u.messages) this.unmatchedCounts.set(m.from, (this.unmatchedCounts.get(m.from) ?? 0) + 1);
     }
     this.heartbeats = new Map();
-    this.funds = new MakerFunds({ solana, trac, now: () => this.now(), addressProof: () => this.addressProofPolicy(), log: (...a) => this.log(...a) });
+    this.funds = new MakerFunds({ solana, trac, now: () => this.now(), addressProof: () => this.addressProofPolicy(),
+      fullSells: () => !!this.registry.sellerBond, log: (...a) => this.log(...a) });
     this.unfunded = {}; this.hidden = new Set();
     this.shareChecks = new Map(); // `${id}:${share}:${commitments}` -> verifyShare result
     this.locked = new Map();       // tradeId -> { seller, deadline } for watched trades whose buyer sent the deal
@@ -132,6 +136,7 @@ export class Service {
   // every version stored. Every participant keeps each version it has seen, so issuing a known number again with
   // other content stops trading everywhere: without its stored registry the venue only starts on a first launch.
   #registry(input) {
+    if (input.sellerBond && input.sellerBond.venueKey !== this.identity.publicKey) throw new Error('Stake publication belongs to another venue');
     if (this.profile) checkProfileRegistry(input, this.profile);
     const previous = this.store.get('service-registry');
     if (!previous && !this.firstLaunch) throw new Error('This data folder has no venue registry. Restore the venue export or the old records/ folder; it holds the registry history. Pass --first-launch only on the very first start of a new venue: issuing version 1 again stops trading for every trader and signer.');
@@ -139,6 +144,8 @@ export class Service {
     if (previous && stableJSON({ ...previous, version: 0, issuedAt: 0 }) === stableJSON({ ...content, version: 0, issuedAt: 0 })) return buildRegistry(previous);
     const highest = Math.max(0, ...this.store.list('service-registry').map(name => this.store.get(name)?.version ?? 0));
     const registry = buildRegistry({ ...content, version: highest + 1, issuedAt: this.now() });
+    if (previous?.sellerBond && !registry.sellerBond) throw new Error('Cannot remove stake policy');
+    if (registry.sellerBond) validatePolicyTransition(previous?.sellerBond, registry.sellerBond, this.now());
     this.store.put(`service-registry-v${registry.version}`, registry);
     this.store.put('service-registry', registry);
     return registry;
@@ -217,6 +224,18 @@ export class Service {
     });
   }
 
+  publishStake(policy) {
+    return this.#registryWork(async () => {
+      const input = buildRegistry({ ...this.registry, sellerBond: policy });
+      validatePolicyTransition(this.registry.sellerBond, input.sellerBond, this.now());
+      if (this.profile) checkProfileRegistry(input, this.profile);
+      this.store.put('service-stake-policy', { policy: input.sellerBond });
+      this.registry = this.#registry(input);
+      this.registries.set(this.registry.version, this.registry);
+      await this.#broadcastRegistry(); return this.registry;
+    });
+  }
+
   async #broadcastRegistry() {
     if (this.profile) checkProfileRegistry(this.registry, this.profile);
     await this.solana.assertFeeConfig(this.registry.fee, this.profile?.platformCollector);
@@ -249,7 +268,8 @@ export class Service {
     const makers = new Set(), pending = this.#pendingByOffer(), busy = this.busySellers();
     const pairs = this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open');
     const listedByPair = new Map(pairs.map(p => [p.pair,
-      this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))]));
+      this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))
+        .filter(o => o.side !== 'sell' || !stakeAdmissionRequired(this.registry, now) || this.stakeRuntime?.admission.covered(o, now))]));
     this.funds.refresh([...listedByPair.values()].flat());
     const sizes = this.funds.allocate(pairs.flatMap(p => listedByPair.get(p.pair).filter(o => o.side !== 'buy' || !this.buyerPauses.refusal(o.maker)).map(offer => ({ offer, pair: p,
       fees: this.registries.get(offer.registryVersion).fee, firstSeen: this.book.get(offer.offerId, now).firstSeen }))),
@@ -273,11 +293,12 @@ export class Service {
         const free = BigInt(sizes.get(o.offerId) ?? '0');
         return free >= BigInt(p.minBaseAmount) ? [{ ...o, baseAmount: free.toString() }] : [];
       });
+      (this.rewardOffersByPair ??= new Map()).set(p.pair, offers);
       this.unfunded[p.pair] = listed.length - offers.length;
       const message = this.bookFeed.next(p.pair, this.registry.version, offers, now, () => {
         const seq = (this.store.get('book-sequence')?.seq ?? 0) + 1;
         this.store.put('book-sequence', { seq }); return seq;
-      });
+      }, { bindOffers: stakeAdmissionRequired(this.registry, now) });
       if (message) await this.host.sendPublic(MAIN, message.kind, message.body);
     }
     this.funds.forget(makers);
@@ -687,6 +708,10 @@ export class Service {
       this.#save(r, { triedAt: this.now() });
       return false;
     }
+    // Capture the original completion before publishing it. A failed quorum leaves
+    // the already signed proposal durable for recovery; old archive times are never imported.
+    const summon = (this.store.get(`watch-${r.tradeId}`) ?? this.store.get(`watcharchive-${r.tradeId}`))?.summon;
+    await this.stakeRuntime?.price.observe(r.report, summon).catch(e => this.log('stake price', e.message));
     const logged = this.#save(r, proof);
     this.#index(logged);
     if (logged.fill) this.book.fill(logged.fill.offerId, BigInt(logged.fill.amount));

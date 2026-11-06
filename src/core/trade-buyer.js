@@ -1,3 +1,4 @@
+import { matchingBondAck } from '../stake/admission.js';
 import { STEP_BUDGET_MS } from './terms.js';
 import { lockStatement, prepareDeal } from './dealing.js';
 import { abortTransition, createTrader, negotiationStep, peerAbortReason, refusalReason, resumeActions, runStep, seededRng, sendAction } from './trade-common.js';
@@ -10,12 +11,13 @@ export function ackRejectionReason(s, m) {
   if (s.phase !== 'awaitAcks') return `phase ${s.phase} does not count acks`;
   if (m.body.H !== s.H) return 'hash mismatch';
   if (m.body.holdUntil < s.terms.refundAfter) return 'holdUntil before refundAfter';
+  if (!matchingBondAck(s.terms, s.H, m.body.bond)) return 'bond_not_reserved';
   if (s.acks.includes(m.from)) return 'already counted';
   return null;
 }
 
 function maybeLock(s) {
-  if (s.now >= s.terms.sendBy - LOCK_START_MARGIN_SEC) return abortTransition(s, 'Signers did not confirm');
+  if (s.now >= s.terms.sendBy - LOCK_START_MARGIN_SEC - (s.terms.bond ? 120 : 0)) return abortTransition(s, 'Signers did not confirm');
   if (s.acks.length < s.terms.k) return { state: s, actions: [] };
   s.phase = 'locking';
   s.lockAttempted = true;
@@ -70,7 +72,7 @@ export function step(state, event) {
     }
     if (['awaitCertificate', 'preparingDeal', 'proving'].includes(s.phase) && e.now >= s.draft.sendBy) return abortTransition(s, 'Negotiation deadline expired');
     if (s.phase === 'awaitAcks' && e.type === 'tick' &&
-        e.now >= s.terms.sendBy - LOCK_START_MARGIN_SEC) return abortTransition(s, 'Signers did not confirm');
+        e.now >= s.terms.sendBy - LOCK_START_MARGIN_SEC - (s.terms.bond ? 120 : 0)) return abortTransition(s, 'Signers did not confirm');
     if (e.type === 'resume') {
       if (s.phase === 'awaitCertificate') return resumeActions(s, [{ type: 'acquireCertificate', tradeId: s.tradeId }]);
       if (s.phase === 'preparingDeal') return resumeActions(s, [{ type: 'prepareDeal', tradeId: s.tradeId }]);

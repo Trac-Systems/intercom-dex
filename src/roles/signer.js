@@ -1,3 +1,5 @@
+import { stakeAdmissionRequired, buyerCapabilityReason } from '../stake/prevention.js';
+import { stakeError } from '../stake/errors.js';
 import { RegistryRelays } from '../net/relays.js';
 import { createSigner, rescueTrade } from '../core/trade-signer.js';
 import { TradeHost, isFinished } from './host.js';
@@ -136,6 +138,10 @@ export class Signer {
     const { tradeId } = m.body, now = nowSec(), reg = this.registry.usable;
     if ([...this.host.trades.values()].some(t => t.state.tradeId === tradeId)) return;
     if (!reg) throw new Error('No usable registry');
+    const buyerReason = buyerCapabilityReason(reg, m.body.terms?.buyer, now);
+    if (buyerReason) throw new Error(buyerReason);
+    if (stakeAdmissionRequired(reg, now) && !m.body.terms?.bond) throw stakeError('bond_not_reserved', {});
+    if (m.body.terms?.bond) this.stakeRuntime?.admission.validate(m.body.terms, now);
     // The trade's registry must be the current one, or an earlier one that was replaced less than OLD_REGISTRY_SEC ago:
     // offers live up to 30 days and keep naming the registry they were posted under.
     const version = m.body.terms?.registryVersion, next = Number.isSafeInteger(version) && this.registry.snapshot(version + 1);

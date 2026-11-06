@@ -46,6 +46,16 @@ test('automatic first startup creates encrypted wallets and restart preserves bo
   close(first); close(again);
 });
 
+test('payout setup and automatic restart retain a separate ordinary Trac wallet without a Solana key', async () => {
+  const config = { ...configAt(root()), role: 'payout' };
+  const setup = await setupWallets(config, profile, { password });
+  assert.equal(setup.addresses.solana, null); assert.match(setup.addresses.trac, /^trac1/);
+  const opened = await ensureWallets(config, profile, { TEST_WALLET_PASSWORD: password });
+  assert.equal(opened.wallet.address, setup.addresses.trac); assert.equal(opened.keys.solanaSecret, null);
+  assert.equal(opened.keys.identity.publicKey, setup.dexKey); close(opened);
+  await assert.rejects(setupWallets({ ...configAt(root()), role: 'payout' }, profile, { password, importSolana: '/not-read.json' }), /no Solana/);
+});
+
 test('known mnemonic derives exactly MSB/trac-wallet identity and export is private and exclusive', async () => {
   const config = configAt(root()), msb = createConfig(profile.peer.environment, {});
   const peer = new PeerWallet({ mnemonic, networkPrefix: msb.addressPrefix, derivationPath: msb.derivationPath }); await peer.ready;

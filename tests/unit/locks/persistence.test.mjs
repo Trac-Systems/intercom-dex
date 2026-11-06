@@ -12,7 +12,7 @@ import { le32 } from '../../../src/core/canonical.js';
 import { identity, box, registry, memoryStore } from './helpers.mjs';
 
 test('locks store encrypts shares; durable release throttle survives restarts without channel rejoin',async t=>{
-  const area=resolve('.test-tmp/locks-unit');mkdirSync(area,{recursive:true});const dir=mkdtempSync(join(area,'store-'));
+  const area=resolve(process.env.TMPDIR ?? '.test-tmp', 'locks-unit');mkdirSync(area,{recursive:true});const dir=mkdtempSync(join(area,'store-'));
   t.after(()=>rmSync(dir,{recursive:true,force:true}));
   const key=randomBytes(32),store=openStore(dir,key),id='ab'.repeat(32),maker=identity(),recipient=box(),signer=identity(),ownBox=box();
   const share='91'.repeat(32),sealed=sealShare(le32(123n),recipient.publicKey,{positionId:id,from:1,to:maker.publicKey},'release');

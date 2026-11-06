@@ -11,7 +11,7 @@ import { Service } from '../../../src/roles/service.js';
 import { RegistryView, publicReceiver } from '../../../src/roles/common.js';
 import { fixture } from '../core/helpers.mjs';
 
-const root = resolve('.test-tmp/wallet-fees'); mkdirSync(root, { recursive: true });
+const root = resolve(process.env.TMPDIR ?? '.test-tmp', 'wallet-fees'); mkdirSync(root, { recursive: true });
 const password = 'throwaway-backup-password', newPassword = 'throwaway-restored-password';
 async function backup() {
   const dir = mkdtempSync(join(root, 'backup-')), config = { role: 'service', dataDir: join(dir, 'old') };

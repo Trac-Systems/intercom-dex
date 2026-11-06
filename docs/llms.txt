@@ -72,6 +72,7 @@ Declines (a take ends aborted with this reason):
 busy - offer has 3 trades before their lock, or you have 3 with this maker; retry later.
 insufficient - less is left than you asked, or your wallet cannot cover the trade and fees; check balances or take less.
 signers - too few eligible signers online at the maker; retry in a few minutes.
+update the app - Update the buyer app to support the armed stake policy; signer software floors are unchanged.
 reset-gateway - RESET transfers are paused because gateway health is unavailable or too few validators are reachable; retry in a few minutes.
 expired - the offer expired or was cancelled.
 invalid - the take didn't match the offer, the registry or the clock; refresh dex_book, check the clock.
@@ -135,3 +136,10 @@ premium. Exercise is a small Solana message: E goes to holder, H to writer; expi
 Early release is usually 1–2 hours after payment (median time trails the newest block by about an hour, and the RESET count trails Bitcoin by a few blocks), once blockTime <= median of 11 verified Bitcoin header times.
 Put writers can refund after refundAfter. RESET/TNK depend on enough signers; handover can replace signers
 while at least k survive. Trader uses one peer with locks:true; signer peers stay dedicated.
+
+Stake and reward tools:
+dex_stake {"action":"status"} - stake amounts, coverage and pending state; no amount on status.
+dex_rewards {"action":"status"} - unpaid/paid RESET, weight, daily rate and pool state.
+Deposit uses dex_stake {"action":"deposit","amount":"1"}; withdrawal uses action withdraw and optional decimal amount or all.
+Amounts entered are decimal RESET with at most eight places. No minimum beyond one base unit. Deposits need TNK fees; withdrawal waits the signed delay. Funding is unavailable in this build: bond_setup_unavailable is a refusal, never an instruction to transfer manually.
+Status adds stake, rewards, offers/mine pause, trades delivery and warnings. Machine amounts are integer strings with separate formatted strings; unknown pool/coverage is null. Failed/overdue warnings name the deadline and USD/RESET at risk. Keep the original payment and proof journals; never originate a second payment. The fixed error/detail and status contracts are in docs/STAKE.md and src/core/API.md.

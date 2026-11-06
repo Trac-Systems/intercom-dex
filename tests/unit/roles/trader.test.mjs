@@ -1108,3 +1108,15 @@ test('an unavailable local SOL check refuses a sell before announcing it', async
     /Cannot check SOL needed to receive USDC.*RPC unavailable.*Try again/);
   assert.equal(t.mine.size, 0); assert.equal(bridge.sent.filter(x => x.envelope.kind === 'offer').length, 0);
 });
+
+test('armed maker returns update the app to an old buyer before creating a trade', async () => {
+  const f = fixture(), { t, bridge } = await trader(party(), { registry: f.registry });
+  const offer = await t.makeOffer({ pair: 'TNK/USDC', side: 'sell', baseAmount: '1000000000000000000', price: '1' });
+  t.registry.current.sellerBond = { acceptNew: true, enforceAfter: nowSec() };
+  const peer = party(), now = nowSec(), commitment = random32();
+  await channelPost(t, bridge, peer, 'take', { offerId: offer.offerId, pair: offer.pair, registryVersion: offer.registryVersion,
+    software: '0.1.0', taker: peer.me, commitment, baseAmount: offer.baseAmount, sendBy: now + 900, refundAfter: now + 86400 }, 'intercom-dex:t:' + offer.offerId);
+  assert.equal(bridge.sent.at(-1).envelope.kind, 'abort');
+  assert.deepEqual(bridge.sent.at(-1).envelope.body, { tradeId: offer.offerId, commitment, reason: 'update the app' });
+  assert.equal(t.host.trades.size, 0); assert.equal(t.registry.current.minSoftware, f.registry.minSoftware);
+});

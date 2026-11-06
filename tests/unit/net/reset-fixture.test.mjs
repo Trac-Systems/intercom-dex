@@ -4,9 +4,23 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resetSourceURL } from '../../reset-source.mjs';
+import { fixtureValidatorHealth } from '../../integration/trac/fixture-validators.mjs';
 
-const area = fileURLToPath(new URL('../../../.test-tmp/publish/reset-source/', import.meta.url));
+const area = process.env.TMPDIR ?? fileURLToPath(new URL('../../../.test-tmp/publish/reset-source/', import.meta.url));
 mkdirSync(area, { recursive: true });
+
+test('fixture health counts distinct connected eligible MSB validators and propagates unknown reads', async () => {
+  let connected = ['admin', 'writer1', 'writer2', 'writer2', 'reader'];
+  const bus = { config: {}, network: { validatorConnectionManager: { connectedValidators: () => connected } }, state: {
+    getAdminEntry: async () => ({ address: 'admin' }),
+    getNodeEntry: async address => ({ isWriter: address.startsWith('writer') })
+  } };
+  assert.deepEqual(await fixtureValidatorHealth(bus, key => key), { eligible: 3, connected: 4, required: 3 });
+  connected = ['admin', 'writer1'];
+  assert.equal((await fixtureValidatorHealth(bus, key => key)).eligible, 2);
+  bus.state.getNodeEntry = async () => { throw new Error('signed state unavailable'); };
+  await assert.rejects(fixtureValidatorHealth(bus, key => key), /signed state unavailable/);
+});
 
 test('RESET source imports require an explicit absolute checkout directory', () => {
   for (const directory of ['', 'relative']) assert.throws(() => resetSourceURL('contract.js', directory), /Set RESET_SOURCE_DIR/);
@@ -33,5 +47,19 @@ test('RESET source URLs encode checkout paths and use the environment setting', 
   } finally {
     if (previous === undefined) delete process.env.RESET_SOURCE_DIR;
     else process.env.RESET_SOURCE_DIR = previous;
+  }
+});
+
+test('local Trac fixture honors its scratch root and refuses sibling-prefix or relative folders before startup', async () => {
+  const dir = mkdtempSync(join(area, 'trac-root-')), previous = process.env.DEX_TRAC_TEST_DIR;
+  try {
+    process.env.DEX_TRAC_TEST_DIR = dir;
+    const { startLocalDevnet } = await import('../../integration/trac/local-devnet.mjs?isolated-area-test');
+    for (const root of ['relative', dir, dir + '-outside', join(dir, '..', 'outside')]) {
+      await assert.rejects(startLocalDevnet(root), /fresh Trac test folder/);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.DEX_TRAC_TEST_DIR;
+    else process.env.DEX_TRAC_TEST_DIR = previous;
   }
 });

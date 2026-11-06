@@ -8,6 +8,9 @@ import { open, createReplayCache } from '../core/envelope.js';
 import { supportedBase, tradePrice, registryPair } from '../market/assets.js';
 import { amount, shortKey } from './format.js';
 import { buildBook, ownTakes } from './market.js';
+import { stakeView, rewardsView, deliveryView, bondView, bannerWorthy, draining } from './stake.js';
+import { DECIDED } from './static/stake-text.js';
+import { stakeAdmissionRequired } from '../stake/prevention.js';
 import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
 
 const DAY = 86400, ONLINE_SEC = 90, PAYOUT_DELAY = 7 * DAY;
@@ -54,6 +57,7 @@ const REASONS = [
   [/^Signers did not confirm/, 'not enough signers confirmed in time'],
   [/^Negotiation deadline expired/, 'the trade could not be prepared in time'],
   [/^Not enough signers online/, 'not enough signers were online'],
+  [/^update the app$/, 'sellers here post a bond, and only a newer version of this app can receive it. Update the app'],
 ];
 export function plainReason(reason) {
   const text = String(reason ?? '').slice(0, 160);
@@ -69,7 +73,8 @@ function tradeFacts(trade) {
 
 // One plain line for a running trade: what happens now, who we wait for, the next deadline and what happens
 // automatically when nothing happens. Times are Unix seconds; the page shows them in local time.
-export function describeTrade(trade) {
+// `deliveryBy`: a bonded sale's delivery deadline from the core's delivery status (null for a sale without a bond).
+export function describeTrade(trade, deliveryBy = null) {
   const s = trade.state, t = s.terms ?? s.draft, base = t.base.id, k = t.k;
   const confirmed = `signers confirmed: ${s.acks?.length ?? 0} of ${k}`;
   const line = (now, waitingFor, ifMissed, deadline, fallback, fallbackAt = null) => ({ now, waitingFor, ifMissed, deadline, fallback, fallbackAt });
@@ -110,9 +115,11 @@ export function describeTrade(trade) {
           'the trade is called off; you send nothing');
       case 'reservingEscrow': case 'transferring':
         if (s.gatewayPaused) return line(RESET_PAUSED_MESSAGE, 'the RESET gateway', 'If transfers cannot resume by', t.sendBy,
-          'The trade is called off and your RESET reservation is released.');
+          'the trade is called off and your RESET reservation is released');
+        if (deliveryBy) return line(`Sending your ${base}…`, 'the Trac network', 'If it is not confirmed by', deliveryBy,
+          'the bond reserved from your stake goes to the buyer');
         return line(`Sending your ${base}…`, 'the Trac network', 'Transfers are retried until', t.sendBy,
-          'The same transaction is retried; confirmation may arrive later.');
+          'the same transaction is retried; confirmation may arrive later');
       case 'awaitShares':
         return line(`Your ${base} was sent. Waiting for signers to release the key (${s.shares?.length ?? 0} of ${k} key pieces)`, 'signers',
           'If the key is not released by', t.refundAfter, 'the buyer can take the USDC back');
@@ -206,11 +213,16 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
       text: `Your ${tradeFacts(t).pair} trade (${shortKey(t.state.tradeId)}): ${warning}` });
   }
   for (const o of status.mine) if (o.warning) attention.push({ kind: 'claim', text: o.warning });
+  // SB4 §6 warnings; a trade's own warning is its pinned banner instead.
+  for (const w of status.warnings) if (!w.tradeId) attention.push({ kind: 'stake', severity: w.severity, text: w.message });
   for (const o of expired) {
     const left = offerSizes(o, trades).left;
     if (left > 0n) attention.push({ kind: 'expired', at: o.expiresAt, text: `Your offer to ${offerLine(o)} expired; ${amount(left, o.pair.split('/')[0]).text} ${o.pair.split('/')[0]} were not traded.` });
   }
   const noteOf = t => nextOffer?.note(t.key) ?? null;
+  // A trade's bond and a sale's delivery state (SB4 §5); a buy shows only what concerns the seller's stake.
+  const rows = new Map(status.trades.map(x => [x.key, x]));
+  const bonded = t => { const bond = bondView(rows.get(t.key)?.bond); return { bond, delivery: deliveryView(rows.get(t.key)?.delivery, { buyer: t.role === 'buyer', bond }) }; };
   // Every take of ours that ended without a trade is an alert (unless the next offer took over); a take on our offer
   // only once its terms were agreed, so strangers who start and drop a take do not raise one.
   for (const t of finished) if (['aborted', 'lost'].includes(t.state.phase) && t.state.now >= now - DAY && (t.state.tradeId || t.state.mode === 'taker') && !noteOf(t)?.moved) {
@@ -225,6 +237,13 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
       change24h: null, high24h: price(ticker?.high24h), low24h: price(ticker?.low24h),
       volume24h: ticker ? amount(ticker.volume24h, 'USDC') : null, bestAsk: book.asks[0]?.price ?? null, bestBid: book.bids[0]?.price ?? null };
   });
+  // A bonded sale's delivery deadline matters for the row until it is delivered or the stake is decided.
+  const deliveryBy = d => (d && !d.buyer && !DECIDED.includes(d.state) ? d.deadline : null);
+  const runningRows = running.map(t => { const b = bonded(t); return { ...tradeFacts(t), line: describeTrade(t, deliveryBy(b.delivery)), ...b }; });
+  // The stake row while the venue takes stakes or something is still staked; rewards also while any are owed or paid.
+  const stake = status.stake.capUsd !== null || status.stake.state !== 'none' ? stakeView(status.stake, { selling: status.mine.some(o => o.side === 'sell' && o.expiresAt > now),
+    bonded: !!reg && stakeAdmissionRequired(reg, now), draining: draining(reg) }) : null;
+  const historyRows = finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t, noteOf(t)), ...bonded(t) }));
   return {
     signersOnline: status.signersOnline.length, network: status.network ?? null, software: status.software, registryVersion: status.registryVersion,
     balances: wallet?.balances ? Object.fromEntries(['TNK', 'RESET', 'USDC', 'SOL'].map(a => [a, { total: amount(wallet.balances[a].balance, a), free: amount(wallet.balances[a].free, a) }])) : null,
@@ -232,11 +251,14 @@ function traderView({ role, config, wallet, expired, now, nextOffer }) {
     offers: status.mine.filter(o => o.expiresAt > now).sort((a, b) => a.expiresAt - b.expiresAt).map(o => {
       const base = o.pair.split('/')[0];
       return { offerId: o.offerId, pair: o.pair, paused: o.paused ?? false, reason: o.reason ?? null, side: o.side, price: o.price, size: amount(o.baseAmount, base), filled: amount(o.filled, base),
-        reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt, listed: o.listed ?? null };
+        reserved: amount(o.reserved, base), left: amount(o.available, base), expiresAt: o.expiresAt, listed: o.listed ?? null,
+        pause: o.pause?.code === 'stake_short' && draining(reg) ? { code: 'venue_draining', message: o.pause.message } : o.pause ?? null };
     }),
-    running: running.map(t => ({ ...tradeFacts(t), line: describeTrade(t) })),
-    history: finished.map(t => ({ ...tradeFacts(t), outcome: outcome(t, noteOf(t)) })),
+    running: runningRows,
+    history: historyRows,
     pairs: market,
+    stake, rewards: stake || status.rewards.paidTotal !== '0' || status.rewards.unpaid !== '0' ? rewardsView(status.rewards) : null,
+    deliveries: [...runningRows, ...historyRows].filter(r => bannerWorthy(r, now - DAY)).map(r => ({ key: r.key, pair: r.pair, base: r.base, quote: r.quote, delivery: r.delivery })),
   };
 }
 

@@ -15,7 +15,9 @@ export function buildRegistry(input) {
 export function signRegistry(registry, identitySecret) {
   const body = buildRegistry(registry);
   const secret = typeof identitySecret === 'string' ? hexToBytes(identitySecret, 32) : identitySecret;
-  return { registry: body, from: bytesToHex(identityPublic(secret)),
+  const from = bytesToHex(identityPublic(secret));
+  if (body.sellerBond && body.sellerBond.venueKey !== from) throw new Error('Stake publication belongs to another venue');
+  return { registry: body, from,
     sig: bytesToHex(ed25519.sign(utf8(PREFIX + stableJSON(body)), secret)) };
 }
 
@@ -24,7 +26,7 @@ export function verifyRegistry(signed, serviceKey, { now }) {
     if (!Number.isSafeInteger(now) || now < 0) return false;
     stableJSON(signed);
     const parsed = signedSchema.parse(signed);
-    return parsed.from === serviceKey && parsed.registry.issuedAt <= now &&
+    return parsed.from === serviceKey && (!parsed.registry.sellerBond || parsed.registry.sellerBond.venueKey === serviceKey) && parsed.registry.issuedAt <= now &&
       ed25519.verify(hexToBytes(parsed.sig, 64), utf8(PREFIX + stableJSON(parsed.registry)), hexToBytes(serviceKey, 32), { zip215: false });
   } catch { return false; }
 }

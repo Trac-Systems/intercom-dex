@@ -3,6 +3,7 @@ import PeerWallet from 'trac-wallet';
 import { unsafeDecodeApplyOperation } from 'trac-msb/src/utils/protobuf/operationHelpers.js';
 import { bufferToBigInt } from 'trac-msb/src/utils/amountSerialization.js';
 import { createHash } from 'trac-peer/src/utils/types.js';
+import { signedCheckout } from './signed-view.js';
 
 const isHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const hex = value => b4a.isBuffer(value) ? value.toString('hex') : null;
@@ -16,7 +17,7 @@ function keyFor(address, prefix) {
   return key?.length === 32 && PeerWallet.encodeBech32mSafe(prefix, key) === address ? key.toString('hex') : null;
 }
 
-export function createTransferVerifier({ msb, resetPeer = null, resetBootstrap = null }) {
+export function createTransferVerifier({ msb, resetPeer = null, resetBootstrap = null, exactAmount = false }) {
   if (typeof msb?.state?.getSigned !== 'function' || typeof msb?.config?.addressPrefix !== 'string' || !b4a.isBuffer(msb?.config?.bootstrap) || msb.config.bootstrap.length !== 32) throw new Error('Expected local MSB signed state and configuration');
   if (resetPeer && (!isHash(resetBootstrap) || hex(resetPeer.base?.key) !== resetBootstrap || typeof resetPeer.base?.view?.checkout !== 'function')) throw new Error('RESET peer does not match trusted bootstrap');
 
@@ -49,9 +50,17 @@ export function createTransferVerifier({ msb, resetPeer = null, resetBootstrap =
     }
     if (!resetPeer) return result('reset_reader_required');
     if (hex(tx.bs) !== resetBootstrap || hex(tx.mbs) !== hex(msb.config.bootstrap)) return result('wrong_contract', true);
+    if (exactAmount) {
+      if (sender !== from) return result('wrong_from', true);
+      if (hex(tx.in) !== nonce) return result('wrong_nonce', true);
+      // Only an independently matched signed operation may pause a proof clock
+      // while its RESET result is pending. An unrelated hash cannot buy a pause.
+      const expectedHash = await createHash(JSON.stringify({ type: 'transfer', value: { to, amount: minAmount } }));
+      if (hex(tx.ch) !== expectedHash) return result('wrong_content', true);
+    }
     let row;
     try {
-      const view = resetPeer.base.view.checkout(resetPeer.base.view.core.signedLength);
+      const { view } = await signedCheckout(resetPeer.base, 'RESET');
       try {
         const index = await view.get(`tx/${txHash}`);
         if (index === null) return result('reset_not_final');

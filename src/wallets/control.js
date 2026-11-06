@@ -7,6 +7,6 @@ export async function controlCall(config, method, route, body) {
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body) });
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error ?? `Control HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(value.error ?? `Control HTTP ${response.status}`), { result: value });
   return value;
 }

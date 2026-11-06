@@ -27,9 +27,17 @@ import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 import PeerRuntimeWallet from '../../peer/node_modules/trac-peer/src/wallet.js';
 import { Bridge } from '../../src/net/bridge.js';
-import { createKeyring } from '../../src/roles/keyring.js';
+import { defaultSettings, policyId, publicationBytes } from '../../src/stake/settings.js';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { createKeyring, openKeyring } from '../../src/roles/keyring.js';
 import { calculateFees, deriveEscrowPda } from '../../src/solana/escrow.js';
 import { waitForControl } from './control-ready.mjs';
+import { openStore } from '../../src/roles/store.js';
+import { stakeEscrowHistory } from '../../src/solana/stake-history.js';
+import { qualifyingLock } from '../../src/stake/proof-clock.js';
+import { finalizedStakeClock } from '../../src/stake/chain.js';
+import { stakePenaltyCases } from './stake-penalty-cases.mjs';
+import { buildInitInstruction } from '../../src/solana/escrow.js';
 
 import { startLocalDevnet } from '../integration/trac/local-devnet.mjs';
 const { beaconOptions } = await import(resetSourceURL('tests/helpers/chain.mjs'));
@@ -49,6 +57,15 @@ const softwareOf = n => oldNames.has(n) ? OLD_SOFTWARE : SOFTWARE;
 const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : ['wallets', 'reset-sell', 'tnk-buy', 'cheating-dealer', 'cheating-certificate', 'signers-offline', 'not-enough-signers', 'signers-vanish-before-ack', 'crowd', 'silent-taker', 'refund'];
 const relayMode = scenarios.some(n => ['relay', 'relay-none'].includes(n));
 const strikeMode = scenarios.includes('seller-strikes');
+const stakeReleaseMode = scenarios.includes('stake-release-refusal');
+const handoffMode = scenarios.includes('stake-epoch-handoff');
+const lateFundingMode = scenarios.some(n => ['stake-late-funding', 'stake-partial-funding'].includes(n));
+if (stakeReleaseMode && (scenarios.length !== 1 || OLD_SOFTWARE !== '0.1.47' || !oldNames.has('alice') || !oldNames.has('legacy')))
+  throw Error('stake-release-refusal requires only this case and released v0.1.47 on alice,legacy');
+const penaltyCasesMode = scenarios.includes('stake-penalty-cases');
+const penaltyMode = scenarios.includes('stake-penalty') || penaltyCasesMode || handoffMode;
+const rewardMode = scenarios.includes('stake-rewards') || penaltyMode;
+const stakeMode = stakeReleaseMode || handoffMode || lateFundingMode || scenarios.some(n => ['stake-withdraw', 'stake-exact-withdraw', 'stake-rewards', 'stake-free-expiry', 'stake-penalty', 'stake-penalty-cases'].includes(n));
 if (relayMode && scenarios.length !== 1) throw new Error('Run relay and relay-none separately with fresh peers');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // The RESET seller pays the MSB fee (0.03 TNK) for its transfer.
@@ -58,7 +75,7 @@ const PASSWORD = 'local-e2e-only-password';
 // refundSec - sendWindowSec - graceSec must leave the 600 s claim buffer the protocol requires.
 const zkeyPath = process.env.DEX_PROOF_ZKEY;
 if (!zkeyPath || !path.isAbsolute(zkeyPath)) throw new Error('Set DEX_PROOF_ZKEY to an absolute proving key path');
-const PARAMS = { n: 5, k: 3, sendWindowSec: 300, refundSec: strikeMode ? 1800 : 960, graceSec: 30 };
+const PARAMS = { n: stakeMode ? 4 : 5, k: 3, sendWindowSec: penaltyMode ? 600 : 300, refundSec: strikeMode ? 1800 : penaltyMode ? 1260 : 960, graceSec: 30 };
 
 async function port() {
   const s = net.createServer();
@@ -93,9 +110,10 @@ function launch(name, cmd, args, { cwd, env = {}, marker, logDir }) {
   return { child, ready, stop };
 }
 
-const testArea = scenarios.includes('fee-change') ? '.test-tmp/fee-stack' : '.test-tmp/stack';
-await fs.mkdir(path.join(repo, testArea), { recursive: true });
-const root = await fs.mkdtemp(path.join(repo, testArea, 'e2e-'));
+const testArea = process.env.DEX_E2E_TEST_DIR ?? path.join(repo, scenarios.includes('fee-change') ? '.test-tmp/fee-stack' : '.test-tmp/stack');
+if (!path.isAbsolute(testArea)) throw new Error('DEX_E2E_TEST_DIR must be absolute');
+await fs.mkdir(testArea, { recursive: true });
+const root = await fs.mkdtemp(path.join(testArea, 'e2e-'));
 const registrySeed = path.join(root, 'registry-seed.json');
 const attackFile = path.join(root, 'attack.json'), certificateFile = path.join(root, 'foreign-certificate.json');
 await fs.writeFile(attackFile, '{}');
@@ -119,14 +137,17 @@ try {
     await fs.writeFile(certificateFile, JSON.stringify(await proveLock({ secretHex: d.privateState.secretHex, statement: lockStatement(d.deal) }, { zkeyPath })));
   }
   // Solana: local validator with the mainnet program, a local USDC-like mint, platform (10 bps) and venue (50 bps).
-  const validator = await startIsolatedValidator({ maxLifetimeMs: 3 * 3600 * 1000 });
+  let validator = await startIsolatedValidator({ maxLifetimeMs: 3 * 3600 * 1000,
+    ...(scenarios.some(n => ['stake-free-expiry', 'stake-exact-withdraw'].includes(n)) ? { slotsPerEpoch: 2000000 } : {}) });
   stops.push(() => validator.stop());
   const LOCAL_RPC = validator.rpc;
   const market = await setupMarket(validator);
-  const { connection, mint } = market;
+  let { connection } = market;
+  const { mint } = market;
+  const stakeHistoryFromSlot = await connection.getSlot('finalized');
   const extraTraders = [...(scenarios.some(n => ['crowd', 'silent-taker'].includes(n)) ? ['charlie', 'dana', 'erin'] : []), ...(scenarios.includes('wallets') ? ['autowallet'] : []),
     ...(scenarios.includes('unfunded-seller') ? ['empty'] : []),
-    ...(scenarios.some(n => ['release-forward', 'release-reverse'].includes(n)) ? ['legacy'] : [])];
+    ...(stakeReleaseMode || scenarios.some(n => ['release-forward', 'release-reverse'].includes(n)) ? ['legacy'] : [])];
   const traders = ['alice', 'bob', ...extraTraders];
   // Bob gets an ordinary funded key: the validator's mint key holds more lamports than a safe integer.
   const solKeys = { bob: Keypair.generate(), alice: market.seller, service: market.venue };
@@ -146,14 +167,15 @@ try {
   log('solana ready; mint', mint.toBase58());
 
   // RESET devnet.
-  const tracArea = path.join(repo, '.test-tmp/trac'); await fs.mkdir(tracArea, { recursive: true });
-  const network = await startLocalDevnet(await fs.mkdtemp(path.join(tracArea, 'spot-')));
+  const tracArea = process.env.DEX_TRAC_TEST_DIR ?? path.join(repo, '.test-tmp/trac'); await fs.mkdir(tracArea, { recursive: true });
+  const network = await startLocalDevnet(await fs.mkdtemp(path.join(tracArea, 'spot-')), { validatorHealth: true });
   stops.push(() => network.close());
   const manifest = network.manifest;
+  if (rewardMode) await network.pauseMining();
   log('devnet ready');
 
   // Identities.
-  const names = ['service', 's1', 's2', 's3', 's4', 's5', ...traders];
+  const names = ['service', 's1', 's2', 's3', 's4', 's5', ...traders, ...(rewardMode ? ['payout'] : [])];
   const dirs = {}, ids = {}, boxes = {}, wallets = {};
   for (const n of names) {
     dirs[n] = path.join(root, n); await fs.mkdir(path.join(dirs[n], 'data'), { recursive: true, mode: 0o700 });
@@ -163,11 +185,11 @@ try {
     ids[n] = { publicKey: pub.dexKey };
     if (n.startsWith('s') && n !== 'service') boxes[n] = { publicKey: pub.boxKey };
   }
-  for (const n of traders.filter(n => n !== 'autowallet')) {
+  for (const n of [...traders.filter(n => n !== 'autowallet'), ...(rewardMode ? ['payout'] : [])]) {
     wallets[n] = await createWallet(path.join(dirs[n], 'trac-wallet.json'), PASSWORD);
     if (n === 'empty') continue;
     await network.local.fund(network.validator, { address: wallets[n].address });
-    await network.gift(wallets[n].publicKey, '200000');
+    if (n !== 'payout') await network.gift(wallets[n].publicKey, penaltyCasesMode && n === 'alice' ? '600000' : '200000');
     log(n, 'funded', wallets[n].address);
   }
 
@@ -191,7 +213,7 @@ try {
       trac: { reset: { bootstrap: manifest.indexer.subnetBootstrap, channel: 'local-foundation-subnet', dhtBootstrap: manifest.dhtBootstrap,
         beaconOptions } } };
     networkPins[n] = pins;
-    const config = { role: n === 'service' ? 'service' : n.startsWith('s') ? 'signer' : 'trader', servicePeerKey: peerKeys.service, network: 'local', peer: pins, mint: mint.toBase58(), platformCollector: market.platform.publicKey.toBase58(),
+    const config = { role: n === 'payout' ? 'payout' : n === 'service' ? 'service' : n.startsWith('s') ? 'signer' : 'trader', servicePeerKey: peerKeys.service, network: 'local', peer: pins, mint: mint.toBase58(), platformCollector: market.platform.publicKey.toBase58(),
       storeDirectory: path.join(dirs[n], 'peer-store'), validatorKey: network.validator.wallet.publicKey.toString('hex'), bridge: { port: bridgePort, tokenFile } };
     assert.ok(!JSON.stringify(resolveNetwork(config)).includes('REQUIRED:'));
     const file = path.join(dirs[n], 'peer.json'); writeFileSync(file, JSON.stringify(config, null, 1));
@@ -212,6 +234,31 @@ try {
     signers: ['s1', 's2', 's3', 's4', 's5'].map(n => ({ dexKey: ids[n].publicKey, boxKey: boxes[n].publicKey, label: n, limitUsdc: '1000000000000', status: 'active', assets: ['TNK', 'RESET'], software: softwareOf(n),
       ...(relayMode && !scenarios.includes('relay-none') && n === 's1' ? { relayKey: peerKeys.s1 } : {}) })),
     removed: [] };
+  if (stakeMode) {
+    const at = Math.floor(Date.now() / 1000), publishedAt = at - 3601, settings = defaultSettings();
+    settings.stake.withdrawDelaySec = 3600;
+    if (rewardMode) { settings.rewards.dailyReset = '14400'; settings.rewards.payoutMinReset = penaltyMode && !handoffMode ? '10000000' : '100'; }
+    const id = randomBytes(32).toString('hex'), scope = { networkId: network.validator.config.networkId, venueKey: ids.service.publicKey, epochId: id };
+    const receipts = [];
+    for (const n of ['s1', 's2', 's3']) {
+      // These encrypted test identities were created in this fresh run folder above.
+      const keyring = await openKeyring(path.join(dirs[n], 'data/keyring.json'), PASSWORD);
+      receipts.push({ from: ids[n].publicKey, at: publishedAt,
+        sig: Buffer.from(ed25519.sign(publicationBytes(policyId(settings), publishedAt, scope), Buffer.from(keyring.identity.secretKey, 'hex'))).toString('hex') });
+      keyring.storeKey.fill(0);
+    }
+    registry.sellerBond = { protocol: 1, networkId: scope.networkId, venueKey: scope.venueKey, enforceAfter: at + (penaltyMode ? 1080 : 86400), acceptNew: true,
+      ...(rewardMode ? { rewardService: { dexKey: ids.payout.publicKey, tracAddr: wallets.payout.address } } : {}),
+      custody: { lifetimeSec: penaltyMode || scenarios.includes('stake-exact-withdraw') ? 2592000 : 86400,
+        fundingWindowSec: 3600, dkgTimeoutSec: 30, tnkReserve: '120000000000000000' },
+      epoch: { id, members: ['s1', 's2', 's3', 's4'].map(n => ({ dexKey: ids[n].publicKey, boxKey: boxes[n].publicKey })), n: 4, k: 3, maxFaulty: 1, startAt: publishedAt },
+      economics: { active: { policyId: policyId(settings), settings, publishedAt, effectiveAt: publishedAt + 3600, receipts } } };
+  }
+  // First publish the real legacy registry/offer, then upgrade the maker and
+  // activate stake. The released buyer keeps its genuine cached announcement;
+  // no released decoder, availability rule or state is patched for this case.
+  const releasePolicy = stakeReleaseMode ? registry.sellerBond : null;
+  if (stakeReleaseMode) delete registry.sellerBond;
   const roleProc = {}, control = {}, roleOptions = {};
   const auditBridges = {};
   let registryMessage;
@@ -231,19 +278,20 @@ try {
   const startRole = (n, { rescue = '' } = {}) => {
     const { role, file } = roleOptions[n];
     // The venue issues its first registry on its first start only; restarts use the stored one.
-    const args = [...(role === 'trader' ? ['--import', './tests/e2e/cheating-hook.mjs'] : []),
+    const args = [...(scenarios.includes('stake-exact-withdraw') && role === 'service' ? ['--import', './tests/e2e/stake-price-hook.mjs'] : []), ...(lateFundingMode ? ['--import', './tests/e2e/stake-funding-hook.mjs'] : []), ...(penaltyMode && role !== 'payout' ? ['--import', './tests/e2e/stake-hook.mjs'] : []), ...(role === 'trader' ? ['--import', './tests/e2e/cheating-hook.mjs'] : []),
       ...(role === 'signer' && strikeMode ? ['--import', './tests/e2e/strike-hook.mjs'] : []), 'bin/dex.mjs', '--config', file,
       ...(role === 'service' && !started.has(n) ? ['--first-launch'] : [])];
     started.add(n);
     const p = launch(`role-${n}`, process.execPath, args, { cwd: codeOf(n), logDir, marker: 'DEX_ROLE_READY',
       env: { DEX_WALLET_PASSWORD: PASSWORD, DEX_KEY_PASSWORD: PASSWORD, DEX_E2E_ATTACK_FILE: attackFile, DEX_RESCUE_TRADES: rescue,
+        ...(handoffMode ? { DEX_E2E_HANDOFF: '1' } : {}),
         ...(relayMode && n === 'bob' ? { DEX_E2E_REGISTRY_SEED: registrySeed } : {}) } });
     stops.push(p.stop); roleProc[n] = p;
     p.ready = p.ready.then(async ready => { await waitForControl(() => api(n, 'GET', '/status')); return ready; });
     return p.ready;
   };
   for (const n of names) {
-    const role = n === 'service' ? 'service' : n.startsWith('s') ? 'signer' : 'trader';
+    const role = n === 'payout' ? 'payout' : n === 'service' ? 'service' : n.startsWith('s') ? 'signer' : 'trader';
     const config = { role, network: 'local', peer: networkPins[n], dataDir: path.join(dirs[n], 'data'), bridge: { url: bridges[n].url, tokenFile: bridges[n].tokenFile },
       serviceKey: ids.service.publicKey, servicePeerKey: peerKeys.service, mint: mint.toBase58(), platformCollector: market.platform.publicKey.toBase58() };
     control[n] = { url: `http://127.0.0.1:${await port()}`, tokenFile: path.join(dirs[n], 'control.token') };
@@ -251,6 +299,7 @@ try {
     if (role === 'service') Object.assign(config, { registry, solana });
     if (role === 'signer') Object.assign(config, { solana, strikes: { enabled: strikeMode },
       trac: { resetGatewayUrl: manifest.gateways[0].gatewayUrl } });
+    if (role === 'payout') Object.assign(config, { trac: { walletFile: path.join(dirs[n], 'trac-wallet.json'), passwordEnv: 'DEX_WALLET_PASSWORD', resetGatewayUrl: manifest.gateways[0].gatewayUrl } });
     if (role === 'trader') {
       Object.assign(config, { solana, proof: { zkey: zkeyPath },
         trac: { walletFile: path.join(dirs[n], 'trac-wallet.json'), passwordEnv: 'DEX_WALLET_PASSWORD', resetGatewayUrl: manifest.gateways[0].gatewayUrl } });
@@ -329,8 +378,22 @@ try {
   // One trade: maker posts, taker takes; wait until both sides finish and report the result.
   async function trade(label, { maker, taker, pair, side, baseAmount, price, afterTake }) {
     log(`--- ${label}`);
-    const offer = await api(maker, 'POST', '/offer', { pair, side, baseAmount, price, ttlSec: 900 });
-    await until('offer visible to taker', async () => (await api(taker, 'GET', '/status')).offers.some(o => o.offerId === offer.offerId), 60000);
+    if (process.env.DEX_E2E_FUNDS_PROBE) {
+      const w = (await api(maker, 'GET', '/status')).wallets;
+      log('funds probe', maker, JSON.stringify({ RESET: w?.balances?.RESET, TNK: w?.balances?.TNK, readAt: w?.balanceReadAt, error: w?.balanceError, gateway: await resetOf(maker) }));
+    }
+    const offer = await api(maker, 'POST', '/offer', { pair, side, baseAmount, price, ttlSec: 900 }).catch(async e => {
+      if (process.env.DEX_E2E_FUNDS_PROBE) {
+        const w = (await api(maker, 'GET', '/status').catch(x => ({ error: x.message }))).wallets;
+        log('funds probe refused', maker, JSON.stringify({ balances: w?.balances, readAt: w?.balanceReadAt, error: w?.balanceError, gateway: await resetOf(maker).catch(x => x.message), tnk: await tnkOf(maker).catch(x => x.message) }));
+      }
+      throw e;
+    });
+    if (process.env.DEX_E2E_FUNDS_PROBE) log('funds probe offer accepted', maker, JSON.stringify({ offerId: offer.offerId, pair, side, baseAmount }));
+    // Full per-offer books repeat every 60 seconds; funding refresh plus wire
+    // delivery can straddle that boundary. Still require the actual offer.
+    await until('offer visible to taker', async () => (await api(taker, 'GET', '/status')).offers.some(o => o.offerId === offer.offerId), 180000);
+    if (process.env.DEX_E2E_FUNDS_PROBE) log('funds probe offer visible', taker, offer.offerId);
     // A new taker keeps a new maker connected before the take (warm); an old maker is never warmed.
     if (!oldNames.has(taker)) {
       const warm = await api(taker, 'POST', '/warm', { pair, offerIds: [offer.offerId] });
@@ -362,6 +425,10 @@ try {
   };
   for (const name of scenarios) {
     log('scenario', name);
+    if (process.env.DEX_E2E_FUNDS_PROBE) for (const n of ['alice', 'bob']) {
+      const w = (await api(n, 'GET', '/status')).wallets;
+      log('funds probe', n, JSON.stringify({ RESET: w?.balances?.RESET, readAt: w?.balanceReadAt, error: w?.balanceError, gateway: await resetOf(n) }));
+    }
     await setAttack({});
     for (const n of ['s1', 's2', 's3', 's4', 's5', ...traders]) {
       if (roleProc[n].child.exitCode !== null || roleProc[n].child.signalCode !== null) await startRole(n);
@@ -369,10 +436,39 @@ try {
     await waitOnline(5);
     await until('ready certificate pools', async () => {
       const statuses = await Promise.all(traders.filter(n => !scenarios.includes('relay-none') || n !== 'bob').map(n => api(n, 'GET', '/status')));
-      return statuses.every(s => s.certificatesReady >= 2);
+      return statuses.every(s => s.certificatesReady >= (penaltyMode ? 1 : 2));
     }, 360000);
     const before = { alice: await usdcOf('alice'), bob: await usdcOf('bob'), aliceReset: await resetOf('alice'), bobReset: await resetOf('bob'), aliceTnk: await tnkOf('alice'), bobTnk: await tnkOf('bob') };
     let r;
+    if (name === 'stake-release-refusal') {
+      assert.equal((await api('legacy', 'GET', '/status')).software, '0.1.47');
+      const offer = await api('alice', 'POST', '/offer', { pair: 'RESET/USDC', side: 'sell', baseAmount: '50000', price: '2000', ttlSec: 900 });
+      await until('released buyer sees genuine legacy offer', async () => (await api('legacy', 'GET', '/status')).offers.some(o => o.offerId === offer.offerId), 60000);
+      const funds = async () => Object.fromEntries(await Promise.all(['alice', 'legacy'].map(async n => [n,
+        { reset: await resetOf(n), tnk: await tnkOf(n), usdc: await usdcOf(n), sol: await connection.getBalance(solKeys[n].publicKey) }])));
+      const initial = await funds();
+      await roleProc.alice.stop(); roleCode.alice = repo; await startRole('alice');
+      const serviceConfig = JSON.parse(await fs.readFile(roleOptions.service.file, 'utf8'));
+      serviceConfig.registry.sellerBond = { ...releasePolicy, enforceAfter: Math.floor(Date.now() / 1000) };
+      await roleProc.service.stop(); await fs.writeFile(roleOptions.service.file, JSON.stringify(serviceConfig)); await startRole('service');
+      await until('upgraded maker receives armed registry', async () => (await api('alice', 'GET', '/status')).registryVersion > offer.registryVersion, 30000, 500);
+      const taken = await api('legacy', 'POST', '/take', { offerId: offer.offerId, price: offer.price });
+      const refused = await until('released buyer displays update refusal', async () => {
+        const t = (await api('legacy', 'GET', '/status')).trades.find(t => t.key === taken.key);
+        return t?.phase === 'aborted' && t;
+      }, 60000, 500);
+      assert.equal(refused.reason, 'Peer aborted: update the app');
+      assert.equal((await api('alice', 'GET', '/status')).trades.length, 0);
+      assert.deepEqual(await funds(), initial);
+      const ring = await openKeyring(path.join(dirs.service, 'data/keyring.json'), PASSWORD);
+      try {
+        const current = openStore(path.join(dirs.service, 'data'), ring.storeKey, { readOnly: true }).get('service-registry');
+        assert.equal(current.minSoftware, registry.minSoftware);
+        assert.deepEqual(current.signers, registry.signers);
+      } finally { ring.storeKey.fill(0); }
+      results.push({ name, ok: true, releasedVersion: OLD_SOFTWARE, reason: refused.reason, noFundsMoved: true, signerFloorUnchanged: true });
+      log('released buyer refusal passed', refused.reason); continue;
+    }
     if (['release-forward', 'release-reverse'].includes(name)) {
       const maker = name === 'release-forward' ? 'legacy' : 'bob', taker = maker === 'legacy' ? 'bob' : 'legacy';
       const initial = { maker: await usdcOf(maker), taker: await usdcOf(taker), makerReset: await resetOf(maker), takerReset: await resetOf(taker) };
@@ -663,6 +759,300 @@ try {
       assert.deepEqual(audit.direct, []); assert.deepEqual(audit.relayed, []);
       assert.deepEqual(audit.relay.configured_relays, []);
       results.push({ name, ok: true, noFundsMoved: true, audit }); continue;
+    }
+    if (['stake-withdraw', 'stake-exact-withdraw', 'stake-late-funding', 'stake-partial-funding', 'stake-rewards', 'stake-free-expiry', 'stake-penalty', 'stake-penalty-cases', 'stake-epoch-handoff'].includes(name)) {
+      const seed = await trade('stake-price-seed', { maker: 'alice', taker: 'bob', pair: 'RESET/USDC', side: 'sell', baseAmount: '50000', price: '2000' });
+      assert.equal(seed.ta.phase, 'complete'); assert.equal(seed.tb.phase, 'complete');
+      const historyKeys = await openKeyring(path.join(dirs.alice, 'data/keyring.json'), PASSWORD);
+      try {
+        const store = openStore(path.join(dirs.alice, 'data'), historyKeys.storeKey, { readOnly: true });
+        const state = store.list('trade-').map(n => store.get(n)).find(t => t.role === 'seller' && t.state.tradeId === seed.ta.tradeId).state;
+        // A completed trader can still be waiting for finalized settlement.
+        // Any later warp must start from a bank that includes the real claim.
+        const history = await until('seed settlement finalized before stake recovery', async () => {
+          const h = await stakeEscrowHistory({ terms: state.terms, hashHex: state.H, fromSlot: stakeHistoryFromSlot,
+            throughSlot: await connection.getSlot('finalized'), endpoints: solana.endpoints });
+          return h.status === 'complete' && h.escrowState === 'claimed' && h.settlements.some(s => s.state === 'claimed') && h;
+        }, 120000, 2000);
+        assert.equal(history.status, 'complete'); assert.equal(history.escrowState, 'claimed');
+        assert.equal(history.locks.length, 1); assert.equal(history.settlements.length, 1);
+        assert.equal(qualifyingLock({ ...history.locks[0], finalized: true, historyComplete: true }, state.terms.sendBy, 120), true);
+        log('exact historical timely lock and claimed settlement verified');
+      } finally { historyKeys.storeKey.fill(0); historyKeys.solanaSecret?.fill(0); }
+      const beforeStake = await resetOf('alice');
+      if (lateFundingMode) {
+        const full = name === 'stake-late-funding', beforeTnk = BigInt(await tnkOf('alice'));
+        await setAttack({ stakeFunding: full ? 'late-full' : 'late-tnk' });
+        // The venue certifies the seed completion a few seconds after it
+        // completes. Only that refusal is retried, and only while nothing moved.
+        await until('funding attempt reaches the chain', async () => {
+          try { await api('alice', 'POST', '/stake/deposit', { amount: '0.00025' }); return true; }
+          catch (e) {
+            if (!e.message.includes('A certified completed RESET trade is required')) { log('interrupted funding', e.message); return true; }
+            assert.equal(BigInt(await tnkOf('alice')), beforeTnk); assert.equal(BigInt(await resetOf('alice')), BigInt(beforeStake));
+            log('funding waits for the certified price', e.message); return false;
+          }
+        }, 120000, 3000);
+        await until('unadmitted funding moved', async () => {
+          const stake = (await api('alice', 'GET', '/stake')).stake;
+          return stake.operationPending && stake.free === '0' && BigInt(await tnkOf('alice')) < beforeTnk &&
+            BigInt(await resetOf('alice')) === BigInt(beforeStake) - (full ? 25000n : 0n);
+        }, 240000, 5000);
+        await roleProc.alice.stop(); validator = await validator.warp(3700); connection = validator.connection;
+        await setAttack({}); await startRole('alice');
+        await until('late unadmitted funding refunded', async () => {
+          const stake = (await api('alice', 'GET', '/stake')).stake; return !stake.operationPending && stake.locked === '0';
+        }, 240000, 5000);
+        assert.equal(await resetOf('alice'), beforeStake);
+        await roleProc.alice.stop(); await startRole('alice'); await sleep(10000);
+        assert.equal(await resetOf('alice'), beforeStake);
+        results.push({ name, ok: true, refundedReset: full ? '25000' : '0', tnkOnly: !full, noAdmission: true, restarted: true });
+        await fs.writeFile(path.join(root, 'stake-results.json'), JSON.stringify(results, null, 2));
+        continue;
+      }
+      let depositStarted = false;
+      await until('stake deposit certified', async () => {
+        const current = (await api('alice', 'GET', '/stake')).stake;
+        if (current.free === '25000' && !current.operationPending) return true;
+        try { if (!depositStarted) { await api('alice', 'POST', '/stake/deposit', { amount: '0.00025' }); depositStarted = true; } }
+        catch (e) { log('deposit waiting', e.message); }
+        const stake = (await api('alice', 'GET', '/stake')).stake;
+        if (stake.operationPending) depositStarted = true;
+        return stake.free === '25000' && !stake.operationPending;
+      }, 240000, 5000);
+      assert.equal(BigInt(await resetOf('alice')), BigInt(beforeStake) - 25000n);
+      log('stake principal funded and certified');
+      if (name === 'stake-penalty' || name === 'stake-penalty-cases' || handoffMode) {
+        await until('stake admission armed', async () => Math.floor(Date.now() / 1000) + PARAMS.sendWindowSec + 120 >= registry.sellerBond.enforceAfter, 600000, 1000);
+        const readLocal = async (n, select) => {
+          const ring = await openKeyring(path.join(dirs[n], 'data/keyring.json'), PASSWORD);
+          try { return select(openStore(path.join(dirs[n], 'data'), ring.storeKey, { readOnly: true })); }
+          finally { ring.storeKey.fill(0); ring.solanaSecret?.fill(0); }
+        };
+        let successor;
+        // A trade's own escrow vault: other cases' refunds reach the buyer's wallet at any time.
+        const escrowHeld = async state => {
+          const { deriveEscrowPda, deriveVaultAta } = await import('../../src/solana/escrow.js');
+          const vault = deriveVaultAta(deriveEscrowPda(state.H).pda, mint);
+          return await connection.getAccountInfo(vault, 'finalized') ? (await connection.getTokenAccountBalance(vault, 'finalized')).value.amount : '0';
+        };
+        const escrowTotal = async state => {
+          const { calculateFees } = await import('../../src/solana/escrow.js');
+          return String(calculateFees(state.terms.quoteAmount, state.terms.fees.platformFeeBps, state.terms.fees.tradeFeeBps).totalAmount);
+        };
+        const rows = await stakePenaltyCases({ api, until, setAttack, resetOf, usdcOf, escrowHeld, escrowTotal, network, wallets, log,
+          cases: process.env.DEX_E2E_STAKE_CASES?.split(',') ?? (handoffMode ? ['epoch-handoff'] : penaltyCasesMode ? undefined : ['no-show']),
+          saveResults: rows => fs.writeFile(path.join(root, 'stake-results.json'), JSON.stringify(rows, null, 2)),
+          readJob: tradeId => readLocal('service', store => store.list('stake-penalty-job-').map(n => store.get(n)).find(j => j.reservation.body.tradeId === tradeId)),
+          readBuyer: key => readLocal('bob', store => store.get(`trade-${key}`)?.state),
+          clock: () => finalizedStakeClock(solana), restart: async n => { await roleProc[n].stop(); await startRole(n); },
+          finishDeferred: async expected => {
+            const availableAt = await until('certified deferred withdrawal maturity', async () => {
+              const s = (await api('alice', 'GET', '/stake')).stake;
+              return s.withdrawing === '25000' && Number.isSafeInteger(s.withdrawingUntil) && s.withdrawingUntil;
+            }, 180000, 2000);
+            const remaining = Math.max(1, availableAt - (await finalizedStakeClock(solana)).at + 60);
+            await roleProc.alice.stop(); validator = await validator.warp(remaining); connection = validator.connection;
+            assert.ok((await finalizedStakeClock(solana)).at >= availableAt, 'certified full cooldown elapsed');
+            await startRole('alice');
+            await until('deferred stake returned after closure and wait', async () => {
+              const s = (await api('alice', 'GET', '/stake')).stake; return s.locked === '0' && !s.operationPending;
+            }, 240000, 5000);
+            assert.equal(BigInt(await resetOf('alice')), expected);
+          },
+          handoff: async state => {
+            const quiesced = await api('service', 'POST', '/stake/quiesce', {});
+            successor = structuredClone(registry.sellerBond); successor.acceptNew = false;
+            successor.epoch = { ...successor.epoch, id: randomBytes(32).toString('hex'), startAt: quiesced.stopNewAt,
+              members: ['s2', 's3', 's4', 's5'].map(n => ({ dexKey: ids[n].publicKey, boxKey: boxes[n].publicKey })) };
+            const active = successor.economics.active; active.receipts = [];
+            for (const n of ['s2', 's3', 's4']) {
+              const ring = await openKeyring(path.join(dirs[n], 'data/keyring.json'), PASSWORD);
+              try { active.receipts.push({ from: ids[n].publicKey, at: active.publishedAt,
+                sig: Buffer.from(ed25519.sign(publicationBytes(active.policyId, active.publishedAt,
+                  { networkId: successor.networkId, venueKey: successor.venueKey, epochId: successor.epoch.id }), Buffer.from(ring.identity.secretKey, 'hex'))).toString('hex') }); }
+              finally { ring.storeKey.fill(0); }
+            }
+            await until('announced original epoch stop', async () => (await finalizedStakeClock(solana)).at >= quiesced.stopNewAt, 90000, 1000);
+            const moved = await until('successor capacity adoption', async () => {
+              try { return await api('service', 'POST', '/stake/handoff', { nextPolicy: successor }); }
+              catch (e) { log('handoff waiting', e.message); return false; }
+            }, 180000, 3000);
+            assert.equal(moved.state, 'draining'); assert.equal(moved.previousEpochId, state.terms.bond.epochId);
+            assert.ok(moved.adopted >= 3); assert.equal(moved.acceptNew, false);
+            for (const n of ['service', 's1', 's5']) { await roleProc[n].stop(); await startRole(n); }
+            await until('successor registry reaches seller', async () => (await api('alice', 'GET', '/status')).registryVersion === (await api('service', 'GET', '/status')).registryVersion, 60000);
+            const replay = await api('service', 'POST', '/stake/handoff', { nextPolicy: successor });
+            assert.deepEqual(replay, moved);
+            const resumed = await until('successor history and liability reconciliation', async () => {
+              try { return await api('service', 'POST', '/stake/resume', {}); }
+              catch (e) { log('resume waiting', e.message); return false; }
+            }, 180000, 5000);
+            assert.equal(resumed.state, 'active'); assert.equal(resumed.acceptNew, true);
+            await until('active successor registry reaches seller', async () => (await api('alice', 'GET', '/status')).registryVersion === (await api('service', 'GET', '/status')).registryVersion, 60000);
+            log('quiesced A to B capacity handoff survived venue/original/new signer restart');
+          },
+          lateLock: async state => {
+            const t = state.terms;
+            await send(connection, solKeys.bob, [buildInitInstruction({ payer: solKeys.bob.publicKey, payerTokenAccount: usdc('bob'),
+              paymentHashHex: state.H, recipient: t.seller.solRecipient, refund: t.buyer.solPayer, refundAfter: t.refundAfter,
+              amount: t.quoteAmount, mint, expectedPlatformFeeBps: t.fees.platformFeeBps,
+              expectedTradeFeeBps: t.fees.tradeFeeBps, tradeFeeCollector: t.fees.collector })]);
+            const history = await until('exact finalized late lock', async () => {
+              const h = await stakeEscrowHistory({ terms: t, hashHex: state.H, fromSlot: t.bond.historyFromSlot,
+                throughSlot: (await finalizedStakeClock(solana)).slot, endpoints: solana.endpoints });
+              if (h.status !== 'complete' && await connection.getFirstAvailableBlock() > t.bond.historyFromSlot)
+                throw new Error(`Test validator pruned the escrow history from slot ${t.bond.historyFromSlot}`);
+              return h.status === 'complete' && h.locks.length === 1 && h;
+            }, 60000);
+            assert.equal(qualifyingLock({ ...history.locks[0], finalized: true, historyComplete: true }, t.sendBy, 120), false);
+          } });
+        results.push(...rows); if (rows.some(r => !r.ok)) failed = true;
+        if (handoffMode && rows.every(r => r.ok)) {
+          await until('old reservation released locally', async () => (await api('alice', 'GET', '/stake')).stake.free === '25000', 120000);
+          let successorDeposit = false;
+          await until('new successor stake certified', async () => {
+            const s = (await api('alice', 'GET', '/stake')).stake;
+            if (s.free === '50000' && !s.operationPending) return true;
+            if (!successorDeposit && !s.operationPending) { await api('alice', 'POST', '/stake/deposit', { amount: '0.00025' }); successorDeposit = true; }
+            return false;
+          }, 240000, 5000);
+          await sleep(20000);
+          const fresh = await trade('stake-successor-bonded-trade', { maker: 'alice', taker: 'bob', pair: 'RESET/USDC', side: 'sell', baseAmount: '50000', price: '2000' });
+          assert.equal(fresh.ta.phase, 'complete'); assert.equal(fresh.tb.phase, 'complete');
+          const freshState = await readLocal('bob', store => store.get(`trade-${fresh.taken.key}`)?.state);
+          assert.equal(freshState.terms.bond.epochId, successor.epoch.id);
+          await until('successor reservation released', async () => (await api('alice', 'GET', '/stake')).stake.free === '50000', 120000);
+          const beforeReward = BigInt(await resetOf('alice'));
+          await network.gift(wallets.payout.publicKey, '100'); await network.sync(); await sleep(15000); await network.mineOne();
+          const height = (await network.admin.protocol.instance.api.coinState()).counted;
+          await until('successor reward accrued and paid', async () => {
+            const s = await api('payout', 'GET', '/status');
+            return s.height === height && s.accounts.some(a => a.address === wallets.alice.address && a.paidTotal === '100');
+          }, 180000, 3000);
+          assert.equal(BigInt(await resetOf('alice')), beforeReward + 100n);
+          const rewardEpoch = await readLocal('payout', store => store.get('stake-payout-cursor')?.epochId);
+          assert.equal(rewardEpoch, successor.epoch.id);
+          results.push({ name: 'epoch-handoff-new-trade-and-reward', ok: true, epochId: successor.epoch.id, paidReset: '100', newBondedTrade: freshState.tradeId });
+          const beforeReturn = BigInt(await resetOf('alice'));
+          const freeze = await api('alice', 'POST', '/stake/withdraw', { amount: 'all' });
+          assert.equal(freeze.pending, true); assert.ok(freeze.availableAt);
+          await roleProc.alice.stop(); validator = await validator.warp(3700); connection = validator.connection;
+          await startRole('alice');
+          await until('original stake returned under successor registry', async () => (await api('alice', 'GET', '/stake')).stake.locked === '0', 240000, 5000);
+          const expected = (beforeReturn + 50000n).toString(); assert.equal(await resetOf('alice'), expected);
+          for (const n of ['s1', 's2', 's3', 's4', 's5']) await readLocal(n, store => {
+            const capacity = store.list('stake-capacity-').map(name => store.get(name)).find(s => s?.tokens);
+            assert.ok(Object.values(capacity.pieces).every(p => p.retired)); assert.equal(capacity.tokens[1].generation, 1);
+            if (n !== 's1') assert.equal(capacity.epochId, successor.epoch.id);
+          });
+          await roleProc.alice.stop(); await startRole('alice'); await sleep(20000);
+          assert.equal(await resetOf('alice'), expected);
+          results.push({ name: 'mixed-epoch-return', ok: true, originalReservationSettled: true, changedMember: true,
+            principalReturned: '50000', admissionState: 'active', restarted: true, noDoubleRetirement: true });
+          await fs.writeFile(path.join(root, 'stake-results.json'), JSON.stringify(results, null, 2));
+          log('A reservation settled; original principal returned under B exactly once');
+        }
+        continue;
+      }
+      if (name === 'stake-free-expiry') {
+        const expiryUpperBound = (await finalizedStakeClock(solana)).at + registry.sellerBond.custody.lifetimeSec;
+        // Keep the long warp before epoch snapshot boundaries in this fixture,
+        // and independently check Unix time instead of inferring it from slots.
+        await roleProc.alice.stop(); validator = await validator.warp(60000); connection = validator.connection;
+        assert.ok((await finalizedStakeClock(solana)).at >= expiryUpperBound, 'local finalized clock passes the original expiry');
+        await startRole('alice');
+        await until('free expiry returns without renewal after restart', async () => (await api('alice', 'GET', '/stake')).stake.locked === '0', 240000, 5000);
+        assert.equal(await resetOf('alice'), beforeStake);
+        results.push({ name, ok: true, depositReset: '25000', freeExpiry: true, restarted: true, principalReturned: true, historicalLockVerified: true });
+        log('free stake expiry passed'); continue;
+      }
+      if (name === 'stake-rewards') {
+        await until('payout starts at current counted height', async () => (await api('payout', 'GET', '/status')).observedHeight !== null);
+        const mineRewardBlock = async () => {
+          await network.mineOne();
+          const target = (await network.admin.protocol.instance.api.coinState()).counted;
+          return until('payout checkpoint ' + target, async () => {
+            const status = await api('payout', 'GET', '/status'); return status.height === target && status;
+          }, 180000, 3000);
+        };
+        const empty = await mineRewardBlock(); assert.equal(empty.summary.body.state, 'empty'); assert.equal(empty.summary.body.accrued, '0');
+        const beforeReward = await resetOf('alice');
+        await network.gift(wallets.payout.publicKey, '100'); await network.sync();
+        const active = await mineRewardBlock(); assert.equal(active.summary.body.accrued, '100');
+        await until('ordinary pool payout confirmed', async () => {
+          const status = await api('payout', 'GET', '/status'); return status.accounts.some(a => a.address === wallets.alice.address && a.paidTotal === '100');
+        }, 120000);
+        assert.equal(BigInt(await resetOf('alice')) - BigInt(beforeReward), 100n);
+        assert.equal(await resetOf('payout'), '0');
+        await roleProc.payout.stop(); await startRole('payout');
+        const emptyAgain = await mineRewardBlock(); assert.equal(emptyAgain.summary.body.accrued, '0');
+        assert.equal(BigInt(await resetOf('alice')) - BigInt(beforeReward), 100n, 'restart never pays twice');
+        await network.gift(wallets.payout.publicKey, '100'); await network.sync();
+        await mineRewardBlock();
+        await until('reward refill pays only the next block', async () => (await api('payout', 'GET', '/status')).accounts.some(a => a.paidTotal === '200'), 120000);
+        await until('trader receives authenticated reward status', async () => (await api('alice', 'GET', '/stake')).rewards.paidTotal === '200', 60000);
+        assert.equal(BigInt(await resetOf('alice')) - BigInt(beforeReward), 200n);
+        results.push({ name, ok: true, depositReset: '25000', paidReset: '200', emptyPaused: true, refillResumed: true, restarted: true, noDoublePay: true });
+        log('stake reward payout passed'); continue;
+      }
+      const exact = name === 'stake-exact-withdraw';
+      const freeze = await api('alice', 'POST', '/stake/withdraw', { amount: exact ? '0.0001' : 'all' });
+      assert.equal(freeze.pending, true); assert.ok(freeze.availableAt);
+      assert.equal((await api('alice', 'GET', '/stake')).stake.free, '0');
+      assert.equal((await api('alice', 'GET', '/stake')).stake.withdrawing, '25000');
+      assert.equal(BigInt(await resetOf('alice')), BigInt(beforeStake) - 25000n, 'wait cannot release principal early');
+      let originalPrice;
+      const priceDiagnostics = async kind => (await fs.readFile(path.join(logDir, 'role-service.log'), 'utf8'))
+        .split('\n').slice(0, -1).filter(line => line.startsWith('DEX_E2E_PRICE_' + kind + ' '))
+        .map(line => JSON.parse(line.slice(('DEX_E2E_PRICE_' + kind + ' ').length)));
+      if (exact) {
+        originalPrice = await until('original seed price certificate', async () =>
+          (await priceDiagnostics('CERTIFIED')).find(p => p.entry.tradeId === seed.ta.tradeId), 60000);
+      }
+      const beforeWarp = (await finalizedStakeClock(solana)).at;
+      const nextDay = (Math.floor(beforeWarp / 86400) + 1) * 86400;
+      const targetTime = Math.max(freeze.availableAt + 60, exact ? nextDay + 60 : 0);
+      await roleProc.alice.stop();
+      validator = await validator.warp(Math.max(1, targetTime - beforeWarp)); connection = validator.connection;
+      const afterWarp = (await finalizedStakeClock(solana)).at;
+      assert.ok(afterWarp >= targetTime, 'finalized time passes certified maturity and the requested boundary');
+      if (exact) {
+        assert.ok(afterWarp >= nextDay, 'fixture crosses an actual UTC day');
+        assert.ok(afterWarp - originalPrice.entry.completedAt <= registry.sellerBond.economics.active.settings.priceLookbackSec);
+        log('exact withdrawal crossed UTC midnight using unchanged certified history', JSON.stringify({
+          completedAt: originalPrice.entry.completedAt, beforeWarp, afterWarp, availableAt: freeze.availableAt }));
+      }
+      await startRole('alice');
+      await until('stake collection after wait and restart', async () => {
+        const stake = (await api('alice', 'GET', '/stake')).stake;
+        return stake.locked === (exact ? '15000' : '0') && !stake.operationPending;
+      }, 240000, 5000);
+      assert.equal(await resetOf('alice'), (BigInt(beforeStake) - (exact ? 15000n : 0n)).toString(), 'principal returns exactly to original seller');
+      if (exact) {
+        await roleProc.alice.stop(); await startRole('alice'); await sleep(10000);
+        assert.equal(await resetOf('alice'), (BigInt(beforeStake) - 15000n).toString(), 'replacement restart cannot duplicate the return');
+        const ring = await openKeyring(path.join(dirs.alice, 'data/keyring.json'), PASSWORD);
+        try {
+          const store = openStore(path.join(dirs.alice, 'data'), ring.storeKey, { readOnly: true });
+          const pieces = store.list('stake-ledger-').flatMap(n => Object.values(store.get(n).pieces));
+          const original = pieces.find(p => p.state === 'retired'), replacement = pieces.find(p => p.state === 'free');
+          assert.equal(replacement.descriptor.expiresAt, original.descriptor.expiresAt);
+          assert.equal(replacement.descriptor.principalReset, '15000');
+        } finally { ring.storeKey.fill(0); }
+        const reference = (await priceDiagnostics('REFERENCE')).find(p => p.cutoffAt >= nextDay);
+        assert.ok(reference, 'new-day head is freshly certified');
+        assert.equal(reference.lastTradeId, seed.ta.tradeId);
+        assert.equal(reference.lastEntryHash, originalPrice.hash);
+        assert.equal(reference.headPosition, 1, 'no auxiliary trade is needed to unblock exact withdrawal');
+        assert.equal(reference.utcDay, new Date(originalPrice.entry.completedAt * 1000).toISOString().slice(0, 10));
+        assert.notEqual(reference.utcDay, new Date(reference.cutoffAt * 1000).toISOString().slice(0, 10));
+      }
+      results.push({ name, ok: true, depositReset: '25000', waited: true, restarted: true, principalReturned: true,
+        ...(exact ? { exactReturn: '10000', surplus: '15000', originalExpiry: true, crossedMidnight: true,
+          historicalPrice: true, originalCompletionAt: originalPrice.entry.completedAt, beforeWarp, afterWarp } : {}) });
+      await fs.writeFile(path.join(root, 'stake-results.json'), JSON.stringify(results, null, 2));
+      log('stake withdrawal passed'); continue;
     }
     if (name === 'reset-sell' || name === 'relay') r = await trade(name, { maker: 'alice', taker: 'bob', pair: 'RESET/USDC', side: 'sell', baseAmount: '50000', price: '2000' });
     if (name === 'tnk-buy') r = await trade(name, { maker: 'alice', taker: 'bob', pair: 'TNK/USDC', side: 'buy', baseAmount: '2000000000000000000', price: '0.75' });

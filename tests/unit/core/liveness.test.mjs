@@ -7,6 +7,7 @@ import { prepareDeal, signerShareCheck } from '../../../src/core/dealing.js';
 import { seededRng } from '../../../src/core/trade-common.js';
 import { hex, fixture, proofStub } from './helpers.mjs';
 import { simulation } from './simulation.mjs';
+import { registryPolicy } from '../stake/helpers.mjs';
 
 const sim = simulation({ capturePhases: true });
 const snapshot = (name, phase) => structuredClone(sim.snapshots.get(name + ':' + phase));
@@ -84,6 +85,16 @@ test('step budgets use elapsed monotonic time, survive serialization and never c
     const s = snapshot('buyer', phase), r = step(s, 'tick', { elapsedMs: 99999999 });
     assert.equal(r.state.phase, phase);
   }
+});
+
+test('bonded deciding-block wait uses its signed policy and keeps a finite monotonic deadline', () => {
+  const s = snapshot('buyer', 'awaitRandomness'), policy = registryPolicy();
+  s.registry.sellerBond = policy; s.draft.bond = { policyId: policy.economics.active.policyId };
+  assert.equal(step(s, 'tick', { elapsedMs: 130000 }).state.phase, 'awaitRandomness');
+  assert.equal(step(s, 'tick', { elapsedMs: 239999 }).state.phase, 'awaitRandomness');
+  assert.equal(step(s, 'tick', { elapsedMs: 240000 }).state.reason, 'Timed out: deciding block');
+  s.draft.bond.policyId = hex();
+  assert.equal(step(s, 'tick', { elapsedMs: 120000 }).state.reason, 'Timed out: deciding block');
 });
 
 test('working notes extend the seller deal budget only while live, never beyond 150 seconds; lock edge waits until sendBy', () => {

@@ -73,7 +73,7 @@ string with at most 12 decimals; `trac1` is a checksummed Trac address; `sol` is
 | `cancel` | maker | `offerId` |
 | `take` | taker | `offerId`, `pair`, `registryVersion`, `software`, `baseAmount`, `taker` {`dexKey`, `tracAddr`, `solAddr`}, `commitment`, `sendBy`, `refundAfter` |
 | `accept` | maker | `offerId`, `takeCommitment`, `commitment`, `slot` |
-| `decline` | maker | `offerId`, `takeNonce`, `reason` (`busy`, `insufficient`, `signers`, `expired`, `invalid`, `version`, `reset-gateway`) |
+| `decline` | maker | `offerId`, `takeNonce`, `reason` (`busy`, `insufficient`, `signers`, `expired`, `invalid`, `version`, `reset-gateway`, `update the app`) |
 | `reveal` | both traders | `offerId`, `takeCommitment`, `nonce` |
 | `commit` | none | `offerId`, `commitment` (defined in the schema; no role sends it) |
 | `terms` | both traders | `tradeId`, `terms` |
@@ -465,3 +465,13 @@ of its open offer, then the normal 45-second schedule; cancelled and expired off
 - **Chains.** Solana finality at `finalized` commitment, and MSB's signed state and the RESET contract's applied
   result as seen by each party's own node. The venue and its gateways relay data but can't make a party accept a
   transfer, escrow or registry that fails these checks.
+
+## Stake integration
+
+The [stake and reward contract](STAKE.md) adds signed economic schedules and
+reusable collateral ledgers without changing the Solana escrow instructions.
+A successful trade frees only a public piece generation; terminal key release
+retires the address. A 3-of-4 certificate cannot be replaced by a venue assertion,
+local strike, overdue timer or missing transfer lookup. Proof-clock pauses never
+shorten on restart. Runtime custody, proof adjudication and mixed-buyer wire
+compatibility remain activation requirements.

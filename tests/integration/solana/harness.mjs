@@ -23,7 +23,9 @@ export async function startValidator({ maxLifetimeMs = 140000 } = {}) {
   return validator({ maxLifetimeMs, ports: { rpc: 18899, faucet: 19900, gossip: 18001, dynamic: 18010 } });
 }
 
-export async function startIsolatedValidator({ maxLifetimeMs = 140000 } = {}) {
+export async function startIsolatedValidator({ maxLifetimeMs = 140000, slotsPerEpoch } = {}) {
+  if (slotsPerEpoch !== undefined && (!Number.isSafeInteger(slotsPerEpoch) || slotsPerEpoch < 32 || slotsPerEpoch > 2000000))
+    throw new Error('Invalid local epoch length');
   for (let attempt = 0; attempt < 100; attempt++) {
     const base = 20000 + Math.floor(Math.random() * 30000), held = [];
     // Reserved owner applications must never be probed, even for an apparently free test range.
@@ -37,12 +39,12 @@ export async function startIsolatedValidator({ maxLifetimeMs = 140000 } = {}) {
       }
     } catch { await Promise.allSettled(held.map(close => Promise.resolve().then(close))); continue; }
     await Promise.allSettled(held.map(close => Promise.resolve().then(close)));
-    return validator({ maxLifetimeMs, ports: { rpc: base, faucet: base + 2, gossip: base + 3, dynamic: base + 10 } });
+    return validator({ maxLifetimeMs, slotsPerEpoch, ports: { rpc: base, faucet: base + 2, gossip: base + 3, dynamic: base + 10 } });
   }
   throw new Error('No free validator port range');
 }
 
-async function validator({ maxLifetimeMs, ports, existing = null, warpSlot = null }) {
+async function validator({ maxLifetimeMs, ports, slotsPerEpoch, existing = null, warpSlot = null }) {
   const rpc = `http://127.0.0.1:${ports.rpc}`;
   const artifactDir = process.env.DEX_SOLANA_TEST_DIR ?? resolve(root, '.test-tmp/solana');
   await mkdir(artifactDir, { recursive: true });
@@ -55,6 +57,10 @@ async function validator({ maxLifetimeMs, ports, existing = null, warpSlot = nul
     '--config', config, '--bind-address', '127.0.0.1', '--gossip-host', '127.0.0.1',
     '--rpc-port', String(ports.rpc), '--faucet-port', String(ports.faucet), '--gossip-port', String(ports.gossip),
     '--dynamic-port-range', `${ports.dynamic}-${ports.dynamic + 50}`, '--ledger', resolve(runDir, 'ledger'), ...(existing ? ['--warp-slot', String(warpSlot)] : ['--reset']), '--quiet',
+    ...(slotsPerEpoch === undefined ? [] : ['--slots-per-epoch', String(slotsPerEpoch)]),
+    // Keep the whole run's blocks, like the archival readers signers use. The
+    // default 10000 shreds purges a live trade's escrow history mid-row.
+    '--limit-ledger-size', '1000000000',
     '--mint', buyer.publicKey.toBase58(), '--bpf-program', PROGRAM_ID.toBase58(), resolve(root, 'vendor/ln_usdt_escrow.mainnet.so'),
   ], { cwd: runDir, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
@@ -111,7 +117,7 @@ async function validator({ maxLifetimeMs, ports, existing = null, warpSlot = nul
         const slot = await connection.getSlot('finalized');
         await stop();
         const target = slot + Math.ceil(seconds / 0.2);
-        const resumed = await validator({ maxLifetimeMs, ports, existing: { runDir, buyer }, warpSlot: target });
+        const resumed = await validator({ maxLifetimeMs, ports, slotsPerEpoch, existing: { runDir, buyer }, warpSlot: target });
         const end = Date.now() + 45000;
         while (await resumed.connection.getSlot('finalized') <= target) {
           if (Date.now() >= end) { await resumed.stop(); throw new Error('Warp finality timeout'); }

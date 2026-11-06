@@ -1,3 +1,4 @@
+import { matchingBondAck } from '../stake/admission.js';
 import { STEP_BUDGET_MS } from './terms.js';
 import { bytesToHex, hexToBytes, le32 } from './canonical.js';
 import { boxPublic } from './keys.js';
@@ -132,7 +133,7 @@ export function step(state, event) {
         return { state: s, actions: [sendAction(s, 'refused', { tradeId: s.tradeId,
           reason: e.refusalReason === 'seller-struck' ? 'seller-struck' : 'seller-funds' })] };
       }
-      if (e.ok !== true) return null;
+      if (e.ok !== true || !matchingBondAck(s.terms, s.H, e.bond)) return null;
       if (typeof e.feeTnk !== 'string' || !/^(0|[1-9][0-9]*)$/.test(e.feeTnk)) return null;
       // The host durably saves this holding state before sending the first ack. The terms reserve the base amount;
       // this fee also reserves TNK across trades in other base assets. Old holding states remain valid on upgrade.
@@ -140,7 +141,7 @@ export function step(state, event) {
       s.sellerAddressProven = e.sellerAddressProven === true;
       s.phase = 'holding';
       s.holdingSince = e.now;
-      return { state: s, actions: [sendAction(s, 'ack', { tradeId: s.tradeId, H: s.H, holdUntil: s.terms.refundAfter })] };
+      return { state: s, actions: [sendAction(s, 'ack', { tradeId: s.tradeId, H: s.H, holdUntil: s.terms.refundAfter, ...(e.bond ? { bond: e.bond } : {}) })] };
     }
     if ((m?.kind === 'transferSent' || (e.type === 'transferFound' && e.tradeId === s.tradeId)) && s.phase === 'holding') {
       const txHash = hexKey.parse(m?.body.txHash ?? e.txHash);

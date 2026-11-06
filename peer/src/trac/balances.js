@@ -1,6 +1,7 @@
 import { bufferToBigInt } from 'trac-msb/src/utils/amountSerialization.js';
 import nodeEntry from 'trac-msb/src/core/state/utils/nodeEntry.js';
 import b4a from 'b4a';
+import { signedCheckout } from './signed-view.js';
 
 export const BALANCE_READ_MS = 5000;
 export const BALANCE_STALL_MS = 1000;
@@ -25,16 +26,14 @@ export async function signedBalanceRead(base, key, label, timeoutMs = BALANCE_RE
 // unbounded replication wait; a missing block must never become a zero balance. Closing this checkout
 // cancels its pending I/O if the complete tree traversal exceeds the deadline.
 async function readSigned(base, key, label, timeoutMs, { onStall, stallMs, now, started, sample }) {
-  const length = sample.signedLength;
-  if (!Number.isSafeInteger(length) || length < 1) throw new Error(`${label} signed view is not ready`);
   let active = activeReads.get(base);
   if (!active) activeReads.set(base, active = new Set());
   // A timeout bounds the caller even if snapshot close itself stalls. Retain
   // that slot until close settles so repeated polls cannot leak more snapshots.
   if (active.has(key) || active.size >= 64) throw Object.assign(new Error(`${label} balance read still closing or busy; retry shortly`), { code: 'BALANCE_READ_BUSY' });
-  const view = base.view.checkout(length);
   active.add(key);
-  let timer, stallTimer, closing, repaired = false, finished = false, stage = 'read';
+  const opening = signedCheckout(base, label);
+  let timer, stallTimer, closing, repaired = false, finished = false, stage = 'snapshot open';
   const onseq = () => {
     if (finished) return;
     sample.blockReads++;
@@ -55,8 +54,11 @@ async function readSigned(base, key, label, timeoutMs, { onStall, stallMs, now, 
       background(onStall, { code: 'BALANCE_READ_STALLED', stage, ...sample, elapsedMs: Math.max(0, now() - started) });
     }, stallMs);
   };
-  const close = () => closing ??= Promise.resolve().then(() => view.close()).finally(() => active.delete(key));
+  const close = () => closing ??= opening.then(({ view }) => view.close(), () => {}).finally(() => active.delete(key));
   const work = Promise.resolve().then(async () => {
+    const { view, length, coreKey } = await opening;
+    Object.assign(sample, { signedLength: length, coreKey });
+    stage = 'read';
     let value, failure;
     try { value = await view.get(key, { timeout: timeoutMs, update: false, extension: false, onseq, onwait }); }
     catch (error) { failure = error; }
@@ -76,8 +78,8 @@ async function readSigned(base, key, label, timeoutMs, { onStall, stallMs, now, 
   try { return await Promise.race([work, deadline]); }
   catch (error) {
     throw Object.assign(new Error(error.code === 'BLOCK_NOT_AVAILABLE'
-      ? `${label} signed balance data is still syncing (signed length ${length})`
-      : `${label} balance unavailable: ${error.message} (signed length ${length})`),
+      ? `${label} signed balance data is still syncing (signed length ${sample.signedLength})`
+      : `${label} balance unavailable: ${error.message} (signed length ${sample.signedLength})`),
     { code: error.code, stage, ...sample, elapsedMs: Math.max(0, now() - started) });
   } finally {
     finished = true;

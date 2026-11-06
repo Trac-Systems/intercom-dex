@@ -82,7 +82,7 @@ export async function statusDex(configFile, { request = lifecycleCall, isAlive =
     return { ...result, running: !record.stopRequested && !info.stopping && record.phase === 'running' && isAlive(record.peerPid) && isAlive(record.traderPid),
       phase: info.stopping ? 'stopping' : result.phase,
       versions: { ...record.versions, trader: info.software, node: info.node }, signers: info.signers, dashboard: info.dashboard, blockers: info.blockers,
-      trades: info.trades ?? [] };
+      trades: info.trades ?? [], ...(info.stake ? { stake: info.stake } : {}), ...(info.rewards ? { rewards: info.rewards } : {}), warnings: info.warnings ?? [] };
   } catch (error) { return { ...result, phase: ['starting', 'restarting', 'stopping'].includes(result.phase) ? result.phase : 'unreachable', error: error.message }; }
 }
 

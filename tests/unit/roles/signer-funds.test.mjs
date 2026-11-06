@@ -6,6 +6,8 @@ import { sellerFunds } from '../../../src/roles/signer-funds.js';
 import { encodeKey } from '../../../src/core/keys.js';
 import { simulation } from '../core/simulation.mjs';
 import { hex } from '../core/helpers.mjs';
+import { admissionFixture } from '../stake/admission-helpers.mjs';
+import { StakeAdmission } from '../../../src/stake/admission-runtime.js';
 
 const sim = simulation({ holdSellerFunds: true });
 function state({ base = 'RESET', amount = '100', seller, phase = 'checkingSellerFunds', feeTnk = '3' } = {}) {
@@ -55,12 +57,12 @@ test('reservations release at transferSent or sendBy plus grace, and old ack rec
   assert.equal(check(101).ok, true);
 });
 
-function setup(t, { disk = store(), balances = async () => enough } = {}) {
+function setup(t, { disk = store(), balances = async () => enough, signerSolana = null } = {}) {
   const bridge = new EventEmitter(), sent = [], logs = [], clock = { now: 101 };
   bridge.join = bridge.leave = async () => {};
   bridge.send = async (ch, envelope) => { sent.push(envelope); };
   const host = new TradeHost({ bridge, store: disk, identity: { publicKey: encodeKey(sim.nodes.get('signer1').identity.publicKey),
-    secretKey: sim.nodes.get('signer1').identity.secretKey }, trac: { balances }, now: () => clock.now, tickMs: 100000,
+    secretKey: sim.nodes.get('signer1').identity.secretKey }, trac: { balances }, signerSolana, now: () => clock.now, tickMs: 100000,
     log: (...args) => logs.push(args.join(' ')) });
   t.after(() => host.stop());
   return { host, sent, logs, disk, clock };
@@ -173,4 +175,26 @@ test('invalid balance data or unreadable reservation records cannot authorize an
   }
   disk.put('trade-held', record('held', state({ phase: 'holding', feeTnk: '-1' })));
   assert.throws(() => sellerFunds({ state: s, balances: enough, store: disk, now: 101 }));
+});
+
+test('bond admission uses the signer finalized frontier, refuses unavailable history, then durably acks', async t => {
+  const a = admissionFixture(); let frontier = 11, unavailable = true;
+  const f = setup(t, { disk: a.store, balances: async () => ({ RESET: '999999999999999', TNK: '999999999999999', feeTnk: '3' }),
+    signerSolana: { finalizedSlot: async () => { if (unavailable) throw Error('finalized RPC unavailable'); return frontier; } } });
+  f.clock.now = 4000;
+  f.host.stakeAdmission = new StakeAdmission({ store: a.store, identity: {}, registry: () => ({ sellerBond: a.policy }), price: { log: () => a.priceLog } });
+  f.host.stakeAdmission.cache.set(a.terms.seller.dexKey, a.args);
+  const s = state(); s.terms = { ...a.terms, bond: f.host.stakeAdmission.propose(a.terms, 4000, 12) }; s.sellerFundsDeadline = 4500;
+  await f.host.addTrade(record('bonded', s)); await f.host.deliver('bonded', { type: 'resume' }); await flush(f.host);
+  assert.equal(f.host.slot, null, 'signers do not run the trader slot watcher');
+  assert.equal(a.ledger.read().pieces[a.id].state, 'free'); assert.ok(!f.sent.some(m => m.kind === 'ack'));
+  unavailable = false; f.clock.now += 10;
+  await f.host.deliver('bonded', { type: 'tick' }); await flush(f.host);
+  assert.equal(a.ledger.read().pieces[a.id].state, 'free'); assert.ok(!f.sent.some(m => m.kind === 'ack'));
+  frontier = 30; f.clock.now += 10;
+  await f.host.deliver('bonded', { type: 'tick' }); await flush(f.host);
+  assert.equal(a.ledger.read().pieces[a.id].state, 'reserved');
+  assert.equal(f.disk.get('trade-bonded').state.phase, 'holding');
+  assert.equal(f.sent.filter(m => m.kind === 'ack').length, 1);
+  assert.equal(Object.values(a.ledger.read().reservations)[0].admission.fromSlot, 12, 'retain the signed history boundary');
 });

@@ -101,6 +101,10 @@ test('TNK funding signs the exact locks nonce and reuses its durable transfer', 
     return { ok: final, final, amount: '123' };
   } };
   const adapter = createLocksTrac({ bridge, wallet, profile: { peer: { msbNetworkId: 1, msbBootstrap: 'dd'.repeat(32) } }, store: f.store });
+  const prepared = await adapter.prepare({ id, asset: 'TNK', amount: '123', to, nonce });
+  assert.equal(broadcasts, 0, 'preparation never broadcasts');
+  assert.throws(() => adapter.sendPrepared({ id, intent: { ...prepared, amount: '999' } }), /journal mismatch/);
+  assert.equal((await adapter.outcome({ id, intent: prepared })).ok, false);
   assert.equal((await adapter.transfer({ id, asset: 'TNK', amount: '123', to, nonce })).finalized, false);
   final = true;
   assert.equal((await adapter.transfer({ id, asset: 'TNK', amount: '123', to, nonce })).finalized, true);

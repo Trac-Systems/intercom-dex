@@ -3,7 +3,7 @@ import { amount, hexKey, registrySchema } from './schemas.js';
 import { meetsVersion } from './software.js';
 import { registryPair } from '../market/assets.js';
 
-export function selectCommittee(registry, R, { n, k, quoteAmount, pair, exclude = [] }) {
+export function selectCommittee(registry, R, { n, k, quoteAmount, pair, exclude = [], bonded = false }) {
   const valid = registrySchema.parse(registry);
   hexKey.parse(R);
   amount.parse(quoteAmount);
@@ -13,7 +13,7 @@ export function selectCommittee(registry, R, { n, k, quoteAmount, pair, exclude 
   const excluded = new Set(exclude);
   const asset = registryPair(valid, pair).base.id;
   const pool = valid.signers.filter(s => s.status === 'active' && s.assets.includes(asset) && meetsVersion(s.software, valid.minSoftware) &&
-    BigInt(s.limitUsdc) >= BigInt(quoteAmount) && !excluded.has(s.dexKey))
+    BigInt(s.limitUsdc) >= BigInt(quoteAmount) && !excluded.has(s.dexKey) && (!bonded || valid.sellerBond?.epoch.members.some(m => m.dexKey === s.dexKey && m.boxKey === s.boxKey)))
     .sort((a, b) => a.dexKey < b.dexKey ? -1 : a.dexKey > b.dexKey ? 1 : 0);
   if (pool.length < n) throw new RangeError('Too few eligible signers');
   const selected = [], seed = hexToBytes(R, 32);

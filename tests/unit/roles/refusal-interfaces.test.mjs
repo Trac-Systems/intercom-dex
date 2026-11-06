@@ -15,6 +15,7 @@ import { encodeKey, generateIdentity } from '../../../src/core/keys.js';
 import { seal } from '../../../src/core/envelope.js';
 import { simulation } from '../core/simulation.mjs';
 import { hex } from '../core/helpers.mjs';
+import { stakeError } from '../../../src/stake/errors.js';
 
 test('authenticated refusal reaches dashboard, control/MCP status and CLI log; a forged one has no effect', async t => {
   const sim = simulation({ holdSellerFunds: true }), node = sim.nodes.get('buyer'), state = structuredClone(node.state);
@@ -54,4 +55,21 @@ test('authenticated refusal reaches dashboard, control/MCP status and CLI log; a
   const result = await client.callTool({ name: 'dex_status', arguments: {} });
   assert.equal(result.isError, undefined);
   assert.equal(JSON.parse(result.content[0].text).trades[0].reason, reason);
+});
+
+test('existing MCP offer tools retain typed stake refusal details and mark the result as an error', async t => {
+  const refusal = stakeError('bond_setup_unavailable', { retrySec: 60 });
+  const role = { makeOffer() { throw refusal; } };
+  const dir = mkdtempSync(join(tmpdir(), 'dex-stake-refusal-')), tokenFile = join(dir, 'control.token');
+  writeFileSync(tokenFile, 'synthetic-stake-test-token', { mode: 0o600 });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const server = createServer(controlHandler({ role, token: 'synthetic-stake-test-token' }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../../../src/mcp/server.mjs', import.meta.url))],
+    env: { ...process.env, DEX_CONFIG: '', DEX_CONTROL_URL: `http://127.0.0.1:${server.address().port}`, DEX_CONTROL_TOKEN_FILE: tokenFile }, stderr: 'pipe' });
+  const client = new Client({ name: 'stake-refusal-test', version: '1.0.0' });
+  t.after(() => client.close()); await client.connect(transport);
+  const result = await client.callTool({ name: 'dex_offer', arguments: { pair: 'RESET/USDC', side: 'sell', baseAmount: '1', price: '1' } });
+  assert.equal(result.isError, true); assert.deepEqual(JSON.parse(result.content[0].text), refusal.result);
 });

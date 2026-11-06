@@ -113,3 +113,24 @@ test('a buyer cancel after the seller sent changes nothing: signers still publis
   assert.equal(sim.state('seller').phase, 'complete');
   assert.equal(sim.count('publishShare'), 5);
 });
+
+test('bonded 3-of-4 terms and the original ack round complete; missing reservations never lock', async () => {
+  const { registryPolicy } = await import('../stake/helpers.mjs');
+  const { admissionFixture } = await import('../stake/admission-helpers.mjs');
+  const { prepareBond } = await import('../../../src/stake/admission.js');
+  const { publicationBytes } = await import('../../../src/stake/settings.js');
+  const { ed25519 } = await import('@noble/curves/ed25519.js');
+  const { fixture } = await import('./helpers.mjs');
+  const f = fixture({ n: 4 }), a = admissionFixture(), policy = registryPolicy();
+  policy.epoch.members = f.terms.committee;
+  policy.economics.active.receipts = f.signers.slice(0, 3).map(s => ({ from: Buffer.from(s.identity.publicKey).toString('hex'), at: 100,
+    sig: Buffer.from(ed25519.sign(publicationBytes(policy.economics.active.policyId, 100, { networkId: policy.networkId, venueKey: policy.venueKey, epochId: policy.epoch.id }), s.identity.secretKey)).toString('hex') }));
+  f.registry.sellerBond = policy; f.terms.bond = prepareBond(a.args);
+  f.terms.seller.boxKey = a.terms.seller.boxKey; f.terms.buyer.boxKey = a.terms.buyer.boxKey;
+  f.terms.seller.stakeVersion = 1; f.terms.buyer.stakeVersion = 1;
+  const good = simulation({ fixture: f });
+  assert.equal(good.state('buyer').phase, 'complete'); assert.equal(good.state('seller').phase, 'complete');
+  assert.equal(good.count('lockEscrow'), 1);
+  const missing = simulation({ fixture: f, bondReservation: false });
+  assert.equal(missing.count('lockEscrow'), 0);
+});

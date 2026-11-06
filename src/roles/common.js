@@ -1,3 +1,5 @@
+import { validatePolicyTransition } from '../stake/settings.js';
+import { stakeAdmissionRequired } from '../stake/prevention.js';
 import { existsSync, openSync, writeSync, fsyncSync, closeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { sha256Hex, stableJSON } from '../core/canonical.js';
@@ -77,8 +79,12 @@ export class RegistryView {
   get usable() { return this.conflict ? null : this.current; }
 
   #checked(registry) {
-    if (!registry || !this.profile) return registry;
-    try { checkProfileRegistry(registry, this.profile); return registry; }
+    if (!registry) return registry;
+    try {
+      if (registry.sellerBond && registry.sellerBond.venueKey !== this.serviceKey) throw new Error('Stake publication belongs to another venue');
+      if (this.profile) checkProfileRegistry(registry, this.profile);
+      return registry;
+    }
     catch (error) {
       if (!this.profileWarning) { this.profileWarning = true; this.log('registry ignored', error.message); }
       return null;
@@ -103,6 +109,8 @@ export class RegistryView {
       this.conflictStored = true;
     }
     if (cur && (registry.version <= cur.version || registry.issuedAt < cur.issuedAt)) return false;
+    if (cur?.sellerBond && !registry.sellerBond) throw new Error('Cannot remove stake policy');
+    if (registry.sellerBond) validatePolicyTransition(cur?.sellerBond, registry.sellerBond, now);
     // Stored first: a registry that could not be persisted is not used (the next copy of it is tried again).
     const digests = { ...this.digests, [registry.version]: digest };
     if (this.store) {
@@ -136,7 +144,7 @@ export function checkTermsAgainstRegistry(terms, registry) {
       terms.fees.platformFeeBps !== f.platformFeeBps || terms.fees.tradeFeeBps !== f.tradeFeeBps || terms.fees.signerShareBps !== f.signerShareBps || terms.fees.collector !== f.collector) {
     throw new Error('Terms do not follow the registry');
   }
-  const expected = selectCommittee(registry, terms.R, { n: p.n, k: p.k, quoteAmount: terms.quoteAmount, pair: terms.pair,
+  const expected = selectCommittee(registry, terms.R, { n: p.n, k: p.k, quoteAmount: terms.quoteAmount, pair: terms.pair, bonded: !!terms.bond,
     exclude: [terms.buyer.dexKey, terms.seller.dexKey] }).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
   if (stableJSON(expected) !== stableJSON(terms.committee)) throw new Error('Committee is not the registry selection');
 }
@@ -172,16 +180,18 @@ export function buildDraft({ offer, baseAmount, maker, taker, registry, sendBy, 
   const makerSells = offer.side === 'sell';
   const seller = makerSells ? maker : taker, buyer = makerSells ? taker : maker;
   const quote = quoteAmount(pair, baseAmount, offer.price);
+  const bonded = stakeAdmissionRequired(registry, nowSec());
   const placeholder = registry.signers.filter(s => s.status === 'active' && s.assets.includes(pair.base.id) && meetsVersion(s.software, registry.minSoftware) &&
-    BigInt(s.limitUsdc) >= BigInt(quote) && ![seller.dexKey, buyer.dexKey].includes(s.dexKey))
+    BigInt(s.limitUsdc) >= BigInt(quote) && ![seller.dexKey, buyer.dexKey].includes(s.dexKey) &&
+    (!bonded || registry.sellerBond.epoch.members.some(m => m.dexKey === s.dexKey && m.boxKey === s.boxKey)))
     .slice(0, registry.params.n).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
   if (placeholder.length < registry.params.n) throw new Error('Not enough active signers');
   return {
     offerId: offer.offerId, pair: offer.pair, base: pair.base, baseAmount, quoteAmount: quote, mint,
     seller: { dexKey: seller.dexKey, tracAddr: seller.tracAddr, solRecipient: seller.solAddr,
-      ...(seller.tracProof ? { tracProof: seller.tracProof } : {}) },
+      ...(seller.tracProof ? { tracProof: seller.tracProof } : {}), ...(seller.boxKey ? { boxKey: seller.boxKey } : {}), ...(seller.stakeVersion ? { stakeVersion: seller.stakeVersion } : {}) },
     buyer: { dexKey: buyer.dexKey, tracAddr: buyer.tracAddr, solPayer: buyer.solAddr,
-      ...(buyer.tracProof ? { tracProof: buyer.tracProof } : {}) },
+      ...(buyer.tracProof ? { tracProof: buyer.tracProof } : {}), ...(buyer.boxKey ? { boxKey: buyer.boxKey } : {}), ...(buyer.stakeVersion ? { stakeVersion: buyer.stakeVersion } : {}) },
     registryVersion: registry.version, committee: placeholder, k: registry.params.k,
     fees: { platformFeeBps: registry.fee.platformFeeBps, tradeFeeBps: registry.fee.tradeFeeBps, signerShareBps: registry.fee.signerShareBps,
       collector: registry.fee.collector, platformCollector },

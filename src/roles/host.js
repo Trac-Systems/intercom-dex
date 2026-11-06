@@ -1,3 +1,4 @@
+import { bondAck } from '../stake/admission.js';
 import { randomBytes } from 'node:crypto';
 import { seal, open, createReplayCache } from '../core/envelope.js';
 import { step as buyerStep, ackRejectionReason } from '../core/trade-buyer.js';
@@ -303,6 +304,10 @@ export class TradeHost {
   }
 
   async sendEnvelope(trade, ch, envelope) {
+    if (trade?.role === 'signer' && trade.state.terms?.bond && envelope.kind === 'sharePublish') {
+      if (!this.stakePenalty) throw new Error('Penalty settlement interlock unavailable');
+      this.stakePenalty.assertSettlement(bondAck(trade.state.terms, trade.state.H).reservationId, trade.state.txHash);
+    }
     // A saved outbox can contain a refusal produced before the operator disabled strikes.
     if (trade?.role === 'signer' && !this.signerStrikes?.enabled &&
         envelope.kind === 'refused' && envelope.body.reason === 'seller-struck') return;
@@ -410,7 +415,8 @@ export class TradeHost {
           ['ack', 'transferSent', 'claimed', 'refunded', 'abort'].includes(message.kind))) return reject('trade finished');
     const s = trade.state, ref = message.body?.tradeId;
     if (message.kind === 'present' && channel !== tradeChannel(message.body?.ref)) return false;
-    if (ref !== undefined && ref !== s.tradeId && !(message.kind === 'abort' && ref === s.offerId)) return reject('wrong trade id');
+    if (ref !== undefined && ref !== s.tradeId && !(message.kind === 'abort' && ref === s.offerId) &&
+        !(message.kind === 'terms' && s.draft?.bond && message.body.terms?.offerId === s.offerId)) return reject('wrong trade id');
     if (!senders(trade, message.kind).includes(message.from)) return reject('sender not a committee member or permitted participant');
     const takeCommitment = s.role !== 'signer' && (s.mode === 'taker' ? sha256Hex(hexToBytes(s.nonce, 32)) : s.peerCommit);
     if (['accept', 'reveal'].includes(message.kind) && message.body?.takeCommitment !== takeCommitment) return false;
@@ -667,6 +673,20 @@ export class TradeHost {
       try { this.#save(trade); } catch (error) { trade.sellerStrikeDone = false; throw error; }
       return;
     }
+    if (before.draft?.bond && before.phase === 'awaitRandomness' && event.chain && before.role === 'seller') {
+      // Background refresh prepares these certificates. Network rounds here
+      // hold the trade queue and consume the deciding-block budget after arrival.
+      const now = Math.max(event.now, this.now());
+      event = { ...event, now, bond: this.stakeAdmission.propose(before.draft, now, before.acceptSlot) };
+    }
+    if (event.message?.kind === 'terms' && event.message.body.terms?.bond) {
+      if (event.message.body.terms.bond.historyFromSlot !== before.acceptSlot) throw new Error('Bond history frontier differs from the accepted slot');
+      this.stakeAdmission.validate(event.message.body.terms, event.now);
+    }
+    if (event.message?.kind === 'accept' && event.message.body.bond) {
+      if (!this.stakeAdmission) throw new Error('bond_setup_unavailable');
+      this.stakeAdmission.validate({ ...before.draft, bond: event.message.body.bond }, event.now);
+    }
     const observedAt = performance.now();
     if (event.type === 'makerPresence' && event.connected && trade.makerConnectedAt == null) trade.makerConnectedAt = observedAt;
     if (event.type === 'makerPresence') event = { ...event, type: 'tick' };
@@ -686,6 +706,10 @@ export class TradeHost {
         const funds = refusal ? { ok: false } : sellerFunds({ state: before, balances: event.balances, store: this.store, now: event.now });
         event = { ...event, ...funds, refusalReason: refusal ? 'seller-struck' : 'seller-funds',
           sellerAddressProven: this.#addressProofs(before, event.now, true) };
+        if (funds.ok && before.terms.bond) {
+          if (!this.stakeAdmission) throw new Error('bond_not_reserved');
+          event.bond = this.stakeAdmission.reserve({ ...before, now: event.now }, { fromSlot: event.admissionSlot, sigs: trade.raw.filter(m => m.kind === 'termsSig') });
+        }
         if (!funds.ok && !refusal) this.log(`seller funds refused tradeId=${before.tradeId} seller=${before.terms.seller.tracAddr} needed=${JSON.stringify(funds.needed)} available=${JSON.stringify(funds.available)} reserved=${JSON.stringify(funds.reserved)}`);
       } catch (error) {
         this.log(`seller funds read failed tradeId=${before.tradeId} seller=${before.terms.seller.tracAddr} reason=${String(error?.message ?? error).replace(/[\r\n]/g, ' ')}`);
@@ -717,7 +741,7 @@ export class TradeHost {
     }
     if (isFinished(trade)) this.#releaseMakerPins();
     if (state.stepStage !== before.stepStage || event.type === 'resume') trade.budgetAt = observedAt;
-    if (state.tradeId && !before.tradeId) this.#joinChannels(trade).catch(e => this.log('join', e.message));
+    if (state.tradeId && state.tradeId !== before.tradeId) this.#joinChannels(trade).catch(e => this.log('join', e.message));
     for (const action of actions) await this.#act(trade, action);
     for (const hook of this.hooks.afterStep) await hook(trade, before, event);
     this.#checkSellerStrike(trade);
@@ -771,7 +795,16 @@ export class TradeHost {
         return this.#background(trade, 'seller-funds', async () => {
           if (!this.#addressProofs(s, this.now())) return { type: 'sellerFunds', ok: false, reason: 'Invalid Trac address proof' };
           if (this.signerStrikes?.refusal(s.terms.seller, this.now())) return { type: 'sellerFunds', ok: false };
-          try { return { type: 'sellerFunds', balances: await this.#sellerRead(trade, () => this.trac.balances(s.terms.seller.tracAddr)) }; }
+          try {
+            // Signers have a read-only chain adapter, not the trader's slot
+            // watcher. Read their own finalized frontier before the synchronous
+            // funds/reservation commit; an unavailable frontier fails closed.
+            const [balances, admissionSlot] = await Promise.all([
+              this.#sellerRead(trade, () => this.trac.balances(s.terms.seller.tracAddr)),
+              s.terms.bond ? this.#sellerRead(trade, () => this.signerSolana.finalizedSlot()) : undefined,
+            ]);
+            return { type: 'sellerFunds', balances, admissionSlot };
+          }
           catch (error) { return { type: 'sellerFunds', ok: false, reason: String(error?.message ?? error ?? 'Trac read failed') }; }
         }, result => result, { retries: 1 });
       // One escrow pays for one trade: the first trade of this harness to reserve an escrow keeps it, for good.
@@ -803,7 +836,13 @@ export class TradeHost {
         return;
       case 'persist': {
         if (action.scope === 'verifiedTransfer') {
-          return this.#background(trade, 'reserve', () => this.trac.reserveTx({ txHash: action.record.txHash, tradeId }),
+          return this.#background(trade, 'reserve', async () => {
+            if (s.terms.bond) {
+              if (!this.stakePenalty) throw new Error('Penalty settlement interlock unavailable');
+              await this.stakePenalty.settlement(bondAck(s.terms, s.H).reservationId, action.record.txHash);
+            }
+            return this.trac.reserveTx({ txHash: action.record.txHash, tradeId });
+          },
             r => ({ type: 'persisted', scope: 'verifiedTransfer', ok: r.ok === true, txHash: action.record.txHash, reservedFor: r.reservedFor }));
         }
         this.store.put(`${action.scope}-${tradeId ?? s.offerId}`, action.record);

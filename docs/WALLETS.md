@@ -262,3 +262,12 @@ Network reserves include the pending funding transfers and a SOL allowance for e
 Opening fees are deducted from the maker receipt, with exact total, fee and net amounts shown. Put exercise
 spends only Solana network fees on a signed memo. Early release is usually 1–2 hours after payment.
 Signers can be replaced by handover while at least k survive; a put writer can refund after `refundAfter`.
+
+## Stake accounting
+
+[RESET stake](STAKE.md) is external collateral, separate from the ordinary spendable
+wallet and reward pool. Reserved stake is a subset of locked stake; withdrawing
+pieces cannot back offers or earn rewards. Pending outgoing money stays reserved
+until reconciled, and an unconfirmed incoming sweep is not spendable. Keep the
+encrypted journals and original receiving keys for recovery. Funding/withdrawal
+commands currently refuse setup; they do not move money.

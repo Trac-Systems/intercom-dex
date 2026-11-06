@@ -106,3 +106,42 @@ take fails before lock, with no trade state or balance changes. The integration
 uses real transport with stubbed chain/proof adapters; the stack uses real local
 chains and the proof worker. Test hooks are separate entrypoints, never loaded by
 the production peer entrypoint.
+
+## Signed stake settings
+
+Optional strict `sellerBond` binds protocol 1, `networkId`, `venueKey`, activation, accept-new policy, an
+immutable four-member/three-signature epoch, and active/pending economics. Each
+policy digest covers every setting. Three distinct epoch publication receipts
+with agreeing times establish publication; effectiveness is exactly one hour
+later. A pending change cannot be silently replaced or cancelled.
+Receipt bytes bind the policy ID, receipt time, network ID, venue key and epoch
+ID. The venue key must match the registry issuer, and the network ID must match
+the pinned profile. A receipt from another scope cannot shorten the notice.
+
+The [stake guide](STAKE.md) explains the behavior. Defaults and inclusive app
+bounds are in `src/stake/settings.js`; no local economic override is accepted.
+Funding and the enforcement rollout remain unavailable in this build.
+
+The stake settings below are integer base units (USD: 6 decimals; RESET: 8) or
+seconds/basis points as named. The inclusive application bounds are validation
+limits; changing a value requires a new signed policy with one hour of notice.
+
+| Setting | Default | Minimum | Maximum |
+| --- | --- | --- | --- |
+| `penaltyBps` | 300 | 50 | 1000 |
+| `minPenaltyUsd` | 500000 | 50000 | 5000000 |
+| `overdueDelaySec` | 1800 | 300 | 21600 |
+| `proofWindowSec` | 86400 | 3600 | 259200 |
+| `admissionFreshSec` | 180 | 60 | 600 |
+| `priceLookbackSec` | 604800 | 0 | 2592000 |
+| `randomnessWaitSec` | 240 | 120 | 600 |
+| `proofClock.sampleGapSec` | 60 | 15 | 120 |
+| `proofClock.sampleFreshSec` | 90 | 15 | 180 |
+| `proofClock.checkpointFreshSec` | 180 | 30 | 300 |
+| `stake.withdrawDelaySec` | 86400 | 3600 | 604800 |
+| `stake.suggestBufferBps` | 15000 | 10000 | 30000 |
+| `stake.maxUsdPerAddress` | 400000000 | 500000 | 400000000 |
+| `rewards.dailyReset` | 500000000 | 0 | 100000000000 |
+| `rewards.activeWeightBps` | 20000 | 10000 | 50000 |
+| `rewards.payoutMinReset` | 10000000 | 1 | 10000000000 |
+| `rewards.payoutIntervalSec` | 604800 | 3600 | 2592000 |

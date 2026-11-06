@@ -214,10 +214,15 @@ export function dashboardHandler({ token, port, model, actions, confirmations, t
       if (!actions.maxTake) throw new Error('Only traders take offers');
       return actions.maxTake(query(url, ['offerId']));
     },
+    'GET /api/sale-bond': url => {
+      if (!actions.saleBond) throw new Error('Only traders sell');
+      return actions.saleBond(query(url, ['pair', 'amount', 'price']));
+    },
     'POST /api/preview': async body => {
       if (!actions.names.includes(body.action)) throw new Error('Unknown action');
       const preview = await actions.preview(body.action, body.input);
-      return { ...preview, action: body.action, confirm: confirmations.issue(body.action, preview.input) };
+      // A review the core already refuses (`blocked`) gets no confirmation, so it cannot be run.
+      return { ...preview, action: body.action, confirm: preview.blocked ? null : confirmations.issue(body.action, preview.input) };
     },
     'POST /api/act': async body => {
       if (!actions.names.includes(body.action)) throw new Error('Unknown action');

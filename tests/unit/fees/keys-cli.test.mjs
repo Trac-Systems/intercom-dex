@@ -8,7 +8,7 @@ import { createKeyring, openKeyring } from '../../../src/roles/keyring.js';
 import { openStore } from '../../../src/roles/store.js';
 import { withPlatformLock } from '../../../src/fees/platform-withdraw.js';
 
-const root = resolve('.test-tmp/wallet-fees'); mkdirSync(root, { recursive: true });
+const root = resolve(process.env.TMPDIR ?? '.test-tmp', 'wallet-fees'); mkdirSync(root, { recursive: true });
 const password = 'synthetic-owner-cli-password';
 const lockModule = new URL('../../../src/fees/platform-withdraw.js', import.meta.url).href;
 

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { bondSchema, bondAckSchema } from '../stake/wire.js';
+import { stakeRegistrySchema } from '../stake/settings.js';
 import { lockProofSchema } from './lock-certificate.js';
 import { isTracAddress, isSolanaAddress } from './addresses.js';
 import { softwareSchema } from './software.js';
@@ -28,7 +30,7 @@ const solSignature = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{64,88}$(?![\s\S])/)
 // Registry texts are printable ASCII without quotes or backslashes, so their serialized size is exactly their length.
 const plainText = max => z.string().min(1).max(max).regex(/^[ !#-\[\]-~]+$/);
 const reason = plainText(160);
-const tracParticipant = { dexKey: hexKey, tracAddr: tracAddress, tracProof: addressProofSchema.optional() };
+const tracParticipant = { dexKey: hexKey, tracAddr: tracAddress, tracProof: addressProofSchema.optional(), boxKey: hexKey.optional(), stakeVersion: z.literal(1).optional() };
 const participant = z.object({ ...tracParticipant, solAddr: solanaAddress }).strict();
 const member = z.object({ dexKey: hexKey, boxKey: hexKey }).strict();
 const signer = member.extend({ label: plainText(80), limitUsdc: amount, status: z.enum(['active', 'inactive']),
@@ -43,7 +45,7 @@ export const termsSchema = z.object({
   buyer: z.object({ ...tracParticipant, solPayer: solanaAddress }).strict(),
   registryVersion: uint.min(1), committee: z.array(member).min(1).max(16), k: uint.min(1).max(16),
   fees: feesSchema, sendBy: uint, refundAfter: uint, graceSec: uint,
-  R: hexKey,
+  R: hexKey, bond: bondSchema.optional(),
 }).strict().superRefine((t, ctx) => {
   const bad = message => ctx.addIssue({ code: 'custom', message });
   if (t.k > t.committee.length) bad('k exceeds n');
@@ -56,6 +58,7 @@ export const termsSchema = z.object({
 export const registrySchema = z.object({
   version: uint.min(1), issuedAt: uint, minSoftware: softwareSchema,
   serviceRelayKey: hexKey.optional(),
+  sellerBond: stakeRegistrySchema.optional(),
   pairs: z.array(pairEntrySchema).min(1).max(64),
   params: z.object({ n: uint.min(1).max(16), k: uint.min(1).max(16),
     sendWindowSec: uint.min(300), refundSec: uint.min(1), graceSec: uint }).strict(),
@@ -66,6 +69,13 @@ export const registrySchema = z.object({
 }).strict().superRefine((r, ctx) => {
   const bad = message => ctx.addIssue({ code: 'custom', message });
   if (new Set(r.pairs.map(p => p.pair)).size !== r.pairs.length) bad('Duplicate pair');
+  if (r.sellerBond) {
+    if (r.params.n !== 4 || r.params.k !== 3) bad('Stake admission requires a 4/3 committee');
+    for (const m of r.sellerBond.epoch.members) {
+      const signer = r.signers.find(s => s.dexKey === m.dexKey && s.boxKey === m.boxKey && s.status === 'active');
+      if (!signer || r.pairs.some(p => p.status === 'open' && !signer.assets.includes(p.base.id))) bad('Ineligible stake epoch member');
+    }
+  }
   const assets = new Map();
   for (const p of r.pairs) {
     const definition = `${p.base.kind}:${p.base.decimals}`;
@@ -106,10 +116,10 @@ export const bodySchemas = Object.freeze({
   chat: chatInputSchema.extend({ text: chatText.min(1).refine(text => text === text.trim() && [...text].length <= 280), ts: uint }).strict(),
   offer,
   cancel: z.object({ offerId: hexKey }).strict(),
-  take: z.object({ offerId: hexKey, pair, registryVersion: uint.min(1), software: softwareSchema, baseAmount: positive, taker: participant, commitment: hexKey, sendBy: uint, refundAfter: uint }).strict(),
+  take: z.object({ offerId: hexKey, pair, registryVersion: uint.min(1), software: softwareSchema, baseAmount: positive, taker: participant, commitment: hexKey, sendBy: uint, refundAfter: uint, bond: bondSchema.optional() }).strict(),
   settled: z.object({ offerId: hexKey, tradeId: hexKey, terms: termsSchema, hashHex: hexKey, claimSignature: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{64,88}$/).optional(), txHash: hexKey }).strict(),
-  accept: z.object({ offerId: hexKey, takeCommitment: hexKey, commitment: hexKey, slot: uint.max(Number.MAX_SAFE_INTEGER - 32) }).strict(),
-  decline: z.object({ offerId: hexKey, takeNonce: hexKey, reason: z.enum(['busy', 'insufficient', 'signers', 'expired', 'invalid', 'version', 'reset-gateway']) }).strict(),
+  accept: z.object({ offerId: hexKey, takeCommitment: hexKey, commitment: hexKey, slot: uint.max(Number.MAX_SAFE_INTEGER - 32), bond: bondSchema.optional() }).strict(),
+  decline: z.object({ offerId: hexKey, takeNonce: hexKey, reason: z.enum(['busy', 'insufficient', 'signers', 'expired', 'invalid', 'version', 'reset-gateway', 'update the app']) }).strict(),
   commit: z.object({ offerId: hexKey, commitment: hexKey }).strict(),
   reveal: z.object({ offerId: hexKey, takeCommitment: hexKey, nonce: hexKey }).strict(),
   present: z.object({ ref: hexKey }).strict(),
@@ -118,7 +128,7 @@ export const bodySchemas = Object.freeze({
   termsSig: z.object({ tradeId: hexKey }).strict(),
   working: z.object({ tradeId: hexKey, step: z.literal('certificate') }).strict(),
   deal: dealSchema,
-  ack: z.object({ tradeId: hexKey, H: hexKey, holdUntil: uint }).strict(),
+  ack: z.object({ tradeId: hexKey, H: hexKey, holdUntil: uint, bond: bondAckSchema.optional() }).strict(),
   refused: z.object({ tradeId: hexKey, reason: z.enum(['seller-funds', 'seller-struck', 'buyer-struck']) }).strict(),
   transferSent: z.object({ tradeId: hexKey, txHash: hexKey }).strict(),
   sharePublish: z.object({ tradeId: hexKey, H: hexKey, signerIndex: uint.min(1).max(16), share: hexKey,

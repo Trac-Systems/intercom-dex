@@ -2,6 +2,17 @@ import { locksControlHandler } from '../dashboard/server.js';
 // Shared local control handler; the runner binds it only to 127.0.0.1.
 export function controlHandler({ token, role, wallets = null, fees = null }) {
   const routes = {
+    ...(role.stakeQuiesce ? { 'POST /stake/quiesce': b => {
+      if (Object.keys(b).length) throw new Error('Unknown quiesce field'); return role.stakeQuiesce();
+    }, 'POST /stake/handoff': b => {
+      if (Object.keys(b).some(k => k !== 'nextPolicy') || !b.nextPolicy) throw new Error('nextPolicy required'); return role.stakeHandoff(b.nextPolicy);
+    }, 'POST /stake/resume': b => {
+      if (Object.keys(b).length) throw new Error('Unknown resume field'); return role.stakeResume();
+    } } : {}),
+    ...(role.stakeAction ? { 'GET /stake': () => role.stakeAction({ action: 'status' }),
+      'GET /rewards': () => ({ ok: true, rewards: role.stakeView().rewards }),
+      'POST /stake/deposit': b => { if (Object.keys(b).some(k => k !== 'amount')) throw new Error('Unknown stake field'); return role.stakeAction({ ...b, action: 'deposit' }); },
+      'POST /stake/withdraw': b => { if (Object.keys(b).some(k => k !== 'amount')) throw new Error('Unknown stake field'); return role.stakeAction({ ...b, action: 'withdraw' }); } } : {}),
     'GET /status': async () => ({ ...role.status(), ...(wallets ? { wallets: await wallets.info({ short: true }) } : {}) }),
     ...(wallets ? { 'GET /wallets': () => wallets.info(), 'POST /withdraw': b => wallets.withdraw(b) } : {}),
     ...(fees ? { 'POST /fee/set': b => fees.set(b), 'POST /fee/platform': b => fees.platform(b) } : {}),
@@ -15,6 +26,7 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
       return role.readChat(values.length ? Number(values[0]) : undefined);
     } } : {}),
     ...(role.sayChat ? { 'POST /chat': b => role.sayChat(b) } : {}),
+    ...(role.retryDelivery ? { 'POST /retry-delivery': b => role.retryDelivery(b) } : {}),
     'POST /offer': b => role.makeOffer(b),
     'POST /cancel': b => role.cancelOffer(b.offerId),
     'POST /take': b => role.takeOffer(b.offerId, b.baseAmount, b.price),
@@ -36,7 +48,7 @@ export function controlHandler({ token, role, wallets = null, fees = null }) {
         const route = routes[`${req.method} ${url.pathname}`];
         if (!route) return reply(404, { error: 'not found' });
         reply(200, await route(body ? JSON.parse(body) : {}, url));
-      } catch (e) { reply(400, { error: e.message }); }
+      } catch (e) { reply(400, e.result ?? { error: e.message }); }
     });
   };
   return role.locks ? locksControlHandler({ token, client: role.locks, fallback: handler }) : handler;

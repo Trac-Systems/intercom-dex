@@ -6,6 +6,8 @@ import { priceChart } from './chart.js';
 import { bookPanel } from './book.js';
 import { serverList, cursorList } from './vlist.js';
 import { review } from './dialogs.js';
+import { saleBondText, saleBondKey, tradeBondText, pauseText, deliveryText, DECIDED } from './stake-text.js';
+import { deliveryNote } from './delivery.js';
 
 const ROW = 32, LIVE_MS = 5000;
 const marketRead = path => api(path, undefined, { timeoutMs: 10000 });
@@ -103,7 +105,7 @@ function chartPanel() {
 
 // ---- Order entry: place an offer, or take one from the book. Both go through the preview -> confirm dialog.
 function entryPanel() {
-  let pair = null, book = null, balances = null, sideNow = 'buy', mode = 'offer', taking = null;
+  let pair = null, book = null, balances = null, stake = null, sideNow = 'buy', mode = 'offer', taking = null;
   const input = (name, attrs) => h('input', { name, inputmode: 'decimal', autocomplete: 'off', spellcheck: 'false', ...attrs });
   const price = input('price', { placeholder: '0.00' }), amount = input('amount', { placeholder: '0' }), ttl = input('ttl', { type: 'number', min: 1, max: 1440, value: 60, inputmode: 'numeric' });
   const takeAmount = input('take', { placeholder: 'all' });
@@ -112,6 +114,7 @@ function entryPanel() {
   const baseUnit = h('span', { class: 'unit' }), takeUnit = h('span', { class: 'unit' });
   const available = h('div', { class: 'kv' }), estimate = h('div', { class: 'kv' }), minimum = h('div', { class: 'kv' });
   const takeInfo = h('div', { class: 'take-info' }), paused = h('p', { class: 'note', hidden: true }, 'Trading is paused on this pair.');
+  const bond = h('div', { class: 'kv', hidden: true });
   const submit = h('button', { type: 'button', class: 'primary wide', onclick: () => send() });
   const offerFields = h('div', { class: 'fields' },
     h('label', null, 'Price', h('div', { class: 'affix' }, price, h('span', { class: 'unit' }, 'USDC'))),
@@ -121,7 +124,7 @@ function entryPanel() {
   const takeFields = h('div', { class: 'fields' }, takeInfo,
     h('label', null, 'Amount', h('div', { class: 'affix' }, takeAmount, h('button', { type: 'button', class: 'small link', onclick: () => fillMax() }, 'Max'), takeUnit)), maxNote);
   const el = h('section', { class: 'panel entry' }, h('div', { class: 'sides' }, sideButtons), h('div', { class: 'modes', role: 'tablist' }, modeButtons),
-    offerFields, takeFields, h('div', { class: 'summary' }, available, estimate, minimum), paused, submit);
+    offerFields, takeFields, h('div', { class: 'summary' }, available, estimate, minimum, bond), paused, submit);
   for (const i of [price, amount, takeAmount]) i.addEventListener('input', () => { maxNote.hidden = true; render(); });
 
   // The offer to take: the level the reader clicked while it is still in the book, else the next offer at that
@@ -160,11 +163,31 @@ function entryPanel() {
     const at = Number(mode === 'take' ? o?.price : price.value);
     kv(estimate, sideNow === 'buy' ? 'You pay about' : 'You receive about', qty > 0 && at > 0 ? `${(qty * at).toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC` : '—');
     kv(minimum, 'Smallest trade', amt(pair.minBase));
+    // A sale reserves a bond from the stake: the exact amount the trader would set now, or why it cannot.
+    showBond(sideNow === 'sell' && stake?.bonded && qty > 0 && at > 0
+      ? { pair: pair.pair, amount: plain(mode === 'take' ? (takeAmount.value || o.amount.text) : amount.value), price: mode === 'take' ? o.price : price.value.trim() } : null);
     paused.hidden = open;
     paused.textContent = pair.reason ?? 'Trading is paused on this pair.';
     submit.disabled = !open || (mode === 'take' && !o);
     submit.className = `primary wide ${sideNow}`;
     submit.textContent = `${mode === 'take' ? '' : 'Review '}${sideNow === 'buy' ? 'Buy' : 'Sell'} ${base}${mode === 'take' ? ' now' : ''}`;
+  }
+  // Asked of the trader once the inputs (or the stake) stop changing for a moment, and again every 15 s; a stale answer is dropped.
+  let bondKey = '', bondTimer = null;
+  function showBond(sale) {
+    const key = saleBondKey(sale, stake);
+    if (key === bondKey) return;
+    bondKey = key; clearTimeout(bondTimer);
+    if (!sale) { bond.hidden = true; return; }
+    bondTimer = setTimeout(async () => {
+      let t;
+      try { t = saleBondText((await api(`/api/sale-bond?${q(sale)}`)).bond); } catch (error) { t = { ok: false, label: 'Bond', value: '—', status: 'unknown', text: error.message }; }
+      if (key !== bondKey) return;
+      bond.hidden = !t;
+      if (!t) return;
+      bond.title = t.text;
+      bond.replaceChildren(h('span', { class: 'muted' }, t.label), h('span', { class: 'num' }, t.value, ' · ', h('span', { class: t.ok ? 'up' : 'down' }, t.status)));
+    }, 300);
   }
   // Max: the most of the offer that the free balance pays for, fees included (worked out by the trader).
   async function fillMax() {
@@ -186,7 +209,7 @@ function entryPanel() {
   return {
     el,
     pair(p) { if (pair?.pair !== p.pair) { taking = null; takeAmount.value = ''; } pair = p; render(); },
-    data(b, bal) { book = b; balances = bal; render(); },
+    data(b, bal, s = stake) { book = b; balances = bal; stake = s; render(); },
     // A click on a book level: take that level's offer, and use its price for an offer too.
     take(level) {
       sideNow = level.side === 'sell' ? 'buy' : 'sell'; mode = 'take'; taking = { offerId: level.take.offerId, price: level.price }; maxNote.hidden = true;
@@ -196,6 +219,25 @@ function entryPanel() {
   };
 }
 
+// Why an own offer is not in the book: its pause (stake, coins, TNK, offline, price), a paused pair, or the venue
+// leaving it out. Null when it is listed.
+function offerNote(o) {
+  if (o.pause) return pauseText(o.pause, o.size.unit);
+  if (o.paused) return { reason: o.reason, todo: '' };
+  if (o.listed !== false) return null;
+  return { reason: o.side === 'buy' ? 'The venue leaves this offer out of the book: the wallet needs the USDC for the smallest trade and at least 0.01 SOL, and the app must stay online.'
+    : 'The venue leaves this offer out of the book: the wallet needs the coins for the smallest trade and TNK for the transfer fee, and the app must stay online.', todo: '' };
+}
+// A trade's bond and its reservation, unless the delivery note above already tells of the penalty.
+const bondNote = x => (x.bond && !['penalty_collecting', 'penalty_paid'].includes(x.delivery?.state)
+  ? h('p', null, h('strong', null, 'Bond: '), tradeBondText(x.bond, x.side === 'buy')) : null);
+
+// A sale's delivery in one table cell: the short head, with an icon in its tone.
+function deliveryCell(x) {
+  const t = deliveryText(x.delivery, `${x.base.text} ${x.base.unit}`);
+  return [h('span', { class: `icon ${t.tone === 'good' ? 'ok' : t.tone === 'info' ? 'muted' : 'warn'}` }, t.tone === 'good' ? '✓' : t.tone === 'info' ? '·' : '!'), ' ', t.head];
+}
+
 // ---- Bottom panel: the trader's own lists and the market's trades, each a virtual list.
 function bottomPanel(getPlaces) {
   const list = name => (offset, limit) => api(`/api/list?${q({ name, offset, limit })}`);
@@ -203,25 +245,31 @@ function bottomPanel(getPlaces) {
   let tradesPair = null;
   const build = {
     offers: () => serverList({ fetchBlock: list('trader.offers'), rowHeight: ROW, key: o => o.offerId, label: 'Open offers', emptyText: 'Your open offers appear here.',
-      row: o => h('div', { class: 'vl-row', role: 'listitem' }, h('div', { class: 'cells' }, cell('', [o.pair, o.paused || o.listed === false ? h('span', { class: 'badge warn',
-        title: o.paused ? o.reason : o.side === 'buy' ? 'The venue leaves this offer out of the book: the wallet needs the USDC for the smallest trade and at least 0.01 SOL. It also leaves out an offer it has not heard for over a minute: keep the app online.'
-          : 'The venue leaves this offer out of the book: the wallet needs the coins for the smallest trade and TNK for the transfer fee. It also leaves out an offer it has not heard for over a minute: keep the app online.' }, o.paused ? 'Paused' : 'Not listed') : null]), cell('', side(o.side)), cell('num', p(o.pair, o.price)),
-        cell('num', amt(o.size)), cell('num hide-s', amt(o.filled)), cell('num hide-s', amt(o.reserved)), cell('num', amt(o.left)), cell('hide-s', when(o.expiresAt)),
-        cell('end', h('button', { class: 'small danger', type: 'button', onclick: () => review('cancel', { offerId: o.offerId }) }, 'Cancel')))) }),
+      row: (o, { open, toggle }) => {
+        const why = offerNote(o);
+        return expander('', open, toggle, [cell('', [o.pair, why ? h('span', { class: 'badge warn', title: why.reason }, o.pause || o.paused ? 'Paused' : 'Not listed') : null]), cell('', side(o.side)), cell('num', p(o.pair, o.price)),
+          cell('num', amt(o.size)), cell('num hide-s', amt(o.filled)), cell('num hide-s', amt(o.reserved)), cell('num', amt(o.left)), cell('hide-s', when(o.expiresAt)),
+          cell('end', h('button', { class: 'small danger', type: 'button', onclick: e => { e.stopPropagation(); review('cancel', { offerId: o.offerId }); }, onkeydown: e => e.stopPropagation() }, 'Cancel'))],
+        [why ? h('p', { class: 'warning' }, h('strong', null, o.pause || o.paused ? 'Paused: ' : 'Not listed: '), why.reason, why.todo ? [' ', h('strong', null, 'What to do: '), why.todo] : null) : null,
+          h('p', { class: 'muted' }, `${o.side === 'buy' ? 'Buying' : 'Selling'} ${o.size.text} ${o.size.unit} at ${o.price} USDC · ${o.left.text} left · open until `, whenLong(o.expiresAt))]);
+      } }),
     running: () => serverList({ fetchBlock: list('trader.running'), rowHeight: ROW, key: x => x.key, label: 'Running trades',
       emptyText: 'Trades you start, or that take your offers, appear here with what happens next.',
-      row: (x, { open, toggle }) => expander('', open, toggle, [cell('', x.pair), cell('', side(x.side)), cell('num', amt(x.base)), cell('num hide-s', amt(x.quote)),
-        cell('clip', x.warning ? [h('span', { class: 'icon warn' }, '!'), ` Warning: ${x.warning}`] : x.line.now), cell('hide-s', x.line.deadline ? when(x.line.deadline) : x.line.fallbackAt ? when(x.line.fallbackAt) : '—')],
-      [x.warning ? h('p', { class: 'warning', role: 'alert' }, x.warning) : null,
-        h('p', null, h('strong', null, 'Now: '), x.line.now, '. ', h('span', { class: 'muted' }, `Waiting for ${x.line.waitingFor}.`)),
+      row: (x, { open, toggle }) => expander(x.delivery ? `delivery-${deliveryText(x.delivery, '').tone}` : '', open, toggle, [cell('', x.pair), cell('', side(x.side)), cell('num', amt(x.base)), cell('num hide-s', amt(x.quote)),
+        cell('clip', x.warning ? [h('span', { class: 'icon warn' }, '!'), ` Warning: ${x.warning}`] : x.delivery ? deliveryCell(x) : x.line.now),
+        cell('hide-s', x.delivery?.deadline && !DECIDED.includes(x.delivery.state) ? when(x.delivery.deadline) : x.line.deadline ? when(x.line.deadline) : x.line.fallbackAt ? when(x.line.fallbackAt) : '—')],
+      [x.warning ? h('p', { class: 'warning', role: 'alert' }, x.warning) : null, x.delivery ? deliveryNote(x) : null,
+        h('p', null, h('strong', null, 'Now: '), x.line.now, /[.…]$/.test(x.line.now) ? ' ' : '. ', h('span', { class: 'muted' }, `Waiting for ${x.line.waitingFor}.`)),
         x.line.ifMissed || x.line.fallback ? h('p', null, h('strong', null, 'If missed: '), x.line.ifMissed ? [x.line.ifMissed, x.line.deadline ? [' ', whenLong(x.line.deadline)] : null, ', '] : null,
           x.line.fallback, x.line.fallbackAt ? [' ', whenLong(x.line.fallbackAt)] : null, x.line.ifMissed ? '.' : null) : null,
+        bondNote(x),
         h('p', { class: 'muted' }, `${x.side === 'buy' ? 'Buying' : 'Selling'} ${x.base.text} ${x.base.unit} for ${x.quote.text} USDC at ${x.price} · with ${x.peer}`,
           x.tradeId ? ` · trade ${x.tradeId.slice(0, 12)}…` : null, ' · updated ', when(x.at))]) }),
     history: () => serverList({ fetchBlock: list('trader.history'), rowHeight: ROW, key: x => x.key, label: 'History', emptyText: 'Finished trades appear here.',
       row: (x, { open, toggle }) => expander('', open, toggle, [cell('', when(x.at)), cell('', x.pair), cell('', side(x.side)), cell('num', p(x.pair, x.price)),
         cell('num hide-s', amt(x.base)), cell('num hide-s', amt(x.quote)), cell(`clip tone-${x.outcome.tone}`, h('span', { class: 'icon' }, x.outcome.tone === 'good' ? '✓' : x.outcome.tone === 'bad' ? '✕' : '·'), ' ', x.outcome.text)],
-      [h('p', null, x.outcome.text), x.warning ? h('p', { class: 'warning', role: 'alert' }, x.warning) : null,
+      [h('p', null, x.outcome.text), x.warning ? h('p', { class: 'warning', role: 'alert' }, x.warning) : null, x.delivery ? deliveryNote(x) : null,
+        bondNote(x),
         h('p', { class: 'muted' }, `${x.side === 'buy' ? 'Bought' : 'Sold'} ${x.base.text} ${x.base.unit} for ${x.quote.text} USDC at ${x.price} · with ${x.peer}`,
         x.tradeId ? ` · trade ${x.tradeId}` : null, ' · ', whenLong(x.at))]) }),
     trades: () => cursorList({ key: t => t.id, rowHeight: ROW, label: 'Market trades', emptyText: 'No trades on this pair yet.',
@@ -229,11 +277,11 @@ function bottomPanel(getPlaces) {
       row: t => h('div', { class: 'vl-row', role: 'listitem' }, h('div', { class: 'cells' }, cell('', when(t.t)), cell(`num ${t.side === 'sell' ? 'down' : t.side === 'buy' ? 'up' : ''}`, h('span', { title: t.price }, p(tradesPair, t.price))),
         cell('num', amt(t.amount)), cell('num', amt(t.usdc)), cell('hide-s', side(t.side)))) }),
     attention: () => serverList({ fetchBlock: list('trader.attention'), rowHeight: ROW, key: (a, i) => `${a.kind}:${a.at}:${a.text}` || i, label: 'Alerts', emptyText: 'Nothing needs your attention.',
-      row: (a, { open, toggle }) => expander(['failed', 'key', 'paused'].includes(a.kind) ? 'alert bad' : 'alert', open, toggle,
+      row: (a, { open, toggle }) => expander(['failed', 'key', 'paused'].includes(a.kind) || a.severity === 'red' ? 'alert bad' : 'alert', open, toggle,
         [cell('icon warn', '!'), cell('clip', a.text), cell('', a.at ? when(a.at) : '')], [h('p', null, a.text), a.at ? h('p', { class: 'muted' }, whenLong(a.at)) : null]) }),
   };
   const heads = {
-    offers: ['cols-offers', [['Pair'], ['Side'], ['Price', 'num'], ['Size', 'num'], ['Filled', 'num hide-s'], ['Reserved', 'num hide-s'], ['Left', 'num'], ['Expires', 'hide-s'], ['']]],
+    offers: ['cols-offers', [['Pair'], ['Side'], ['Price', 'num'], ['Size', 'num'], ['Filled', 'num hide-s'], ['Reserved', 'num hide-s'], ['Left', 'num'], ['Expires', 'hide-s'], [''], ['']]],
     running: ['cols-running', [['Pair'], ['Side'], ['Amount', 'num'], ['Total', 'num hide-s'], ['What happens now'], ['Next deadline', 'hide-s'], ['']]],
     history: ['cols-history', [['Time'], ['Pair'], ['Side'], ['Price', 'num'], ['Amount', 'num hide-s'], ['Total', 'num hide-s'], ['Outcome'], ['']]],
     trades: ['cols-trades', [['Time'], ['Price', 'num'], ['Amount', 'num'], ['Total (USDC)', 'num'], ['Taker', 'hide-s']]],
@@ -363,7 +411,7 @@ export function tradingView() {
     const p = pairs.find(x => x.pair === current);
     bar.set(pairs, current, placesOf(current), t);
     entry.pair(p);
-    entry.data(book, t.balances);
+    entry.data(book, t.balances, t.stake);
     bottom.counts(t.counts);
   }
   return {

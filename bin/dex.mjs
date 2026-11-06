@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { createStakeRuntime } from '../src/stake/runtime.js';
+import { PayoutRole } from '../src/roles/payout-runtime.js';
+import { createPayoutWallet } from '../src/stake/payout-wallet.js';
 // Runs one dex role (service | signer | trader | market-feed) next to its own peer. Usage: node bin/dex.mjs --config <abs path>
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -21,6 +24,7 @@ import { solanaSettings } from '../src/solana/settings.js';
 import { createTracAdapter } from '../src/trac/adapter.js';
 import { ensureWallets, setupWallets, exportWallets } from '../src/wallets/setup.js';
 import { restoreVenue } from '../src/wallets/venue-backup.js';
+import { signerBackupCommand, TWO_COPIES_RULE } from '../src/wallets/signer-backup.js';
 import { hiddenInput } from '../src/wallets/input.js';
 import { createTraderLocks } from '../src/wallets/locks.js';
 import { WalletManager } from '../src/wallets/manager.js';
@@ -37,26 +41,30 @@ import { startMarketFeed } from '../src/market-feed/runtime.js';
 import { controlHandler } from '../src/roles/control.js';
 import { startDex, stopDex, statusDex, dexLogs } from '../src/lifecycle/manager.js';
 import { lifecycleHandler } from '../src/lifecycle/control.js';
+import { parseStakeCommand, STAKE_HELP } from '../src/stake/cli.js';
 import { requestStop } from '../src/lifecycle/lock.js';
 import { validateSeller, strikeSettings } from '../src/roles/signer-strikes.js';
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-  config: { type: 'string' }, out: { type: 'string' }, asset: { type: 'string' }, amount: { type: 'string' }, to: { type: 'string' },
+  help: { type: 'boolean' }, config: { type: 'string' }, out: { type: 'string' }, asset: { type: 'string' }, amount: { type: 'string' }, to: { type: 'string' },
   'import-solana': { type: 'string' }, 'import-trac-mnemonic': { type: 'boolean' }, 'import-reset-keystore': { type: 'string' },
   'trade-fee': { type: 'string' }, 'signer-share': { type: 'string' }, bps: { type: 'string' },
   'authority-keypair': { type: 'string' }, yes: { type: 'boolean' }, from: { type: 'string' }, mint: { type: 'string' },
   'first-launch': { type: 'boolean' },
   'peer-config': { type: 'string' }, force: { type: 'boolean' },
   seller: { type: 'string' }, buyer: { type: 'string' }, identity: { type: 'string' },
+  'passphrase-file': { type: 'string' }, journal: { type: 'string' },
 } });
+if (values.help) { console.log(STAKE_HELP); process.exit(0); }
 if (!isAbsolute(values.config ?? '')) throw new Error('--config must be an absolute path');
-const command = ['fee', 'keys', 'strikes'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
+const command = ['fee', 'keys', 'strikes', 'signer-backup'].includes(positionals[0]) ? positionals.join(' ') : positionals[0] ?? 'run';
 const allowed = { run: ['first-launch'], setup: ['import-solana', 'import-trac-mnemonic', 'import-reset-keystore'], balances: [], withdraw: ['asset', 'amount', 'to'], export: ['out'],
-  start: ['peer-config'], stop: ['force'], status: [], logs: [],
+  start: ['peer-config'], stop: ['force'], status: [], logs: [], stake: [], rewards: [],
   restore: ['from'], 'keys check': ['authority-keypair'], 'fee withdraw-platform': ['authority-keypair', 'to', 'mint', 'amount'],
   'fee set': ['trade-fee', 'signer-share'], 'fee platform': ['bps', 'authority-keypair', 'yes'],
-  'strikes list': [], 'strikes clear': ['seller', 'buyer', 'identity'] };
-if (!Object.hasOwn(allowed, command) || positionals.length > (command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, strikes list, strikes clear, or no command');
+  'strikes list': [], 'strikes clear': ['seller', 'buyer', 'identity'],
+  'signer-backup export': ['out', 'passphrase-file'], 'signer-backup verify': ['from', 'passphrase-file'], 'signer-backup restore': ['from', 'passphrase-file', 'journal'] };
+if (!Object.hasOwn(allowed, command) || positionals.length > (command === 'stake' ? 3 : command === 'rewards' || command.includes(' ') || command === 'logs' ? 2 : 1)) throw new Error('Expected start, stop, status, logs, setup, balances, withdraw, export, restore, keys check, fee set, fee platform, fee withdraw-platform, strikes list, strikes clear, signer-backup export|verify|restore, or no command');
 if (Object.keys(values).some(k => k !== 'config' && !allowed[command].includes(k))) throw new Error('Option does not apply to this command');
 if (['start', 'stop', 'status', 'logs'].includes(command)) {
   try {
@@ -71,6 +79,17 @@ if (['start', 'stop', 'status', 'logs'].includes(command)) {
   } catch (error) { console.error(error.message); process.exit(1); }
 }
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
+if (['stake', 'rewards'].includes(command)) {
+  if (config.role !== 'trader') throw new Error('Stake commands are trader only');
+  const request = parseStakeCommand(positionals);
+  try { console.log(JSON.stringify(await controlCall(config, request.method, request.route, request.body), null, 2)); process.exit(0); }
+  catch (error) { console.error(JSON.stringify(error.result ?? { error: error.message }, null, 2)); process.exit(1); }
+}
+if (command.startsWith('signer-backup ')) {
+  if (command === 'signer-backup restore') console.error(TWO_COPIES_RULE);
+  const result = await signerBackupCommand(config, positionals[1], { out: values.out, from: values.from, passphraseFile: values['passphrase-file'], journal: values.journal });
+  console.log(JSON.stringify(result, null, 2)); process.exit(0);
+}
 // Reject a mistyped safety switch before opening keys, connecting a peer or starting a role.
 if (config.role === 'signer') config.strikes = strikeSettings(config.strikes);
 else if (config.strikes !== undefined) throw new Error('strikes is signer-only configuration');
@@ -168,11 +187,11 @@ if (['balances', 'withdraw'].includes(command)) {
 }
 const log = (...a) => console.log(new Date().toISOString(), config.role, ...a);
 
-if (!['service', 'signer', 'trader', 'market-feed', 'lock-signer', 'lock-venue'].includes(config.role)) throw new Error('Invalid role');
+if (!['service', 'signer', 'trader', 'payout', 'market-feed', 'lock-signer', 'lock-venue'].includes(config.role)) throw new Error('Invalid role');
 if (config.role === 'trader' && (typeof config.proof?.zkey !== 'string' || !isAbsolute(config.proof.zkey))) {
   throw new Error('Traders require proof.zkey as an absolute path');
 }
-if (config.role !== 'market-feed' && !locksRole) await checkProofFiles(config.role === 'trader' ? { zkeyPath: config.proof.zkey } : {});
+if (!['market-feed', 'payout'].includes(config.role) && !locksRole) await checkProofFiles(config.role === 'trader' ? { zkeyPath: config.proof.zkey } : {});
 
 const bridge = await new Bridge({ url: config.bridge.url, token: readPrivateFile(config.bridge.tokenFile, 256).trim() }).connect();
 const peerInfo = (await bridge.info()).info;
@@ -250,21 +269,28 @@ if (locksRole) {
           throw new Error('Reconnected peer identity does not match');
       },
       locks: createTraderLocks({ config, bridge, store, keypair, wallet, profile, rpc, wallets: () => wallets }) });
-  } else throw new Error('role must be service, signer or trader');
-  wallets = config.role === 'signer' ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
+  } else if (config.role === 'payout') {
+    if (config.dashboard || config.payout) throw new Error('The reward pool uses its own configured ordinary wallet');
+    role = new PayoutRole({ bridge, identity, store, profile, serviceKey: config.serviceKey, address: wallet.address, log,
+      adapter: createPayoutWallet({ bridge, wallet, profile, store, trac, resetGatewayUrl: config.trac?.resetGatewayUrl }) });
+  } else throw new Error('role must be service, signer, trader or payout');
+  role.stakeRuntime = createStakeRuntime({ type: config.role, role, bridge, identity, box: keys.box, store, solana, trac, rpc, wallet, profile,
+    resetGatewayUrl: config.trac?.resetGatewayUrl, log });
+  wallets = ['signer', 'payout'].includes(config.role) ? null : new WalletManager({ config, configFile: values.config, store, role, solana, trac,
     addresses: { solana: keypair.publicKey.toBase58(), trac: wallet?.address ?? null } });
   if (wallets) role.wallets = wallets;
   const fees = config.role === 'service' ? new FeeManager({ config, keys, store, service: role, solana }) : null;
   await wallets?.checkPayout();
   await fees?.initialize();
   await role.start();
+  await role.stakeRuntime.start();
   await wallets?.recover();
 
   let dashboardUrl = null, stopping = false;
   const stop = code => {
     if (stopping) return;
     stopping = true;
-    role.stop(); bridge.close();
+    role.stakeRuntime?.stop(); role.stop(); bridge.close();
     setImmediate(async () => {
       try { trac.close(); await wallet?.close(); }
       finally { keys.solanaSecret?.fill(0); keys.storeKey.fill(0); process.exit(code); }

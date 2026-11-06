@@ -1,10 +1,17 @@
+import { effectiveSettings } from '../stake/settings.js';
+import { stakeAdmissionRequired, buyerCapabilityReason } from '../stake/prevention.js';
+import { stakeError } from '../stake/errors.js';
+import { stakeStatus, rewardsStatus, stakeRequestSchema, retryDeliverySchema, deliveryStatus, deliveryWarnings, withdrawalStatus } from '../stake/status.js';
+import { StakeLedger } from '../stake/ledger.js';
+import { tradeBondStatus } from '../stake/trade-status.js';
+import { previewBond } from '../stake/bond-preview.js';
 import { createBuyer } from '../core/trade-buyer.js';
 import { isAbsolute } from 'node:path';
 import { createSeller } from '../core/trade-seller.js';
 import { tradeId as termsTradeId } from '../core/terms.js';
 import { TradeHost, tradeChannel, isFinished } from './host.js';
 import { RegistryView, buildDraft, publicReceiver, nowSec, random32, offerIdOf, validOffer } from './common.js';
-import { quoteAmount, registryPair, pairStatus } from '../market/assets.js';
+import { quoteAmount, priceUnits, registryPair, pairStatus } from '../market/assets.js';
 import { BookView } from '../market/book-feed.js';
 import { freshOffer, availableOffer, STALE_OFFER_MESSAGE } from '../market/book.js';
 import { RegistryRelays } from '../net/relays.js';
@@ -125,6 +132,7 @@ export class Trader {
     if (!current()) return;
     await Promise.all([
       this.host.restoreTransport(current),
+      this.stakeRuntime?.restore(),
       ...[...this.mine.values()].filter(offer => offer.expiresAt > nowSec()).map(offer => this.bridge.join(tradeChannel(offer.offerId))),
       this.locks?.restoreTransport(current),
     ]);
@@ -136,9 +144,10 @@ export class Trader {
   }
 
   async #participant(expiresAt) {
-    if (!this.addressProofPolicy().required) return this.me;
+    const me = this.registry.usable?.sellerBond && this.stakeRuntime ? { ...this.me, boxKey: this.stakeRuntime.boxKey, stakeVersion: 1 } : this.me;
+    if (!this.addressProofPolicy().required) return me;
     const tracProof = await this.host.trac.proveAddress({ dexKey: this.me.dexKey, expiresAt });
-    const party = { ...this.me, tracProof };
+    const party = { ...me, tracProof };
     if (!validAddressProof(party, this.addressProofPolicy())) throw new Error('Invalid Trac address proof');
     return party;
   }
@@ -212,6 +221,7 @@ export class Trader {
   #newPair(pair, version, software = SOFTWARE) {
     const current = this.registry.usable, snapshot = this.registry.snapshot(version);
     if (!current || !snapshot) throw new Error('No usable registry');
+    if (stakeAdmissionRequired(current, nowSec()) && (!current.sellerBond.acceptNew || !this.stakeRuntime?.admission)) throw stakeError('bond_setup_unavailable', { retrySec: 60 });
     if (!meetsVersion(SOFTWARE, current.minSoftware) || !meetsVersion(software, current.minSoftware) ||
         !meetsVersion(SOFTWARE, snapshot.minSoftware) || !meetsVersion(software, snapshot.minSoftware)) throw new Error('update required');
     registryPair(current, pair);
@@ -232,7 +242,13 @@ export class Trader {
     if (mine.length >= DECLINES_PER_TAKER || total >= DECLINES_PER_MINUTE || this.store.get(name)) return;
     this.declined.set(m.from, [...mine, now]);
     this.store.put(name, { at: now, reason });
-    const send = left => this.host.sendPublic(channel, 'decline', { offerId: m.body.offerId, takeNonce: m.nonce, reason })
+    // Released buyers do not recognize new decline enum values. Their existing
+    // pre-terms abort binds the maker, offer channel and buyer commitment, and
+    // displays this plain reason without entering any money-moving phase.
+    const kind = reason === 'update the app' ? 'abort' : 'decline';
+    const body = kind === 'abort' ? { tradeId: m.body.offerId, commitment: m.body.commitment, reason }
+      : { offerId: m.body.offerId, takeNonce: m.nonce, reason };
+    const send = left => this.host.sendPublic(channel, kind, body)
       .catch(e => {
         if (left > 0 && /Stamp queue busy/.test(e.message)) setTimeout(() => send(left - 1), DECLINE_RETRY_MS).unref?.();
         else this.log('decline failed', e.message);
@@ -296,6 +312,8 @@ export class Trader {
     if (!offer || offer.expiresAt <= now) return decline('expired');
     if (!this.registry.usable) return decline('busy');
     if (!reg || m.body.pair !== offer.pair || m.body.registryVersion !== offer.registryVersion) return decline('invalid');
+    const buyerReason = buyerCapabilityReason(this.registry.usable, offer.side === 'sell' ? m.body.taker : offer.maker, now);
+    if (buyerReason) return decline(buyerReason);
     let pair;
     try { pair = this.#newPair(offer.pair, offer.registryVersion, m.body.software); }
     catch (e) { return decline(e.message === 'update required' ? 'version' : 'invalid'); }
@@ -330,6 +348,10 @@ export class Trader {
     try {
       draft = buildDraft({ offer, baseAmount: m.body.baseAmount, maker: offer.maker, taker: m.body.taker, registry: reg,
         sendBy: m.body.sendBy, refundAfter: m.body.refundAfter, mint: this.mint, platformCollector: this.platformCollector });
+      if (stakeAdmissionRequired(this.registry.usable, now)) {
+        draft.bond = offer.side === 'sell' ? this.stakeRuntime.admission.propose(draft, now) : m.body.bond;
+        this.stakeRuntime.admission.validate(draft, now);
+      }
       if (this.profile) checkProfileTerms(draft, this.profile);
     } catch (e) { this.log('take refused', e.message); return decline('invalid'); }
     const role = offer.side === 'sell' ? 'seller' : 'buyer';
@@ -389,6 +411,7 @@ export class Trader {
       offer.expiresAt++;
     }
     parseBody('offer', offer);
+    if (side === 'sell' && stakeAdmissionRequired(reg, nowSec()) && !this.stakeRuntime?.admission.covered(offer, nowSec())) throw stakeError('bond_not_reserved', {});
     if (this.wallets) await this.wallets.requireFunds({ role: side === 'sell' ? 'seller' : 'buyer', base: entry.base,
       baseAmount, quoteAmount: quoteAmount(entry, baseAmount, price), fees: { platformFeeBps: reg.fee.platformFeeBps, tradeFeeBps: reg.fee.tradeFeeBps } });
     if (side === 'sell') await this.#requireClaimFunds(this.mint, reg.fee.collector);
@@ -471,6 +494,7 @@ export class Trader {
         await this.cancelOffer(id).catch(e => this.log('offer end', e.message));
         continue;
       }
+      if (offer.side === 'sell' && stakeAdmissionRequired(this.registry.usable, now) && !this.stakeRuntime?.admission.covered(offer, now)) continue;
       if (inv.available > 0n) {
         await this.host.sendPublic(OFFERS, 'offer', offer);
         this.offers.set(id, { offer, from: this.identity.publicKey, firstSeen: this.offers.get(id)?.firstSeen ?? now, lastSeen: nowSec() });
@@ -486,6 +510,7 @@ export class Trader {
     const seen = this.offers.get(offerId);
     if (!freshOffer(seen, now)) { this.offers.delete(offerId); return null; }
     if (!validAddressProof(seen.offer.maker, this.addressProofPolicy())) return null;
+    if (stakeAdmissionRequired(this.registry.usable, now) && !this.stakeRuntime?.admission) return null;
     if (seen.offer.maker.dexKey === this.me.dexKey) return null;
     const pair = seen.offer.pair;
     return availableOffer(seen, this.book.get(pair), this.bookView.inventory.get(pair) ?? this.book.get(pair), now, this.bookView.heard.get(pair));
@@ -513,8 +538,11 @@ export class Trader {
     if (this.#eligible(quote, offer.pair, reg, exclude).length < reg.params.n ||
         this.eligibleOnline(quote, offer.pair).filter(s => !exclude.includes(s.dexKey)).length < reg.params.k + 1) throw new Error('Not enough signers online');
     const taker = await this.#participant(now + reg.params.sendWindowSec);
+    const buyerReason = buyerCapabilityReason(this.registry.usable, offer.side === 'sell' ? taker : offer.maker, now);
+    if (buyerReason) throw new Error(buyerReason);
     const draft = buildDraft({ offer, baseAmount: amount, maker: offer.maker, taker, registry: reg,
       sendBy: now + reg.params.sendWindowSec, refundAfter: now + reg.params.refundSec, mint: this.mint, platformCollector: this.platformCollector });
+    if (stakeAdmissionRequired(this.registry.usable, now) && offer.side === 'buy') draft.bond = this.stakeRuntime.admission.propose(draft, now);
     if (this.profile) checkProfileTerms(draft, this.profile);
     const role = offer.side === 'sell' ? 'buyer' : 'seller';
     if (this.wallets) await this.wallets.requireFunds({ role, ...draft });
@@ -629,12 +657,93 @@ export class Trader {
     return record;
   }
 
+  stakeView() {
+    const r = this.registry.usable, policy = r?.sellerBond && effectiveSettings(r.sellerBond, nowSec());
+    const pieces = r?.sellerBond ? Object.values(new StakeLedger({ store: this.store, address: this.me.tracAddr,
+      context: { networkId: r.sellerBond.networkId, venueKey: r.sellerBond.venueKey, epoch: r.sellerBond.epoch } }).read().pieces) : [];
+    let openOffersUsd = 0n;
+    for (const offer of this.mine.values()) {
+      if (offer.side !== 'sell') continue;
+      const pair = r?.pairs.find(p => p.pair === offer.pair), remaining = this.#inventory(offer).available;
+      if (pair && remaining > 0n && offer.expiresAt > nowSec()) {
+        const quote = remaining * priceUnits(offer.price) * 1000000n / 10n ** BigInt(pair.base.decimals + 12);
+        openOffersUsd += quote + quote * BigInt(r.fee.platformFeeBps) / 10000n + quote * BigInt(r.fee.tradeFeeBps) / 10000n;
+      }
+    }
+    const reference = this.store.get('stake-price-reference'), now = nowSec();
+    const price = reference && reference.epochId === r?.sellerBond?.epoch.id && reference.cutoffAt <= now && now - reference.cutoffAt <= 60 ? reference.q : null;
+    const operation = this.store.get('stake-client-operation');
+    const pending = operation?.kind === 'deposit' && !operation.done ? operation.pieces.filter(p => !pieces.some(x => x.unitId === p.funded?.[0]?.fact.body.unitId))
+      .reduce((sum, p) => sum + BigInt(p.descriptor.principalReset), 0n).toString() : '0';
+    const requested = operation?.kind === 'withdraw' && !operation.done ? new Set(operation.pieces.map(p => p.unitId)) : new Set();
+    const projectedPieces = pieces.map(p => requested.has(p.unitId) && p.state === 'free' ? { ...p, state: 'withdrawing' } : p);
+    const rewardRecord = this.store.get('stake-reward-status');
+    const reward = rewardRecord?.source === r?.sellerBond?.rewardService?.dexKey && rewardRecord?.address === this.me.tracAddr ? rewardRecord.rewards : null;
+    const rewardFresh = rewardRecord?.at <= now && now - rewardRecord.at <= 60;
+    return { stake: { ...stakeStatus({ pieces: projectedPieces, pending, price, openOffersUsd: openOffersUsd.toString(), settings: policy?.settings ?? null }),
+      ...(operation ? { operationId: operation.operationId, operationPending: !operation.done } : {}),
+      ...(withdrawalStatus(operation, pieces) ? { withdrawal: withdrawalStatus(operation, pieces) } : {}) }, rewards: rewardsStatus({
+        ...(reward ?? {}), ...(!rewardFresh ? { poolState: 'unknown', poolBalance: null, ratePerDay: '0' } : {}),
+        dailyBudget: policy?.settings.rewards.dailyReset ?? null, activeWeightBps: policy?.settings.rewards.activeWeightBps ?? null }) };
+  }
+
+  stakeAction(input) {
+    const args = stakeRequestSchema.parse(input);
+    if (args.action === 'status') return { ok: true, ...this.stakeView() };
+    const units = amount => { const [whole, fraction = ''] = amount.split('.'); return (BigInt(whole) * 100000000n + BigInt(fraction.padEnd(8, '0'))).toString(); };
+    return args.action === 'deposit' ? this.stakeDeposit(units(args.amount)) : this.stakeWithdraw(!args.amount || args.amount === 'all' ? 'all' : units(args.amount));
+  }
+
+  stakePreview(units) {
+    if (!this.stakeRuntime?.client) throw stakeError('bond_setup_unavailable', { retrySec: 60 });
+    return this.stakeRuntime.client.preview(units);
+  }
+  bondPreview(input) { return previewBond(this, input, nowSec()); }
+  stakeDeposit(units) {
+    if (!this.stakeRuntime?.client) throw stakeError('bond_setup_unavailable', { retrySec: 60 });
+    return this.stakeRuntime.client.deposit(units);
+  }
+  stakeWithdraw(units = 'all') {
+    if (!this.stakeRuntime?.client) throw stakeError('bond_setup_unavailable', { retrySec: 60 });
+    return this.stakeRuntime.client.withdraw(units);
+  }
+
+  async retryDelivery(input) {
+    if (typeof input === 'string') {
+      const own = this.host.trades.get(input);
+      if (!own || own.role !== 'seller') throw new Error('No active seller delivery for this trade');
+      input = { tradeId: own.state.tradeId };
+    }
+    const { tradeId } = retryDeliverySchema.parse(input), now = nowSec();
+    const trade = [...this.host.trades.values()].find(t => t.state.tradeId === tradeId && t.role === 'seller');
+    if (!trade || !['transferring', 'awaitShares'].includes(trade.state.phase)) throw new Error('No active seller delivery for this trade');
+    if (trade.state.transferFinal === true) return { ok: true, tradeId, delivery: deliveryStatus(trade, now) };
+    const name = `delivery-retry-${tradeId}`, prior = this.store.get(name);
+    if (prior && now < prior.at + 10) return { ok: true, tradeId, throttled: true, retryAfterSec: prior.at + 10 - now, delivery: deliveryStatus(trade, now) };
+    this.store.put(name, { at: now });
+    // The reducer and adapter retain deadline/intent authority. A click cannot choose new bytes or an amount.
+    await this.host.deliver(trade.key, { type: 'resume' });
+    return { ok: true, tradeId, delivery: deliveryStatus(trade, nowSec()) };
+  }
+
+  deliveryProjection(trade) {
+    const bond = this.bondProjection(trade);
+    return bond ? { ...trade, state: { ...trade.state, penaltyPaid: bond.state === 'paid' } } : trade;
+  }
+
+  bondProjection(trade) {
+    if (!trade.state.terms?.bond) return null;
+    const policy = trade.state.registry?.sellerBond ?? this.registry.snapshot(trade.state.terms?.registryVersion)?.sellerBond;
+    return tradeBondStatus(trade, this.store.get(`stake-trade-penalty-${trade.state.tradeId}`), policy);
+  }
+
   status() {
     this.pruneOffers();
     const health = this.host.trac?.gatewayHealthStatus?.() ?? { ok: false };
     const availability = pair => gatewayAvailability(pair, health);
     const open = new Set((this.registry.usable?.pairs ?? []).filter(p => p.status === 'open').map(p => p.pair));
     return {
+      ...this.stakeView(), warnings: deliveryWarnings([...this.host.trades.values()].map(t => this.deliveryProjection(t)), nowSec()),
       software: SOFTWARE, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
       message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '',
       pairs: pairStatus(this.registry.usable, health), serviceStatus: this.serviceStatus ?? null,
@@ -643,9 +752,14 @@ export class Trader {
       // lastSeen: when this program last heard the maker announce the offer (Unix seconds); makers announce every 45 s.
       offers: [...this.offers.keys()].map(id => { const o = this.availableOffer(id); return o && open.has(o.pair) && { ...o, ...availability(o.pair), lastSeen: this.offers.get(id).lastSeen }; }).filter(Boolean),
       mine: [...this.mine.values()].map(o => { const inv = this.#inventory(o);
+        const pause = o.side === 'sell' && stakeAdmissionRequired(this.registry.usable, nowSec())
+          ? this.stakeRuntime?.admission.coverage(o, nowSec()) ?? (!this.stakeRuntime ? { code: 'stake_short', message: 'Stake coverage is unavailable; this offer is paused.' } : null) : null;
         return { ...o, ...availability(o.pair), available: inv.available.toString(), reserved: inv.reserved.toString(), filled: inv.filled.toString(), listed: this.#listed(o, inv),
+          ...(pause ? { listed: false, pause } : {}),
           warning: this.store.get(`offer-${o.offerId}`)?.claimFundingWarning ?? null }; }),
       trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
+        ...(this.bondProjection(t) ? { bond: this.bondProjection(t) } : {}),
+        ...(deliveryStatus(this.deliveryProjection(t), nowSec()) ? { delivery: deliveryStatus(this.deliveryProjection(t), nowSec()) } : {}),
         claimFailure: t.state.claimFailure ?? null, warning: claimWarning(t.state),
         tradeId: t.state.tradeId, H: t.state.H ?? null, committee: t.state.terms?.committee.map(c => c.dexKey) ?? [],
         pair: t.state.draft?.pair, baseAmount: t.state.draft?.baseAmount, quoteAmount: t.state.draft?.quoteAmount })),

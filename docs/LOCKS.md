@@ -258,3 +258,11 @@ The dashboard and MCP list pages contain 50 rows, with `asset`, exact opening to
 A protocol mismatch returns `protocol_unavailable` before put funding; use compatible signer and peer software.
 
 The authenticated HTTP and runtime interfaces are in [the API reference](../src/core/API.md#locks).
+
+## Spot stake
+
+The [spot stake libraries](STAKE.md) reuse the lock cryptographic primitives but
+do not treat a terminal loan/option address as reusable collateral. A successful
+spot reservation must close without revealing a secret share. Terminal stake
+return/award permanently retires its address. Optional `locks.venueKey` does not
+enable spot staking; the stake custody coordinator is not activated in this build.

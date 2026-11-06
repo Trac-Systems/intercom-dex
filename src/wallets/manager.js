@@ -1,3 +1,4 @@
+import { accountStakeBalances } from '../stake/accounting.js';
 import { randomBytes, createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,10 +47,10 @@ export class WalletManager {
 
   state() {
     return { offers: [...(this.role.mine?.values() ?? [])], trades: [...(this.role.host?.trades.values() ?? [])].map(t => ({ role: t.role, state: t.state })),
-      withdrawals: this.pending(), ...(this.role.locks ? { locks: [...this.role.locks.positions.values()] } : {}) };
+      withdrawals: this.pending(), ...(this.role.stakeRuntime?.client ? { stakeOperation: this.store.get('stake-client-operation') } : {}), ...(this.role.locks ? { locks: [...this.role.locks.positions.values()] } : {}) };
   }
 
-  async balances({ positionId = null } = {}) {
+  async balances({ positionId = null, withFeeQuote = false } = {}) {
     // Trade clocks and polling progress can change on every read. Snapshot before awaiting either chain,
     // including in-place updates, and compare only the funds held by the two accounting results.
     const before = cloneState(this.state()), beforeNow = Math.floor(Date.now() / 1000);
@@ -57,12 +58,13 @@ export class WalletManager {
     const account = (state, now) => {
       let result = accountBalances({ balances, ...state, now, trader: this.config.role === 'trader', feeTnk: balances.feeTnk,
         registry: version => this.role.registry.snapshot(version) });
+      if (this.role.stakeRuntime?.client) result = accountStakeBalances(result, state.stakeOperation, balances.feeTnk);
       if (this.role.locks) result = accountLockBalances(result, state.locks.filter(p => p.positionId !== positionId), this.role.locks.me.lockKey, balances.feeTnk);
       return result;
     };
     const result = conservativeBalances(account(before, beforeNow), account(after, Math.floor(Date.now() / 1000)));
     if (balances.collectors) Object.assign(result.USDC, { collectedFees: balances.collectedFees, collectors: balances.collectors });
-    return result;
+    return withFeeQuote ? { balances: result, feeTnk: balances.feeTnk } : result;
   }
 
   // Withdrawals and payouts go to wallets, not to token accounts (for SOL, not to anything a program other than System
@@ -95,9 +97,14 @@ export class WalletManager {
   // Checked before every new offer and take.
   async requireFunds(terms) {
     await this.checkClock();
-    const balances = await this.balances(), asset = terms.role === 'buyer' ? 'USDC' : terms.base.id;
+    const { balances, feeTnk } = await this.balances({ withFeeQuote: true }), asset = terms.role === 'buyer' ? 'USDC' : terms.base.id;
     const amount = terms.role === 'buyer' ? calculateFees(BigInt(terms.quoteAmount), terms.fees.platformFeeBps, terms.fees.tradeFeeBps).totalAmount : BigInt(terms.baseAmount);
     if (amount > BigInt(balances[asset].free)) throw new Error('Insufficient free balance for this offer or trade');
+    if (terms.role === 'seller') {
+      if (typeof feeTnk !== 'string' || !/^(0|[1-9][0-9]*)$/.test(feeTnk)) throw new Error('TNK transfer fee is unavailable');
+      const row = balances.TNK, held = BigInt(row.committed) - BigInt(row.breakdown.escrow) - BigInt(row.breakdown.locked ?? '0');
+      if (BigInt(row.wallet) < held + BigInt(feeTnk) + (asset === 'TNK' ? amount : 0n)) throw new Error('Insufficient TNK for the transfer fee and existing reservations');
+    }
     // The venue lists no buy offer from a wallet below MIN_SOL, and a buyer's USDC lock needs it.
     if (terms.role === 'buyer' && BigInt(balances.SOL.wallet) < BigInt(MIN_SOL)) throw new Error(`Keep at least ${Number(MIN_SOL) / 1e9} SOL in the wallet for Solana fees and the USDC lock`);
   }

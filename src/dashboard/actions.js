@@ -5,6 +5,8 @@ import { calculateFees } from '../solana/escrow.js';
 import { amountUnits, withdrawalDestination } from '../wallets/accounting.js';
 import { amount, shortKey } from './format.js';
 import { withdrawalView } from './model.js';
+import { deliveryView, bondView, resetUsd, usdReset, saleBond, buyerNeedsUpdate, draining } from './stake.js';
+import { saleBondText, buyBondText, dollars, atRisk, duration, ALARM } from './static/stake-text.js';
 import { STALE_OFFER_MESSAGE } from '../market/book.js';
 import { lockError } from '../locks/position.js';
 
@@ -39,6 +41,18 @@ export function createActions({ config, role, wallets = null, balances = null, n
     return free !== null && units > free ? `You have ${amount(free, asset).text} ${asset} free; this needs ${amount(units, asset).text} ${asset}.` : null;
   };
 
+  // A sale's bond as the core sets it in the signed terms, as a preview line, or why the core refuses to start it.
+  const bond = input => {
+    const t = saleBondText(saleBond(role, { ...input, side: 'sell' }, Math.floor(Date.now() / 1000)));
+    if (!t) return { lines: [], warning: null, refused: false };
+    return t.ok ? { lines: [['Bond reserved for this sale', t.what]], warning: null, refused: false } : { lines: [], warning: t.text, refused: true };
+  };
+  // The seller's bond for a take of a sell offer, when the core can tell it now; the signers check it at the start.
+  const sellerBond = input => { const t = buyBondText(saleBond(role, { ...input, side: 'buy' }, Math.floor(Date.now() / 1000))); return t ? [['Seller’s bond', t]] : []; };
+  // While the venue drains, the core starts no new trade on either side.
+  const halted = () => (draining(registry()) ? 'No new trades for now: the venue is moving stakes to new signers.' : null);
+  const warnings = (...list) => list.filter(Boolean).join(' ') || null;
+
   const trader = {
     async offer(input) {
       const reg = registry();
@@ -54,17 +68,18 @@ export function createActions({ config, role, wallets = null, balances = null, n
       if (!Number.isSafeInteger(ttlMin) || ttlMin < 1 || ttlMin > 1440) throw new Error('Offer time must be 1 to 1440 minutes');
       const quote = quoteAmount(pair, baseAmount, price);
       const lock = side === 'buy' ? calculateFees(BigInt(quote), reg.fee.platformFeeBps, reg.fee.tradeFeeBps).totalAmount : BigInt(baseAmount);
-      const lockAsset = side === 'buy' ? 'USDC' : base;
+      const lockAsset = side === 'buy' ? 'USDC' : base, sale = side === 'sell' ? bond({ pair: pair.pair, amount: baseAmount, price }) : { lines: [], warning: halted(), refused: !!halted() };
       return { input: { pair: pair.pair, side, baseAmount, price, ttlSec: ttlMin * 60 }, title: `${side === 'buy' ? 'Buy' : 'Sell'} ${amount(baseAmount, base).text} ${base}`,
         lines: [
           ['Price', `${price} USDC per ${base}`],
           [side === 'buy' ? 'You pay' : 'You receive', `${amount(quote, 'USDC').text} USDC`],
           ['Set aside while the offer is open', `${amount(lock, lockAsset).text} ${lockAsset}${side === 'buy' ? ' (includes fees)' : ''}`],
+          ...sale.lines,
           ['Offer open for', `${ttlMin} min`],
         ],
         note: side === 'buy' ? 'USDC is locked only when someone takes the offer and signers confirm; until then it stays in your wallet, set aside.'
-          : `Your ${base} is sent only after the buyer's USDC is locked and signers confirmed.`,
-        warning: await shortfall(lockAsset, lock) };
+          : `Your ${base} is sent only after the buyer's USDC is locked and signers confirmed. The bond is paid to the buyer only if you do not deliver in time.`,
+        warning: warnings(await shortfall(lockAsset, lock), sale.warning), blocked: sale.refused };
     },
     run: { offer: input => role.makeOffer(input) },
 
@@ -84,12 +99,23 @@ export function createActions({ config, role, wallets = null, balances = null, n
       }
       const quote = quoteAmount(pair, baseAmount, o.price), buying = o.side === 'sell';
       const cost = calculateFees(BigInt(quote), reg.fee.platformFeeBps, reg.fee.tradeFeeBps).totalAmount;
+      const sale = buying ? { lines: halted() ? [] : sellerBond({ pair: o.pair, amount: baseAmount, offerId }), warning: halted(), refused: !!halted() } : bond({ pair: o.pair, amount: baseAmount, offerId });
+      const update = buying && buyerNeedsUpdate(role, Math.floor(Date.now() / 1000)) ? 'Sellers here post a bond, and only a newer version of this app can receive it. Update the app to buy.' : null;
       return { input: { offerId, baseAmount, price: o.price }, title: `${buying ? 'Buy' : 'Sell'} ${amount(baseAmount, base).text} ${base} at ${o.price} USDC`,
-        lines: buying ? [['You lock', `${amount(cost, 'USDC').text} USDC (includes fees)`], ['You receive', `${amount(baseAmount, base).text} ${base}`]]
-          : [['You send', `${amount(baseAmount, base).text} ${base}`], ['You receive', `${amount(quote, 'USDC').text} USDC`]],
+        lines: buying ? [['You lock', `${amount(cost, 'USDC').text} USDC (includes fees)`], ['You receive', `${amount(baseAmount, base).text} ${base}`], ...sale.lines]
+          : [['You send', `${amount(baseAmount, base).text} ${base}`], ['You receive', `${amount(quote, 'USDC').text} USDC`], ...sale.lines],
         note: (buying ? 'Your USDC is locked on Solana. If the seller does not deliver in time, it comes back to you automatically.'
           : "You send only after the buyer's USDC is locked and signers confirmed.") + (nextOffer ? ' If this offer\'s maker does not answer, the next offer at this price is taken instead.' : ''),
-        warning: await shortfall(buying ? 'USDC' : base, buying ? cost : BigInt(baseAmount)) };
+        warning: warnings(update, await shortfall(buying ? 'USDC' : base, buying ? cost : BigInt(baseAmount)), sale.warning), blocked: !!update || sale.refused };
+    },
+
+    // The exact bond for the sell ticket while the reader types: null while the venue does not bond sales.
+    async saleBond(input) {
+      const reg = registry();
+      if (!reg) throw new Error('No signer list from the venue yet');
+      const pair = registryPair(reg, text(input.pair, 32)), price = text(input.price, 40);
+      if (!PRICE.test(price)) throw new Error('Price must be a decimal number of USDC per ' + pair.base.id);
+      return { bond: saleBond(role, { pair: pair.pair, side: 'sell', amount: amountUnits(pair.base.id, text(input.amount, 100)).toString(), price }, Math.floor(Date.now() / 1000)) };
     },
 
     // The most of an offer the free balance pays for: all of a buy offer up to the free base, and of a sell offer the
@@ -123,9 +149,71 @@ export function createActions({ config, role, wallets = null, balances = null, n
         lines: [['Offer', `${o.side} ${amount(o.baseAmount, base).text} ${base} at ${o.price} USDC`]],
         note: 'Trades already running on this offer continue.' };
     },
+
+    // The RESET stake: one deposit amount, refused above the cap per address, with the core's own fee and split
+    // preview; withdrawals of free stake wait.
+    async stakeDeposit(input) {
+      const s = role.status().stake;
+      if (s.capUsd === null) throw new Error('This venue does not take stakes yet.');
+      if (draining(registry())) throw new Error('The venue is moving stakes to new signers and takes no new stakes for now. Your stake stays as it is.');
+      const units = amountUnits('RESET', text(input.amount, 100)), after = BigInt(s.locked) + BigInt(s.pending) + units;
+      const value = s.priceUsd ? resetUsd(after, s.priceUsd) : null;
+      if (value !== null && value > BigInt(s.capUsd)) {
+        const room = usdReset(BigInt(s.capUsd), s.priceUsd) - BigInt(s.locked) - BigInt(s.pending);
+        throw new Error(`This would bring your stake to ${dollars(Number(value) / 1e6)}; the limit is ${dollars(Number(s.capUsd) / 1e6)} per address. Deposit at most ${amount(room > 0n ? room : 0n, 'RESET').text} RESET.`);
+      }
+      const p = await role.stakePreview(units.toString()), tnk = v => `${amount(v, 'TNK').text} TNK`;
+      return { input: { amount: units.toString() }, title: `Stake ${amount(units, 'RESET').text} RESET`,
+        lines: [['Deposit', `${amount(units, 'RESET').text} RESET (about ${dollars(Number(p.depositUsd) / 1e6)})`],
+          ['Stake afterwards', `${amount(after, 'RESET').text} RESET${value === null ? '' : ` (about ${dollars(Number(value) / 1e6)})`}`],
+          ['Limit per address', dollars(Number(p.capUsd) / 1e6)],
+          ['TNK paid now', `${tnk(p.tnkTotal)}: ${tnk(p.tnkFee)} network fees and ${tnk(p.tnkReserve)} held for the return transfers`],
+          ['Withdrawing later', `waits ${duration(p.withdrawDelaySec)}`],
+          ['Returned by itself', `after ${duration(p.expiresAt - Math.floor(Date.now() / 1000))} unless withdrawn first`]],
+        note: 'Stake earns a share of the daily RESET rewards. Sellers need it to list: each sale reserves a bond from it, paid to the buyer only if the sale is not delivered in time. It counts once the signers confirm it.',
+        warning: await shortfall('RESET', units) };
+    },
+    // Free stake starts its wait now; stake backing a running sale is returned after that sale closes (the core keeps
+    // the request and starts that part's wait then). "all" is every piece, also the reserved ones.
+    async stakeWithdraw(input) {
+      const s = role.status().stake;
+      const free = BigInt(s.free), reserved = BigInt(s.reserved), all = input.amount === 'all', units = all ? free + reserved : amountUnits('RESET', text(input.amount, 100));
+      if (s.operationPending) throw new Error('A stake deposit or withdrawal is still running. Wait for it to finish.');
+      if (units === 0n) throw new Error('No stake to withdraw; what is left is already on its way.');
+      if (units > free + reserved) throw new Error(`You can withdraw at most ${amount(free + reserved, 'RESET').text} RESET; the rest is already on its way.`);
+      const wait = s.withdrawDelaySec === null ? 'the venue’s withdrawal wait' : duration(s.withdrawDelaySec);
+      const deferred = all ? reserved : units > free ? units - free : 0n;
+      return { input: { amount: all ? 'all' : units.toString() }, title: `Withdraw ${amount(units, 'RESET').text} RESET from your stake`,
+        lines: [['Amount', `${amount(units, 'RESET').text} RESET`],
+          all && deferred > 0n ? ['Free now', `${amount(units - deferred, 'RESET').text} RESET: waits ${wait}`] : ['Wait', wait],
+          ...(deferred > 0n ? [['Backing running sales', `${all ? '' : 'at least '}${amount(deferred, 'RESET').text} RESET: returned after the sale it backs closes, then waits ${wait}`]] : []),
+          ['Then', 'back to your Trac wallet']],
+        note: ['The RESET earns no rewards and covers no sales while it waits.', BigInt(s.openOffersUsd) > 0n ? 'Offers beyond what the rest of your stake covers are hidden.' : null,
+          deferred > 0n ? 'If a sale it backs is not delivered in time, that part goes to the buyer instead.' : null].filter(Boolean).join(' ') };
+    },
+
+    // Send the sale's original transfer again now, instead of at the next automatic try.
+    async retryDelivery(input) {
+      const key = text(input.key, 16), t = [...role.host.trades.values()].find(x => x.role === 'seller' && x.key.slice(0, 16) === key);
+      const row = t && role.status().trades.find(x => x.key === t.key), d = row && deliveryView(row.delivery, { bond: bondView(row.bond) });
+      if (!d || !ALARM.includes(d.state)) throw new Error('This sale has nothing to retry right now');
+      const terms = t.state.terms, coin = `${amount(terms.baseAmount, terms.base.id).text} ${terms.base.id}`;
+      return { input: { key }, title: `Send your ${coin} again`,
+        lines: [['Sale', `${coin} for ${amount(terms.quoteAmount, 'USDC').text} USDC`], ['At risk', atRisk(d.atRisk)]],
+        note: 'This sends the same transfer to the buyer again; it never starts a new one.' };
+    },
   };
-  trader.run.take = input => nextOffer ? nextOffer.take(input.offerId, input.baseAmount, input.price) : role.takeOffer(input.offerId, input.baseAmount, input.price);
+  // The core refuses a buyer without the stake capability with exactly "update the app".
+  trader.run.take = input => (nextOffer ? nextOffer.take(input.offerId, input.baseAmount, input.price) : role.takeOffer(input.offerId, input.baseAmount, input.price))
+    .catch(e => { throw e.message === 'update the app' ? new Error('Sellers here post a bond, and only a newer version of this app can receive it. Update the app to buy.') : e; });
   trader.run.cancel = input => role.cancelOffer(input.offerId);
+  trader.run.stakeDeposit = input => role.stakeDeposit(input.amount);
+  // The Done dialog says how much of it waits for a running sale to close (the core's stake.withdrawal).
+  trader.run.stakeWithdraw = async input => {
+    const r = await role.stakeWithdraw(input.amount), w = role.status().stake.withdrawal;
+    return w?.pending && w.deferred !== '0' ? { ...r, deferred: amount(w.deferred, 'RESET') } : r;
+  };
+  trader.run.retryDelivery = input => role.retryDelivery([...role.host.trades.keys()].find(k => k.slice(0, 16) === input.key));
 
   const withdraw = async input => {
     if (!wallets) throw new Error('This role has no wallets');
@@ -155,13 +243,14 @@ export function createActions({ config, role, wallets = null, balances = null, n
     },
   };
 
-  const previews = kind === 'trader' ? { offer: trader.offer, take: trader.take, cancel: trader.cancel, withdraw }
+  const previews = kind === 'trader' ? { offer: trader.offer, take: trader.take, cancel: trader.cancel, withdraw,
+    stakeDeposit: trader.stakeDeposit, stakeWithdraw: trader.stakeWithdraw, retryDelivery: trader.retryDelivery }
     : kind === 'service' ? { markPaid: service.markPaid, withdraw } : {};
   const runs = kind === 'trader' ? { ...trader.run, withdraw: runWithdraw }
     : kind === 'service' ? { markPaid: input => role.markPaid(input.dexKey, input.tradeIds), withdraw: runWithdraw } : {};
   return { names: Object.keys(previews), preview: (name, input) => previews[name](input ?? {}), run: (name, input) => runs[name](input),
     ...(kind === 'trader' && role.locks ? { locks: createLockActions(role.locks) } : {}),
-    maxTake: kind === 'trader' ? input => trader.maxTake(input ?? {}) : null };
+    maxTake: kind === 'trader' ? input => trader.maxTake(input ?? {}) : null, saleBond: kind === 'trader' ? input => trader.saleBond(input ?? {}) : null };
 }
 
 export function createLockActions(client) {

@@ -41,6 +41,7 @@ test('running service control authenticates fee routes; the same dispatch is abs
     writeFileSync(configFile, JSON.stringify(config)); writeFileSync(tokenFile, 'ab'.repeat(32), { mode: 0o600 });
     const sources = {
       '/src/net/bridge.js': `export class Bridge { async connect(){return this} async info(){return {info:{role:'${role}',servicePeerKey:'${'cd'.repeat(32)}',peerPubkey:'${'cd'.repeat(32)}',networkProfile:${JSON.stringify(resolveNetwork(config))}}}} on(){} close(){} }`,
+      '/src/stake/runtime.js': 'export function createStakeRuntime(){return {async start(){},stop(){}}}',
       '/src/proof/lockproof.js': 'export async function checkProofFiles(){} export async function verifyLock(){} export async function proveLock(){} export async function makeLockCertificate(){}',
       '/src/roles/service.js': `export class Service {constructor(input){Object.assign(this,input);this.registry=input.registryInput;this.host={trades:new Map()}} async start(){} stop(){} status(){return {}} async publishFees(fee){return this.registry={...this.registry,version:this.registry.version+1,fee}}}`,
       '/src/roles/trader.js': 'export class Trader {constructor(input){Object.assign(this,input);this.host={trades:new Map()};this.mine=new Map()} async start(){} stop(){} status(){return {}}}',

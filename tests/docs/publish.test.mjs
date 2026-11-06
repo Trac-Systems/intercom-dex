@@ -107,7 +107,7 @@ test('release text checks allow protocol terms, generated fixtures and exact pub
 });
 
 test('release file checks inspect new text and names without following symlinks or private artifacts', () => {
-  const area = join(root, '.test-tmp/publish/scanner');
+  const area = join(process.env.TMPDIR ?? join(root, '.test-tmp'), 'publish/scanner');
   mkdirSync(area, { recursive: true });
   const directory = mkdtempSync(join(area, 'files-'));
   writeFileSync(join(directory, 'public.md'), 'Public documentation');

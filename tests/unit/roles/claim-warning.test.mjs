@@ -41,7 +41,7 @@ test('failed claims persist, surface in status, log once per distinct reason acr
   assert.equal(f.trade.state.claimFailure.reason, f.results.value.reason);
   assert.deepEqual(f.records.get('trade-claim-test').state.claimFailure, f.trade.state.claimFailure);
   // Exercise the real status serializer with the host under test.
-  const statusRole = { host: f.host, pruneOffers() {}, registry: {}, onlineSigners: () => [], certificates: { available: () => [] },
+  const statusRole = { host: f.host, store: f.host.store, deliveryProjection: Trader.prototype.deliveryProjection, bondProjection: Trader.prototype.bondProjection, pruneOffers() {}, stakeView: () => ({}), registry: {}, onlineSigners: () => [], certificates: { available: () => [] },
     offers: new Map(), mine: new Map(), book: new Map(), tickers: new Map(), readChat: () => [], network: { status: () => ({ reconnecting: false }) } };
   const warning = Trader.prototype.status.call(statusRole).trades[0].warning;
   assert.match(warning, /insufficient funds for rent/); assert.ok(warning.includes(f.trade.state.terms.seller.solRecipient));

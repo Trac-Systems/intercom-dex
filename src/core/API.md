@@ -362,7 +362,7 @@ inside `take` and `accept`; sealed shares are inside `deal`. The standalone
 taker's commitment from `take`; it separates simultaneous negotiations by the
 same parties on one offer. `decline` is `{offerId,takeNonce,reason}`, where
 `takeNonce` is the take envelope's nonce; reasons are `busy`, `insufficient`,
-`signers`, `expired`, `invalid`, `version`, or `reset-gateway` (RESET transfers paused).
+`signers`, `expired`, `invalid`, `version`, `reset-gateway` (RESET transfers paused), or `update the app` (buyer stake capability missing).
 Pre-terms `abort` can carry the
 commitment; after terms, its `tradeId` identifies the negotiation.
 `working:{tradeId,step:'certificate'}` is sent only by the buyer during on-demand proving.
@@ -1062,3 +1062,264 @@ are refused. Errors return `{ok:false,reason,whatToDo}`. `already_taken` before 
 RESET/TNK locks require enough surviving signers; handover can replace signers while at least k survive.
 Put writers can refund unclaimed USDC after `refundAfter`. See [SKILL.md](../../SKILL.md#locks-tools) for
 all seven tools, settings, states and actionable failures.
+
+## Stake and reward status contract
+
+The local trader `GET /status` and MCP `dex_status` add these fields. They are also
+available through `GET /stake` and `GET /rewards`, `dex_stake` / `dex_rewards`, and
+`dex stake status` / `dex rewards status`:
+
+```js
+stake: { locked, reserved, free, withdrawing, pending, coverageUsd, openOffersUsd,
+  suggestedUsd, capUsd, withdrawDelaySec, withdrawingUntil, penaltyBps, minPenaltyUsd, priceUsd,
+  state: 'none'|'pending'|'active'|'withdrawing', reason?, formatted }
+rewards: { unpaid, paidTotal, lastPayout?, weight: 'active'|'idle'|'none', ratePerDay,
+  poolState: 'active'|'empty'|'unknown', poolBalance, dailyBudget, activeWeightBps, forfeited?, formatted }
+offers[i].pause?: { code: 'stake_short'|'stake_stale'|'coin_short'|'tnk_short'|'offline'|'price_unavailable', message }
+trades[i].bond?: { state: 'reserving'|'reserved'|'released'|'decided-being-collected'|'paid',
+  reservationId, targetReset, payoutReset, payoutUsd, outcome?, transactions, tx?, formatted }
+trades[i].delivery?: { state, reason?, deadline, deadlineUnix, atRiskUsd, atRiskReset, tx?, formatted }
+warnings: [{ code, severity: 'red'|'yellow'|'info', tradeId?, message, deadline?, deadlineUnix?, atRiskUsd?, atRiskReset? }]
+```
+
+Own paused offers are in the existing `mine` array; public `offers` contains only
+eligible offers. All amount fields are canonical integer strings. RESET uses 8
+decimals and `*Usd` uses 6; `formatted` is a sibling map of decimal strings with
+the same field names. Unknown coverage, pool balance, budget or unavailable policy
+amounts are `null`, with formatted `null`; unknown is never presented as a zero
+balance. `reserved` is a subset of `locked`. Suggested USD is rounded up from
+`openOffersUsd * penaltyBps * suggestBufferBps / 100000000`; open sales include the
+separately floored USDC fees. Only certified coverage may populate `coverageUsd`.
+Times use ISO UTC plus integer Unix seconds (`deadline`, `deadlineUnix`).
+`withdrawingUntil` is the latest certified maturity among withdrawing pieces, or null
+while a barrier is incomplete. `priceUsd` is a decimal USD-per-RESET string from a
+fresh certified reference, or null. `withdrawDelaySec`, `penaltyBps`, `minPenaltyUsd`
+and `activeWeightBps` come from the effective signed policy; absent policy yields null.
+
+Delivery states are exactly `delivery_sending`, `delivery_failed`,
+`delivery_overdue`, `delivery_confirming`, `delivered`, `penalty_paid`. Failure
+reasons are `coin_short`, `tnk_short`, `gateway_paused`, `offline`, `send_failed`, or
+`confirmation_pending`. The adapter's internal `gateway_unavailable` maps to public `gateway_paused`. Failed/overdue warnings include the fixed RESET amount,
+reference USD estimate and deadline. A legacy trade carries zero stake at risk;
+no collateral entitlement is added retrospectively. A delivery status is a
+projection, never a penalty authorization or proof of transfer absence.
+
+`bond` is absent for legacy trades. `reserved` requires distinct accepted original
+committee acknowledgements; an aborted or expired trade remains reserved until its
+certified closure. `released` means a verified delivered/unfunded closure, without
+a transfer. `decided-being-collected` means a verified buyer award. `paid` requires
+an original quorum collection certificate for every promised principal. `transactions`
+contains verified RESET collection hashes, including partial collections; `tx` is
+present for a fully collected single-transfer award. Neither field is the seller's
+delivery transaction (`delivery.tx`). The dashboard consumes these projections and
+does not read custody journals or call admission internals.
+
+`role.bondPreview({pair,side,amount,price?,offerId?})` is a synchronous, read-only
+ticket preview. `amount` is base-asset units, `side` is the caller's trade side,
+and `price` is decimal USDC per whole base asset. A selected counterparty `offerId`
+supplies its bound price; buys require that seller's offer and a cached certified
+inventory. An unpriced ticket or unavailable seller snapshot returns a fixed
+refusal rather than an estimate. Success returns `{ok:true,pair,side,amount,price,
+bond,formatted}` with the exact `bond` that the core's terms allocator would use
+at that instant. It reserves nothing; terms revalidate freshness and allocation.
+Refusals use the existing structured error envelope. `bond_stale {retrySec}` is
+distinct from insufficient stake: a signed inventory older than the effective
+`admissionFreshSec` (or
+future-dated) cannot support a preview or admission. The offer pause is
+`stake_stale`. The bound is inclusive. `admissionFreshSec` is a venue-signed
+economic setting, default 180 seconds and app bounds 60–600, with the same
+one-hour publication notice. It also bounds certified admission price age at
+proposal, terms validation and each first ack; source-day and signature checks
+remain mandatory. Older signed policies omitting it retain 60 seconds and their
+original policy digest.
+
+`priceLookbackSec` is a signed economic setting with default 604800 seconds and
+inclusive app bounds 0–2592000, subject to the same one-hour publication notice.
+An empty UTC day uses the most recent certified completion, capped by the median
+of that completion's entire UTC day, only while its age is within this limit.
+Zero or an omitted historical setting preserves current-day-only pricing. The
+reference's `utcDay` identifies the source day; no entry is re-dated. Checkpoint
+freshness, complete history and venue/original quorum signatures still apply.
+`CompletionLog.reference(checkpoint, now, maxAgeSec=60, lookbackSec=0)` and
+`verifyReference(reference, checkpoint, now, maxAgeSec=60, lookbackSec=0)` accept
+the authenticated policy's bounds. Runtime callers never use an unsigned override.
+
+`dex_stake` accepts exactly `{action:'deposit',amount}`, `{action:'withdraw',amount?}`
+or `{action:'status'}`. Amount is a positive decimal RESET string with at most
+eight places; withdrawal also accepts `all` and defaults to all. `dex_rewards`
+accepts `{action:'status'}`. CLI amounts are positional. Deposit/withdrawal routes
+are `POST /stake/deposit {amount}` and `POST /stake/withdraw {amount?}`. Existing
+loopback bearer authentication applies; unknown input fields are rejected.
+Structured errors retain `{ok,code,error,message,details,money,operationId?,tradeId?}`
+through HTTP, MCP and CLI. Error schemas live in `src/stake/errors.js`.
+
+The custody coordinator runs on the separate authenticated `intercom-dex:bonds`
+channel with the original stake epoch. A signed `sellerBond.custody` policy and
+usable certified price under the effective signed lookback are required to create a deposit. Successful local
+custody includes exact funding, certified inventory, withdrawal barriers, the
+signed wait, sealed return and retirement. Pending operations resume automatically;
+`stake.operationId` and `stake.operationPending` identify their progress. Poll
+status after an accepted request rather than originating a new deposit.
+
+Direct dashboard methods are `role.stakeDeposit(units)`,
+`role.stakeWithdraw(units|'all')`, `role.stakePreview(units)`, and
+`role.retryDelivery(fullHostTradeKey)`. Role amounts are integer base-unit strings.
+The preview includes `{amount,pieces,tnkFee,tnkReserve,tnkTotal,maintenanceTnk,depositUsd,capUsd,
+expiresAt,withdrawDelaySec,capacityPending:true}` without sending funds. `maintenanceTnk`
+is the lifetime ceiling for later replacement funding, not an upfront charge.
+An exact numeric withdrawal can retire a larger piece and re-fund only its surplus.
+The original quorum certifies the replacement descriptors before source release;
+source collections must retire capacity before new grants. Replacement principal
+stays held in ordinary wallet accounting, expiry never extends, and fees cannot
+exceed the retained lineage allowance. Missing price, fees, allowance or usable
+lifetime leaves the request pending. At source expiry, safe expiry return takes
+precedence and no replacement is funded. Existing certified returns use their
+original epoch.
+
+`withdraw all` records the current owned inventory, including reserved pieces;
+later deposits are not added to that intent. Original signers persist withdrawal
+intents before acknowledging them, so a certified trade closure cannot race into
+another reservation. Free portions start their own barriers immediately. Reserved
+portions wait for closure and then start their full cooldown at the latest quorum
+acceptance. An award retains priority; forfeited principal is never reported as
+returned. Each portion resumes from its saved operation after restart.
+`stake.withdrawal` exposes `{operationId,requested,pending,deferred,withdrawing,
+returned,forfeited,formatted}` with exact RESET strings and formatted amounts.
+One request may span original epochs (up to the 200-piece address cap). Each
+portion retains its own policy, members, generation, cooldown and collection
+certificate; quorums are never mixed. Returns require no fresh price. Surplus
+replacement still needs an admitting original epoch and its retained allowance.
+
+After the original funding window, the client reconciles existing signed transfer
+intents and signs no new funding transfer. An unadmitted lock can obtain an original
+quorum `funding-refund`, followed by `seller-unfunded` return and collection. Members
+that already voted funded refuse a competing refund. Ambiguous partial quorums
+remain pending. RESET principal and TNK-only residue both use the existing sealed
+release/sweep journal, without a fresh price or withdrawal cooldown. Zero-principal
+refund collections may carry `asset:'TNK'` and a null transaction for an empty lock;
+ordinary principal collections still require a finalized RESET transaction.
+
+The venue's loopback bearer API supports `POST /stake/quiesce {}` and
+`POST /stake/handoff {nextPolicy}`. Quiesce stops new admissions and publishes a
+stop time 30 finalized-clock seconds ahead (or retains the existing stop).
+Handoff requires a distinct successor, both epochs closed to admission, unchanged
+effective economic settings with successor-bound publication receipts, and no
+pending economic schedule. It durably collects the original capacity certificate,
+obtains at least three successor adoption confirmations, then publishes the new
+policy. Repeating the same request resumes the same operation. The response is
+`{ok:true,epochId,previousEpochId,acceptNew:false,adopted,state:'draining'}`.
+
+This draining workflow preserves original custody committees, reservations,
+withdrawals, proof clocks, reward liabilities and histories. Original collection
+certificates retire transferred capacity once. `POST /stake/resume {}` reconciles
+the original price/day prefix, requires successor history adoption/readiness
+quorums, and adopts the unchanged payout authority's signed ledger hash, account
+liabilities, counted-chain cursor and payment sequence. Unresolved original
+payments or missing historical captures refuse readiness. Price entries retain
+their original signatures, order and completion times. Reward checkpoints obtain
+each retained committee's contemporaneous inventory certificate before including
+its pieces. The payout ledger and audit archive retain paid, unpaid and forfeited
+amounts. Successful resume returns `{ok:true,epochId,acceptNew:true,state:'active'}`;
+repeating it resumes the same journal. Large handoff pagination remains release
+work. Oversized or divergent capacity
+snapshots refuse safely. Original keys/shares are never handed to new members.
+Pending unadmitted funding must finish before a signer freezes its handoff vote;
+the workflow does not strand that operation behind a changed price epoch.
+The venue also requires the matching original funded archive for every held
+capacity piece before adoption. An owner can finish a missing archive reply
+under the original epoch and retry the same handoff certificate.
+
+Bonded admission binds `terms.bond` and optional participant `boxKey` / `stakeVersion`
+into signed terms; the existing ack contains the exact reservation digest. An armed
+policy refuses buyers missing capability 1 with exactly `update the app`, independently
+of the signer software floor. The local penalty runner and non-empty live-offer reward
+checkpoints are implemented. Release scope and the activation order are in
+`docs/STAKE.md` and `docs/OPERATORS.md`.
+
+`rewards.lastPayout` validates its public fields and adds `atUnix` plus
+`formatted.amount`. Optional `lastPayout.link` and `delivery.link` accept only HTTPS
+URLs without embedded credentials. Local-chain transactions have no public explorer
+link. No explorer route is guessed from an arbitrary hash. Status never forwards
+prepared bytes or internal wallet records.
+
+`POST /retry-delivery {tradeId}` resumes an active own seller delivery. The bearer
+token is required; extra fields are rejected. A durable ten-second throttle
+returns `throttled: true` and `retryAfterSec`. The response includes the current
+`delivery` projection. The existing reducer controls signing and deadlines;
+after its send deadline this route performs read-only recovery.
+
+The Trac adapter also exposes
+`retryOriginalTransfer({terms,tradeId,overdueDelaySec})` for the bonded
+trade runner. Its caller must supply grace from the frozen certified policy.
+It requires an existing durable intent, reuses its exact bytes without a wallet,
+and allows submission through `sendBy + overdueDelaySec`, inclusive. Beyond that
+boundary it only reconciles finality. The ordinary `sendTransfer` deadline stays
+unchanged. The trader runner durably schedules automatic original-byte retries through the frozen grace.
+
+`auditRewardBlock({summary,payoutKey,context,block,settings,poolBalance,unpaidBefore,
+inventoryCertificate,bookCertificate,priceCertificate})` verifies the publisher
+signature, pinned certificate scope and exact reward arithmetic, then returns the
+reproduced summary body. `block` is `{height,blockHash,previousHash,at}`. The caller
+independently verifies that block, effective signed settings, confirmed pool
+balance and unpaid liabilities. The function requires no payout secret and
+rejects mismatched facts or allocations, even if signed by the publisher.
+
+
+The signed optional `sellerBond.rewardService: {dexKey,tracAddr}` binds the reward
+publisher and ordinary pool wallet. `PayoutRole` observes RESET's signed counted
+clock, starts at its next height, requests original-member inventory/book/price
+certificates bound by a `reward-head`, and runs one journaled payment at a time.
+`rewardStatus({address})` returns `{address,rewards}` over authenticated stake RPC.
+`rewardAudit({height})` returns that height's signed summary, effective settings
+and source certificates. Trader status polls the configured identity and marks
+pool data unknown after 60 seconds without a valid reply. Live-offer backing is certified against original signer observations and balances.
+Missing historical captures stop accrual; they are never reconstructed from current state.
+
+The fixed `stake.reason` list is `price_unavailable`, `over_cap`, `tnk_short`.
+These are dashboard projection reasons, separate from the structured `bond_*`
+action errors. Already formatted reward status can be passed through the role
+boundary again; `lastPayout.formatted` is recomputed and other unknown fields fail.
+
+`solana.stakeEscrowHistory({terms,hashHex,fromSlot,throughSlot})` returns either
+`{status:'unknown',historyComplete:false,reason}` or a complete finalized range
+with `locks:[{signature,slot,includedAt,exact}]`, `settlements` (claimed/refunded),
+`historyDigest`, `evidenceDigest`, and the retained `escrowState` when an exact
+init exists. It scans at most 2000 signatures per reader and requires two
+independent agreeing readers. The caller must authenticate the original lower
+slot bound; neither an arbitrary narrow range nor this read alone authorizes a
+penalty. Unsupported versioned transactions and missing history remain unknown.
+
+
+### Bonded penalty runtime
+
+`terms.bond` binds protocol, effective policy/digest, original epoch, selected
+`{unitId,generation}` pieces, target/fixed RESET payout and reference USD value,
+expiry floor, shared `historyFromSlot`, grace/proof durations, certified inventory and certified price reference.
+Seller refreshes the proposal after chain randomness; both parties validate and sign
+that final proposal before the original ack round. `ack.bond` binds reservation ID,
+piece digest, policy, epoch and payout. Signer ledgers retain original signed terms,
+signatures, policy and finalized lower history slot with the atomic reservation.
+The shared lower slot is the accepted randomness slot, checked by both traders;
+it is not each signer's separately observed admission slot.
+
+The peer bridge reads `dex_stake_position` and `dex_stake_delivery` only from signed
+state. A cutoff names `{bootstrap,coreKey,length,root}` and requires three identical
+original signer votes. Delivery checks one exact hash against that historical MSB
+checkout and independently final RESET/TNK contents. Results are `in-time`, `late`,
+`invalid`, or `unknown`. Exact pending RESET commands defer; random missing hashes
+and definitively wrong commands cannot manufacture a pause.
+
+`PenaltySigner` stores received proof before verification, signs receipts, samples
+reader/venue/gateway health and votes on conservative contiguous proof time.
+`PenaltyCoordinator` retains fixed proposals, certified cutoff/clock, closing evidence
+and decision. Only complete finalized exact Solana history can establish a qualifying
+lock or rule out a claim. Delivery, closure and terminal vote barriers are durable
+and mutually exclusive; saved share publication checks the barrier again.
+
+Buyer collection uses only sealed original custody shares for the certified buyer
+address/box key, the original piece address, and the existing journaled sweep.
+`penaltyCollection` archives the certified collection and retires the seller's local
+projection. `penalty_paid` requires collection certificates for every awarded piece.
+`penaltyAwards({after})` pages at most 32 decisions with original funded certificates;
+the payout role verifies them and forfeits unpaid liability before starting sends.
+No stake secret, prepared payout bytes or private share appears in these projections.

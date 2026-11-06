@@ -177,3 +177,64 @@ test('an excessively delayed wallet response remains unknown rather than becomin
   assert.equal(funds.balances(a.offer), null);
   assert.equal(funds.allocate([a]).get('a'), a.offer.baseAmount, 'documented unknown-balance behavior');
 });
+
+test('stake policy requires fresh full sell balances and allocates coin and TNK fees across aliases', async () => {
+  const f = setup(); f.funds.fullSells = () => true;
+  const rows = [0, 1].map(i => ({ offer: { ...offer('sell', 1), offerId: String(i), baseAmount: '100000000', price: '5' }, pair: RESET, firstSeen: i }));
+  assert.equal(f.funds.funded(rows[0].offer, RESET), false, 'unknown balances pause sells');
+  f.wallets.set('trac1', { RESET: '150000000', TNK: (2n * BigInt(FEE)).toString(), feeTnk: FEE });
+  f.funds.refresh(rows.map(r => r.offer)); await f.settle();
+  const sizes = f.funds.allocate(rows);
+  assert.equal(sizes.get('0'), '100000000'); assert.equal(sizes.get('1'), '0', 'full offer required, no partial funding');
+  f.wallets.set('trac1', { RESET: '200000000', TNK: FEE, feeTnk: FEE }); f.clock.t += 60;
+  assert.equal(f.funds.funded(rows[0].offer, RESET), false, 'stale balance is not live coverage');
+  f.funds.refresh(rows.map(r => r.offer)); await f.settle();
+  assert.equal(f.funds.allocate(rows).get('1'), '0', 'one transfer fee cannot back two live offers');
+  f.clock.t += 60; f.wallets.delete('trac1'); f.funds.refresh(rows.map(r => r.offer)); await f.settle();
+  assert.equal(f.funds.funded(rows[0].offer, RESET), false, 'reader failure remains paused');
+});
+
+test('stake sell allocation includes pending seller transfers and TNK sold plus its fee', async () => {
+  const f = setup(); f.funds.fullSells = () => true;
+  const seller = { ...offer('sell', 1), offerId: 'one', baseAmount: '100000000', price: '5' };
+  const rows = [{ offer: seller, pair: RESET, firstSeen: 0 }];
+  f.wallets.set('trac1', { RESET: '100000000', TNK: (2n * BigInt(FEE)).toString(), feeTnk: FEE });
+  f.funds.refresh([seller]); await f.settle();
+  assert.equal(f.funds.allocate(rows, new Map(), [{ seller: { tracAddr: 'trac1' }, base: { id: 'RESET' }, baseAmount: '1' }]).get('one'), '0');
+  const tnk = { ...seller, baseAmount: FEE };
+  f.wallets.set('trac1', { RESET: '100000000', TNK: FEE, feeTnk: FEE }); f.clock.t += 60;
+  f.funds.refresh([tnk]); await f.settle();
+  assert.equal(f.funds.funded(tnk, TNK), false);
+  assert.equal(f.funds.allocate([{ offer: tnk, pair: TNK, firstSeen: 0 }]).get('one'), '0');
+});
+
+test('armed sell balances refresh before their strict freshness deadline without a periodic listing gap', async () => {
+  const f = setup(); f.funds.fullSells = () => true;
+  const seller = { ...offer('sell', 1), baseAmount: '20000' };
+  let finish;
+  f.funds.trac.balances = () => new Promise(resolve => { finish = resolve; });
+  const good = { TNK: FEE, RESET: '20000', feeTnk: FEE };
+  f.funds.refresh([seller]); f.clock.t = 1025; finish(good); await f.settle();
+  assert.equal(f.funds.funded(seller, RESET), true);
+  f.clock.t = 1030; f.funds.refresh([seller]);
+  assert.equal(f.funds.reading.size, 1, 'start refresh from request time, before the 60-second expiry');
+  f.clock.t = 1055; finish(good); await f.settle();
+  f.clock.t = 1060;
+  assert.equal(f.funds.funded(seller, RESET), true, 'a healthy refresh bridges the previous snapshot expiry');
+});
+
+test('early armed sell refresh still hides stale or failed balances at the original deadline', async () => {
+  const f = setup(); f.funds.fullSells = () => true;
+  const seller = { ...offer('sell', 1), baseAmount: '20000' };
+  f.wallets.set('trac1', { TNK: FEE, RESET: '20000', feeTnk: FEE });
+  f.funds.refresh([seller]); await f.settle();
+  let reject;
+  f.funds.trac.balances = () => new Promise((resolve, fail) => { reject = fail; });
+  f.clock.t += 30; f.funds.refresh([seller]);
+  assert.equal(f.funds.funded(seller, RESET), true, 'previous snapshot is still independently fresh');
+  f.clock.t += 30;
+  assert.equal(f.funds.funded(seller, RESET), false, 'pending refresh never extends snapshot freshness');
+  reject(Error('reader failed')); await f.settle();
+  assert.equal(f.funds.funded(seller, RESET), false);
+  f.funds.refresh([seller]); assert.equal(f.funds.reading.size, 0, 'failed reads retain bounded retry cadence');
+});

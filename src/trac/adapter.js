@@ -157,7 +157,7 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
     }
   }
 
-  async function send({ terms, tradeId, resume = false }) {
+  async function send({ terms, tradeId, resume = false, overdueDelaySec }) {
     const event = () => ({ type: 'transferSent', now: seconds(), tradeId });
     let intent, submitted = false;
     try {
@@ -167,6 +167,11 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       intent = intents.get(tradeId);
       submitted = Boolean(intent); // A crash can occur between the durable intent and submission.
       if (typeof resume !== 'boolean' || !supportedBase(terms?.base) || !isAmount(terms.baseAmount) || !Number.isSafeInteger(terms.sendBy) || terms.sendBy < 0) reject('invalid_terms');
+      const originalOnly = overdueDelaySec !== undefined;
+      if (originalOnly && (!Number.isSafeInteger(overdueDelaySec) || overdueDelaySec < 300 || overdueDelaySec > 21600 ||
+          !Number.isSafeInteger(terms.sendBy + overdueDelaySec))) reject('invalid_grace_policy');
+      if (originalOnly && !intent) reject('original_intent_required');
+      const pastDeadline = () => originalOnly ? seconds() > terms.sendBy + overdueDelaySec : seconds() >= terms.sendBy;
       const from = terms.seller?.tracAddr, to = terms.buyer?.tracAddr;
       const fromKey = publicKey(from), toKey = publicKey(to);
       const asset = terms.base.id;
@@ -178,11 +183,11 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
           proof = await bridge.call('dex_verify', { asset, txHash: intent.txHash, from: asset === 'RESET' ? fromKey : from,
             to: asset === 'RESET' ? toKey : to, minAmount: intent.amount, nonce: transferNonce(tradeId) });
         } catch (error) {
-          if (seconds() >= intent.sendBy) reject('past_send_deadline');
+          if (pastDeadline()) reject('past_send_deadline');
           throw error;
         }
         if (proof?.ok === true && proof.final === true && proof.amount === intent.amount) return { ...event(), ok: true, txHash: intent.txHash, sentAt: intent.sentAt };
-        if (seconds() >= intent.sendBy) reject('past_send_deadline');
+        if (pastDeadline()) reject('past_send_deadline');
         if (proof?.final === true) reject(proof.reason ?? 'transfer_mismatch');
       } else {
         const signed = await prepare({ terms, tradeId, from, to, fromKey, toKey });
@@ -201,6 +206,15 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
     } catch (error) {
       return { ...event(), ok: false, ...(submitted ? { unknown: true, txHash: intent.txHash, sentAt: intent.sentAt } : {}), reason: error.reason ?? 'send_failed' };
     }
+  }
+
+  function queuedSend({ terms, tradeId, resume = false, overdueDelaySec }) {
+    // Snapshot before waiting on the per-trade queue. Neither grace retry nor a conflicting caller can rewrite intent bytes.
+    const request = { tradeId, resume, overdueDelaySec, terms: terms && { pair: terms.pair, base: terms.base && { ...terms.base },
+      baseAmount: terms.baseAmount, sendBy: terms.sendBy, seller: { tracAddr: terms.seller?.tracAddr }, buyer: { tracAddr: terms.buyer?.tracAddr } } };
+    const pending = (sends.get(tradeId) ?? Promise.resolve()).then(() => send(request));
+    sends.set(tradeId, pending);
+    return pending.finally(() => { if (sends.get(tradeId) === pending) sends.delete(tradeId); });
   }
 
   return {
@@ -234,12 +248,13 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
         unknown: result?.final !== true, txHash, reason: result?.reason };
     },
     sendTransfer({ terms, tradeId, resume = false } = {}) {
-      // Snapshot the fields we use before asynchronous signing/prepare and serialize each trade.
-      const request = { tradeId, resume, terms: terms && { pair: terms.pair, base: terms.base && { ...terms.base }, baseAmount: terms.baseAmount, sendBy: terms.sendBy,
-        seller: { tracAddr: terms.seller?.tracAddr }, buyer: { tracAddr: terms.buyer?.tracAddr } } };
-      const pending = (sends.get(tradeId) ?? Promise.resolve()).then(() => send(request));
-      sends.set(tradeId, pending);
-      return pending.finally(() => { if (sends.get(tradeId) === pending) sends.delete(tradeId); });
+      return queuedSend({ terms, tradeId, resume });
+    },
+    // The caller supplies the grace frozen in certified trade policy, never a current registry override.
+    // This entry point cannot prepare/sign; even a missing intent before sendBy is refused.
+    retryOriginalTransfer({ terms, tradeId, overdueDelaySec } = {}) {
+      if (overdueDelaySec === undefined) return Promise.reject(new Error('Frozen grace policy required'));
+      return queuedSend({ terms, tradeId, resume: true, overdueDelaySec });
     },
 
     // Seller recovery after sendBy is read-only. The intent may exist even if a crash kept its hash out of the

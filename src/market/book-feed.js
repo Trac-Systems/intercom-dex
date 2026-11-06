@@ -22,7 +22,7 @@ export function priceLevels(offers) {
 // Every delta is cumulative against the named full snapshot, never the preceding delta.
 export class BookFeed {
   constructor() { this.pairs = new Map(); }
-  next(pair, registryVersion, offers, now, nextSeq) {
+  next(pair, registryVersion, offers, now, nextSeq, { bindOffers = false } = {}) {
     // Keep bid books below the legacy 200-row truncation marker. Otherwise an unlisted bid can fall back to its
     // maker's full amount or a shared price level. Give each side room, then use any spare room on the other side.
     if (offers.some(o => o.side === 'buy') && offers.length >= 200) {
@@ -35,9 +35,10 @@ export class BookFeed {
     // Legacy deltas only cap whole price levels. A changed bid allocation needs per-offer sizes immediately, even
     // if another bid at the same price grows by the same amount. Full books already carry these sizes on 0.1.32+.
     const bids = JSON.stringify(offers.filter(o => o.side === 'buy').map(o => [o.offerId, o.baseAmount]));
-    if (!prev || prev.registryVersion !== registryVersion || now - prev.at >= 60 || prev.bids !== bids) {
+    const inventory = JSON.stringify(remaining);
+    if (!prev || prev.registryVersion !== registryVersion || now - prev.at >= 60 || prev.bids !== bids || bindOffers && prev.inventory !== inventory) {
       const seq = nextSeq();
-      this.pairs.set(pair, { seq, registryVersion, at: now, levels, current, bids });
+      this.pairs.set(pair, { seq, registryVersion, at: now, levels, current, bids, inventory });
       return { kind: 'book', body: { pair, registryVersion, seq, ts: now, levels, remaining } };
     }
     if (prev.current === current) return null;

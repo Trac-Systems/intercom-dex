@@ -1,3 +1,4 @@
+import { bondAck } from '../../../src/stake/admission.js';
 import assert from 'node:assert/strict';
 import { createBuyer, step as buyerStep } from '../../../src/core/trade-buyer.js';
 import { createSeller, step as sellerStep } from '../../../src/core/trade-seller.js';
@@ -66,7 +67,7 @@ export function simulation(options = {}) {
         if (!options.holdProofCheck) dispatch(name, { type: 'proofChecked', tradeId: a.tradeId, ok: options.checkProofOk !== false });
       }
       else if (a.type === 'checkSellerFunds') {
-        if (!options.holdSellerFunds) dispatch(name, { type: 'sellerFunds', tradeId: a.tradeId, ok: options.sellerFundsOk !== false, feeTnk: '30000000000000000' });
+        if (!options.holdSellerFunds) dispatch(name, { type: 'sellerFunds', tradeId: a.tradeId, ok: options.sellerFundsOk !== false, feeTnk: '30000000000000000', ...(node.state.terms.bond && options.bondReservation !== false ? { bond: bondAck(node.state.terms, node.state.H) } : {}) });
       }
       else if (a.type === 'publishShare') for (const ch of a.channels) deliver(name, 'sharePublish', a.body, ch);
       else if (a.type === 'lockEscrow') {

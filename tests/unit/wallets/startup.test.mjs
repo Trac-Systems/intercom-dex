@@ -14,6 +14,7 @@ test('role entrypoint automatically creates wallets and serves safe wallet/statu
     proof: { zkey: join(dir, 'unused-proof') }, bridge: { url: 'ws://127.0.0.1:1', tokenFile }, control: { port: 12345, tokenFile }, solana: {} };
   writeFileSync(file, JSON.stringify(config)); writeFileSync(tokenFile, 'abababababababababababababababababababababababababababababababab', { mode: 0o600 });
   const sources = {
+    '/src/stake/runtime.js': 'export function createStakeRuntime(){return {async start(){},stop(){}}}',
     '/src/net/bridge.js': `export class Bridge { async connect(){return this} async info(){return {info:{role:'trader',servicePeerKey:'${'cd'.repeat(32)}',networkProfile:${JSON.stringify(resolveNetwork(config))}}}} on(){} close(){} }`,
     '/src/proof/lockproof.js': 'export async function checkProofFiles(){} export async function verifyLock(){} export async function proveLock(){} export async function makeLockCertificate(){}',
     '/src/roles/trader.js': 'export class Trader { constructor(input){Object.assign(this,input);this.host={trades:new Map()};this.mine=new Map()} async start(){} stop(){} status(){return {me:this.me}} }',

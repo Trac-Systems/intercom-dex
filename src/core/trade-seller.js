@@ -1,3 +1,4 @@
+import { matchingBondAck } from '../stake/admission.js';
 import { STEP_BUDGET_MS } from './terms.js';
 import { bytesToHex, fromLe32, hexToBytes, le32, sha256Hex, stableJSON } from './canonical.js';
 import { checkDealShape, lockStatement } from './dealing.js';
@@ -221,6 +222,7 @@ export function step(state, event) {
       }
       // An adapter error may hide a submission: retry as a resume of the recorded transfer, never abandon it.
       if (s.phase === 'transferring') {
+        s.deliveryFailure = 'send_failed';
         s.transferRetryAt = e.now + 10;
         return { state: s, actions: [] };
       }
@@ -255,7 +257,7 @@ export function step(state, event) {
       return { state: s, actions: [checkAction(s)] };
     }
     if (m?.kind === 'ack' && s.phase === 'awaitReady') {
-      if (m.body.H !== s.H || m.body.holdUntil < s.terms.refundAfter || s.acks.includes(m.from)) return null;
+      if (!matchingBondAck(s.terms, s.H, m.body.bond) || m.body.H !== s.H || m.body.holdUntil < s.terms.refundAfter || s.acks.includes(m.from)) return null;
       s.acks.push(m.from);
       return maybeSend(s);
     }
@@ -297,6 +299,7 @@ export function step(state, event) {
     // Nothing recorded or submitted (a bare failure): retry while the deadline allows; after it nothing can be sent
     // any more, so the trade ends.
     if (s.phase === 'transferring' && e.type === 'transferSent' && e.tradeId === s.tradeId && e.ok === false && e.unknown !== true) {
+      s.deliveryFailure = e.reason === RESET_PAUSED_MESSAGE ? 'gateway_unavailable' : 'send_failed';
       if (e.now >= s.terms.sendBy) return abortTransition(s, 'Transfer not sent before the deadline: ' + (e.reason ?? ''));
       if (e.reason === RESET_PAUSED_MESSAGE && !s.txHash && !s.transferUnknown) s.gatewayPaused = true;
       s.transferRetryAt = e.now + 10;
@@ -307,6 +310,7 @@ export function step(state, event) {
       if (e.ok !== true && !(e.ok === false && e.unknown === true)) return null;
       if (e.ok === true && (!Number.isSafeInteger(e.sentAt) || e.sentAt < 0 || e.sentAt > e.now || e.sentAt >= s.terms.sendBy)) return null;
       s.txHash = e.txHash;
+      delete s.deliveryFailure;
       delete s.gatewayPaused;
       s.transferUnknown = e.ok !== true;
       s.phase = 'awaitShares';

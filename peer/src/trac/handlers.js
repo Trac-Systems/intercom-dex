@@ -3,6 +3,8 @@ import { broadcastTnkTransfer } from './broadcast.js';
 import { createTransferVerifier } from './verify-transfer.js';
 import PeerWallet from 'trac-wallet';
 import { readBalances } from './balances.js';
+import { signedPosition } from './stake-position.js';
+import { createStakeDeliveryVerifier } from './stake-delivery.js';
 
 // resetPeer may still be opening (a promise): until it is open, RESET balances and context fail as not ready, and a
 // RESET transfer check answers reset_reader_required (not final), which every caller retries.
@@ -50,6 +52,8 @@ export function makeHandlers({ bus, config, resetPeer = null }) {
       return { networkId: context.networkId, txv: context.txv, addressPrefix: context.addressPrefix,
         subnet: resetBootstrap, msb: context.msbBootstrap };
     },
-    dex_verify: args => (reader === undefined ? tnkOnly : verify)(args)
+    dex_verify: args => (reader === undefined ? tnkOnly : verify)(args),
+    dex_stake_position: ({ position } = {}) => signedPosition(bus, position),
+    dex_stake_delivery: args => createStakeDeliveryVerifier({ msb: bus, resetPeer: opened(), resetBootstrap })(args)
   };
 }

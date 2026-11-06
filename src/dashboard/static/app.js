@@ -1,6 +1,7 @@
 // The dashboard page: polls /api/state, keeps one view per tab and lets each view update itself in place.
 import { $, h, api } from './dom.js';
-import { onAction } from './dialogs.js';
+import { onAction, onConfirm } from './dialogs.js';
+import { bannersView } from './delivery.js';
 import { tradingView } from './trading.js';
 import { walletsView } from './wallets.js';
 import { trafficView } from './traffic.js';
@@ -10,7 +11,7 @@ import { locks, lendView, optionsView } from './locks.js';
 const main = $('#main');
 const ROLE_TABS = { trader: ['Trading', tradingView], signer: ['Signer', signerView], service: ['Venue', venueView] };
 const LOCK_TABS = [['lend', 'Borrow & Lend'], ['options', 'Options']];
-const views = {};
+const views = {}, banners = bannersView($('#banners'));
 let data = null, tab = null, picked = false;
 
 function tabs() {
@@ -30,6 +31,7 @@ function show() {
   views[tab] ??= make();
   if (main.firstChild !== views[tab].el) main.replaceChildren(views[tab].el);
   main.className = ['trader', 'lend', 'options'].includes(tab) ? 'wide' : '';
+  $('#banners').classList.toggle('wide', main.className === 'wide');
   views[tab].update(data);
 }
 
@@ -41,10 +43,13 @@ async function poll() {
     $('#network').textContent = data.network;
     if (!$('#tabs').children.length) tabs();
     show();
+    banners.update(data.trader);
     if (data.role === 'trader') locks.poll().then(appeared => { if (appeared) { tabs(); show(); } });
   } catch { $('#stale').hidden = false; }
 }
 onAction(() => poll());
+// Listing a sell offer is when a seller starts to have deliveries to make: ask for notifications then.
+onConfirm((action, input) => { if (action === 'offer' && input.side === 'sell') banners.ask(); });
 
 // Dark by default; the toggle switches to light and back.
 function applyTheme(t) {

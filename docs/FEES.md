@@ -82,3 +82,11 @@ Both sides keep SOL for fees and account rent; Trac locks include TNK for sweeps
 `fee.signerShareBps` defaults to 4000. That portion goes in equal parts to committee members in qualified
 set Q that delivered valid releases for the final decision; the venue keeps the rest. Credits remain
 provisional 7 days before becoming final. See [Locks](LOCKS.md).
+
+## Stake costs
+
+The [stake policy](STAKE.md) defaults to 300 bps and a $0.50 minimum. For non-RESET
+sales it uses the fee-inclusive USDC lock; RESET sales use the RESET amount sold.
+Whole-piece selection can overshoot the target, so previews must show the exact
+payout. TNK funding and collection fees remain separate from RESET principal.
+The stake guide gives the N-piece fee formula and thirteen-piece example.

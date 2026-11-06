@@ -188,3 +188,14 @@ test('a buy offer or take needs at least MIN_SOL in the wallet, a sell does not'
   await assert.rejects(f.create().requireFunds(buy), /Keep at least 0\.01 SOL in the wallet/);
   await f.create().requireFunds({ role: 'seller', base: { id: 'RESET' }, baseAmount: '1' });
 });
+
+test('seller admission needs fresh TNK fees in addition to the sold coin and every existing wallet hold', async () => {
+  const f = setup(), manager = f.create(), terms = { role: 'seller', base: { id: 'RESET' }, baseAmount: '1' };
+  f.own.TNK = '0'; await assert.rejects(manager.requireFunds(terms), /TNK/);
+  f.own.TNK = '89999999999999999'; await assert.rejects(manager.requireFunds(terms), /TNK/);
+  f.own.TNK = '90000000000000000'; await manager.requireFunds(terms);
+  const native = { ...terms, base: { id: 'TNK' }, baseAmount: '1' };
+  await assert.rejects(manager.requireFunds(native), /TNK/);
+  f.own.TNK = '90000000000000001'; await manager.requireFunds(native);
+  f.own.feeTnk = '40000000000000000'; await assert.rejects(manager.requireFunds(terms), /TNK/);
+});

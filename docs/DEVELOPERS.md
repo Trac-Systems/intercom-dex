@@ -133,3 +133,14 @@ Every role and peer config names `network`. `networks/local.json` marks the valu
 `beaconOptions`). A local peer may also set `validatorKey`, and local tests alone may point
 `peer.trac.reset.source.directory` at a vendored fixture. Mainnet refuses every one of these overrides. The stack
 writes such configs for each process; see `tests/e2e/stack.mjs` for a complete example.
+
+## Stake and rewards libraries
+
+`src/stake/` contains signed settings, exact amount/allocation helpers, certified
+address ledgers, proof clocks, listing checks, status and reward accounting.
+`src/roles/payout.js` supplies a serialized injectable payout service with a
+durable transfer intent. It is not yet a configured runner role. The complete
+[status and interface contract](../src/core/API.md#stake-and-reward-status-contract)
+and [fixed error table](STAKE.md#fixed-error-codes) distinguish implemented
+projections from the remaining custody and chain integration. Unit tests exercise
+quorum forgery, allocation optimality, crash/restart and no-double-pay boundaries.

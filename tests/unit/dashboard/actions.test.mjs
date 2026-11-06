@@ -11,7 +11,8 @@ import { Service } from '../../../src/roles/service.js';
 import { openStore } from '../../../src/roles/store.js';
 import { encodeKey } from '../../../src/core/keys.js';
 import { fixture, hex } from '../core/helpers.mjs';
-import { traderFixture, serviceFixture, signerFixture, startFor, httpCall } from './fixtures.mjs';
+import { traderFixture, serviceFixture, signerFixture, startFor, httpCall, nowSec } from './fixtures.mjs';
+import { stakeStatus, deliveryStatus, piece, armBonds, bondedVenue } from './stake-fixtures.mjs';
 
 test('a confirmation is bound to one action and its exact input, expires, and works once', () => {
   const clock = { t: 1000 }, c = createConfirmations({ clock: () => clock.t }), input = { offerId: 'ab'.repeat(32) };
@@ -84,7 +85,7 @@ test('take: shows the USDC locked (with fees) or the tokens sent, then calls tak
   assert.match((await post({ offerId: hex() })).json().error, /no longer announced by its maker/);
   const fx2 = traderFixture(), s2 = await startFor(t, fx2);
   const buy = (await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId } } })).json();
-  assert.deepEqual(buy.lines, [['You send', '8 TNK'], ['You receive', '3.12 USDC']]);
+  assert.deepEqual(buy.lines, [['You send', '8 TNK'], ['You receive', '3.12 USDC']], 'a venue that does not bond sales: no bond line');
   assert.match(buy.warning, /1\.88 TNK free/);
   const tooMuch = await httpCall(s2.port, { path: '/api/preview', method: 'POST', cookie: s2.cookie, body: { action: 'take', input: { offerId: fx2.theirs[2].offerId, amount: '9' } } });
   assert.match(tooMuch.json().error, /only 8 TNK/);
@@ -216,4 +217,158 @@ test('max-take: the most of an offer the free balance pays for, fees included', 
   fx.info.balances.USDC.free = '25000000';
   assert.deepEqual((await get(sell.offerId)).json(), { baseAmount: sell.baseAmount, amount: { units: sell.baseAmount, text: '5', unit: 'TNK' }, all: true, note: null });
   assert.match((await get(hex())).json().error, /no longer announced by its maker/);
+});
+
+test('stake deposit: the stake afterwards against the cap, the core’s TNK fees and wait, then calls the trader’s stakeDeposit', async t => {
+  const fx = traderFixture();
+  const { p, result } = await confirmPath(t, fx, 'stakeDeposit', { amount: '0.3' }, () => {});
+  assert.deepEqual(fx.role.calls, [['stakeDeposit', '30000000']]);
+  assert.deepEqual(p.lines, [['Deposit', '0.3 RESET (about $75.00)'], ['Stake afterwards', '1.5 RESET (about $375.00)'], ['Limit per address', '$400.00'],
+    ['TNK paid now', '0.3 TNK: 0.12 TNK network fees and 0.18 TNK held for the return transfers'], ['Withdrawing later', 'waits 24 h'],
+    ['Returned by itself', 'after 30 days unless withdrawn first']]);
+  assert.equal(p.warning, null); assert.match(p.note, /paid to the buyer only if the sale is not delivered in time\. It counts once the signers confirm it\./);
+  assert.deepEqual(result, { ok: true, operationId: 'a1'.repeat(32), funded: '30000000' });
+  const s = await startFor(t, fx), preview = input => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action: 'stakeDeposit', input } });
+  assert.equal((await preview({ amount: '0.5' })).json().error, 'This would bring your stake to $425.00; the limit is $400.00 per address. Deposit at most 0.4 RESET.');
+  assert.match((await preview({ amount: '3' })).json().error, /Deposit at most 0\.4 RESET/);
+  assert.match((await preview({ amount: '0' })).json().error, /out of range/);
+  assert.match((await preview({ amount: 'abc' })).json().error, /Invalid/);
+  fx.role.stake = { ...fx.role.stake, priceUsd: null };
+  assert.equal((await preview({ amount: '0.5' })).json().lines[1][1], '1.7 RESET', 'no price: no dollar value and no cap check here; the core still refuses');
+  fx.role.stakePreview = async () => { throw new Error('Add TNK to cover stake funding fees and collection reserves.'); };
+  assert.equal((await preview({ amount: '0.1' })).json().error, 'Add TNK to cover stake funding fees and collection reserves.', 'the core’s refusal as it is');
+  fx.role.stake = stakeStatus({ settings: null });
+  assert.equal((await preview({ amount: '0.5' })).json().error, 'This venue does not take stakes yet.');
+});
+
+test('stake withdraw: free stake waits now, stake backing a running sale is returned after it closes; "all" is all of it', async t => {
+  const fx = traderFixture();
+  const { p, result } = await confirmPath(t, fx, 'stakeWithdraw', { amount: '0.5' }, () => {});
+  assert.deepEqual(fx.role.calls[0], ['stakeWithdraw', '50000000']);
+  assert.equal(result.pending, true); assert.equal(typeof result.availableAt, 'number'); assert.equal(result.deferred, undefined);
+  assert.deepEqual(p.lines, [['Amount', '0.5 RESET'], ['Wait', '24 h'], ['Then', 'back to your Trac wallet']]);
+  assert.equal(p.note, 'The RESET earns no rewards and covers no sales while it waits. Offers beyond what the rest of your stake covers are hidden.',
+    'the core withdraws exact amounts now: no "fixed pieces" refusal');
+  const s = await startFor(t, fx), preview = input => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action: 'stakeWithdraw', input } }).then(r => r.json());
+  const all = await preview({ amount: 'all' });
+  assert.deepEqual(all.input, { amount: 'all' }, 'all of it, also the part backing a running sale');
+  assert.equal(all.title, 'Withdraw 1.2 RESET from your stake');
+  assert.deepEqual(all.lines, [['Amount', '1.2 RESET'], ['Free now', '1.198 RESET: waits 24 h'],
+    ['Backing running sales', '0.002 RESET: returned after the sale it backs closes, then waits 24 h'], ['Then', 'back to your Trac wallet']]);
+  assert.match(all.note, /If a sale it backs is not delivered in time, that part goes to the buyer instead\.$/);
+  const more = await preview({ amount: '1.199' });
+  assert.deepEqual([more.input, more.lines[2]], [{ amount: '119900000' }, ['Backing running sales', 'at least 0.001 RESET: returned after the sale it backs closes, then waits 24 h']]);
+  assert.equal((await preview({ amount: '2' })).error, 'You can withdraw at most 1.2 RESET; the rest is already on its way.');
+  fx.role.stake = { ...stakeStatus(), operationId: 'a1'.repeat(32), operationPending: true };
+  assert.match((await preview({ amount: '0.5' })).error, /still running/);
+  fx.role.stake = stakeStatus({ pieces: [piece('reserved', '200000')], openOffersUsd: '0' });
+  const reserved = await preview({ amount: 'all' });
+  assert.deepEqual([reserved.input, reserved.lines[1]], [{ amount: 'all' }, ['Free now', '0 RESET: waits 24 h']]);
+  fx.role.stake = stakeStatus({ pieces: [piece('withdrawing', '200000')] });
+  assert.match((await preview({ amount: 'all' })).error, /^No stake to withdraw; what is left is already on its way\./);
+  // Done: the core's stake.withdrawal says how much of it waits for a running sale.
+  fx.role.stake = stakeStatus();
+  fx.role.stakeWithdraw = async () => { fx.role.stake = { ...stakeStatus(), operationId: 'b2'.repeat(32), operationPending: true,
+    withdrawal: { operationId: 'b2'.repeat(32), requested: 'all', pending: true, deferred: '200000', withdrawing: '119800000', returned: '0', forfeited: '0' } };
+  return { ok: true, operationId: 'b2'.repeat(32), pending: true }; };
+  const done = await httpCall(s.port, { path: '/api/act', method: 'POST', cookie: s.cookie, body: { action: 'stakeWithdraw', input: all.input, confirm: (await preview({ amount: 'all' })).confirm } }).then(r => r.json());
+  assert.equal(done.result.deferred.text, '0.002');
+});
+
+test('retry delivery: only a failing or overdue sale, shows what is at risk, calls retryDelivery with the full trade key', async t => {
+  const fx = traderFixture();
+  fx.role.deliveries.set('t-sell', deliveryStatus('delivery_overdue', fx.now));
+  const { p } = await confirmPath(t, fx, 'retryDelivery', { key: 't-sell' }, () => {});
+  assert.deepEqual(fx.role.calls[0], ['retryDelivery', 't-sell']);
+  assert.equal(p.title, 'Send your 1.5 TNK again');
+  assert.deepEqual(p.lines, [['Sale', '1.5 TNK for 0.63 USDC'], ['At risk', '$0.50 (0.002 RESET)']]);
+  assert.match(p.note, /never starts a new one/);
+  const s = await startFor(t, fx), preview = key => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action: 'retryDelivery', input: { key } } });
+  fx.role.deliveries.set('t-sell', { ...fx.role.deliveries.get('t-sell'), state: 'delivery_confirming' });
+  assert.equal((await preview('t-sell')).json().error, 'This sale has nothing to retry right now');
+  fx.role.deliveries.set('t-locked', { ...fx.role.deliveries.get('t-sell'), state: 'delivery_failed' });
+  assert.equal((await preview('t-locked')).json().error, 'This sale has nothing to retry right now', 'a buy is never retried from here');
+  assert.equal((await preview('nope')).json().error, 'This sale has nothing to retry right now');
+});
+
+test('sell previews and the sell ticket show the bond the trader would sign, or why the sale cannot start', async t => {
+  const fx = traderFixture(), s = await startFor(t, fx);
+  const preview = (action, input) => httpCall(s.port, { path: '/api/preview', method: 'POST', cookie: s.cookie, body: { action, input } }).then(r => r.json());
+  const ticket = input => httpCall(s.port, { path: `/api/sale-bond?${new URLSearchParams(input)}`, cookie: s.cookie }).then(r => r.json());
+  const sale = { pair: 'TNK/USDC', side: 'sell', amount: '1.5', price: '0.5', ttlMin: 30 };
+  assert.ok(!(await preview('offer', sale)).lines.some(([k]) => k.startsWith('Bond')), 'the venue does not bond sales yet');
+  assert.deepEqual(await ticket({ pair: 'TNK/USDC', amount: '1.5', price: '0.5' }), { bond: null });
+  armBonds(fx);
+  const sell = await preview('offer', sale);
+  assert.deepEqual(sell.lines[3], ['Bond reserved for this sale', '$0.50 (0.00025 RESET)']);
+  assert.equal(sell.warning, null);
+  const t1 = await ticket({ pair: 'TNK/USDC', amount: '1.5', price: '0.5' });
+  assert.deepEqual([t1.bond.reset.text, t1.bond.usd.text, t1.bond.refused], ['0.00025', '0.5', null]);
+  const big = await preview('offer', { ...sale, price: '1000' });
+  assert.ok(!big.lines.some(([k]) => k.startsWith('Bond')));
+  assert.equal(big.warning, 'Not covered: your free stake has no pieces that cover this bond. Deposit RESET under Wallets → Stake, or sell less.');
+  assert.equal((await ticket({ pair: 'TNK/USDC', amount: '1.5', price: '1000' })).bond.refused, 'bond_not_reserved');
+  assert.match((await ticket({ pair: 'TNK/USDC', amount: '1.5', price: 'x' })).error, /Price must be a decimal number/);
+  const buy = await preview('offer', { ...sale, side: 'buy', amount: '10' });
+  assert.ok(!buy.lines.some(([k]) => k.startsWith('Bond')), 'buyers reserve no bond');
+  const take = await preview('take', { offerId: fx.theirs.find(o => o.side === 'buy').offerId, amount: '1' });
+  assert.deepEqual(take.lines.at(-1), ['Bond reserved for this sale', '$0.50 (0.00025 RESET)']);
+  const takeBuy = await preview('take', { offerId: fx.theirs[0].offerId });
+  assert.ok(!takeBuy.lines.some(([k]) => /bond/i.test(k)), "no seller's bond while the core cannot tell it");
+  assert.doesNotMatch(takeBuy.warning ?? '', /Update the app/, 'this app can receive a bond');
+  const seller = bondedVenue({ me: fx.theirs[0].maker, registry: fx.f.registry, now: nowSec(), boxKey: 'b2'.repeat(32) });
+  fx.role.stakeRuntime.admission.cache.set(fx.theirs[0].maker.dexKey, seller.runtime.admission.cache.get(fx.theirs[0].maker.dexKey));
+  assert.deepEqual((await preview('take', { offerId: fx.theirs[0].offerId, amount: '1.5' })).lines.at(-1),
+    ['Seller’s bond', "$0.50 (0.00025 RESET) from the seller's stake, paid to you if the seller does not deliver in time"]);
+  fx.role.stakeRuntime = null;
+  assert.equal((await ticket({ pair: 'TNK/USDC', amount: '1.5', price: '0.5' })).bond.refused, 'bond_setup_unavailable');
+  assert.match((await preview('take', { offerId: fx.theirs[0].offerId })).warning,
+    /^Sellers here post a bond, and only a newer version of this app can receive it\. Update the app to buy\./);
+});
+
+test('a review the core already refuses has no Confirm: no confirmation is issued, so it cannot run', async t => {
+  const fx = traderFixture(), s = await startFor(t, fx);
+  const post = (path, body) => httpCall(s.port, { path, method: 'POST', cookie: s.cookie, body }).then(r => r.json());
+  const sale = { pair: 'TNK/USDC', side: 'sell', amount: '1.5', price: '0.5', ttlMin: 30 };
+  armBonds(fx);
+  const covered = await post('/api/preview', { action: 'offer', input: sale });
+  assert.equal(covered.blocked, false); assert.match(covered.confirm, /^\d+\.[0-9a-f]{64}$/);
+  const refused = await post('/api/preview', { action: 'offer', input: { ...sale, price: '1000' } });
+  assert.equal(refused.blocked, true); assert.equal(refused.confirm, null); assert.match(refused.warning, /^Not covered:/);
+  let made = 0; fx.role.makeOffer = async () => { made++; return {}; };
+  const reg = fx.role.registry.usable;
+  fx.role.registry = { ...fx.role.registry, usable: { ...reg, sellerBond: { ...reg.sellerBond, acceptNew: false } } };
+  const drained = await post('/api/preview', { action: 'offer', input: sale });
+  assert.deepEqual([drained.blocked, drained.confirm, drained.warning], [true, null, 'No new sales for now: the venue is moving stakes to new signers. Your stake stays as it is.']);
+  assert.equal((await post('/api/preview', { action: 'stakeDeposit', input: { amount: '0.1' } })).error,
+    'The venue is moving stakes to new signers and takes no new stakes for now. Your stake stays as it is.');
+  fx.role.registry = { ...fx.role.registry, usable: reg };
+  assert.match((await post('/api/act', { action: 'offer', input: refused.input, confirm: refused.confirm })).error, /Confirmation expired or missing/);
+  const sellTake = await post('/api/preview', { action: 'take', input: { offerId: fx.theirs.find(o => o.side === 'buy').offerId, amount: '1' } });
+  assert.equal(sellTake.blocked, false); assert.ok(sellTake.confirm);
+  const buy = await post('/api/preview', { action: 'take', input: { offerId: fx.theirs[0].offerId } });
+  assert.equal(buy.blocked, false); assert.ok(buy.confirm, 'an ordinary buy can be confirmed');
+  fx.role.stakeRuntime = null;
+  const update = await post('/api/preview', { action: 'take', input: { offerId: fx.theirs[0].offerId } });
+  assert.match(update.warning, /Update the app to buy\./); assert.equal(update.blocked, true); assert.equal(update.confirm, null);
+  let took = 0; fx.role.takeOffer = async () => { took++; return {}; };
+  assert.match((await post('/api/act', { action: 'take', input: update.input, confirm: update.confirm })).error, /Confirmation expired or missing/);
+  assert.deepEqual([made, took], [0, 0]);
+  // The core's price is older than a minute: refused for now, with when to try again.
+  armBonds(fx, { now: nowSec() - 61 });
+  const stale = await post('/api/preview', { action: 'offer', input: sale });
+  assert.deepEqual([stale.blocked, stale.confirm, stale.warning], [true, null, 'No bond right now: there is no fresh RESET price. Try again in a minute.']);
+  // While the venue drains the core starts no new trade at all, buys included.
+  fx.role.registry = { ...fx.role.registry, usable: { ...reg, sellerBond: { ...reg.sellerBond, acceptNew: false } } };
+  for (const p of [await post('/api/preview', { action: 'take', input: { offerId: fx.theirs[0].offerId } }), await post('/api/preview', { action: 'offer', input: { ...sale, side: 'buy' } })])
+    assert.deepEqual([p.blocked, p.confirm, p.warning], [true, null, 'No new trades for now: the venue is moving stakes to new signers.']);
+});
+
+test('a take the core refuses with "update the app" says so plainly', async t => {
+  const fx = traderFixture();
+  fx.role.takeOffer = async () => { throw new Error('update the app'); };
+  const s = await startFor(t, fx), post = (path, body) => httpCall(s.port, { path, method: 'POST', cookie: s.cookie, body }).then(r => r.json());
+  const p = await post('/api/preview', { action: 'take', input: { offerId: fx.theirs[0].offerId, amount: '2' } });
+  const r = await post('/api/act', { action: 'take', input: p.input, confirm: p.confirm });
+  assert.equal(r.error, 'Sellers here post a bond, and only a newer version of this app can receive it. Update the app to buy.');
 });

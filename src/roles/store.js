@@ -20,7 +20,16 @@ export function openStore(dir, key, { readOnly = false } = {}) {
       const path = file(name), nonce = randomBytes(24);
       const body = xchacha20poly1305(key, nonce, Buffer.from(name)).encrypt(Buffer.from(JSON.stringify(value)));
       const tmp = `${path}.tmp`, fd = openSync(tmp, 'w', 0o600);
-      try { writeSync(fd, Buffer.concat([nonce, body])); fsyncSync(fd); } finally { closeSync(fd); }
+      try {
+        const bytes = Buffer.concat([nonce, body]);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const written = writeSync(fd, bytes, offset, bytes.length - offset);
+          if (!written) throw new Error('Record write made no progress');
+          offset += written;
+        }
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
       renameSync(tmp, path); syncDir(path);
     },
     get(name) {

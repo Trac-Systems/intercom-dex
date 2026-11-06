@@ -239,6 +239,40 @@ forfeits every credit not yet paid.
 stopped, and keep the password separately. Without the data folder, a restored signer can't publish the shares of
 trades that were running.
 
+### Backing up key pieces
+
+A signer's key pieces are its keyring and its encrypted records: stake DKG state and final shares, votes,
+decisions, reservations and registry snapshots. `signer-backup` writes all of them into one encrypted file, so
+they can be kept off the signer machine. Three of four signers' pieces control every stake, so keep the backup
+passphrase somewhere other than the backups, and never on the same disk.
+
+```sh
+node bin/dex.mjs signer-backup export --config /path/to/signer.json --out /path/to/signer-backups
+node bin/dex.mjs signer-backup verify --config /path/to/signer.json --from /path/to/signer-backups/signer-<id>-<position>.dexbackup
+node bin/dex.mjs signer-backup restore --config /path/to/new-signer.json --from /path/to/bundle.dexbackup --journal <position>
+```
+
+- `export` works while the signer runs or is stopped. The backup folder must be private (`0700`). If the signer keeps writing during the export, it asks you
+  to try again or stop the signer. It reads the keyring password from the role's password variable
+  (`DEX_KEY_PASSWORD` by default) or asks for it.
+- The backup passphrase is asked twice and never shown, or read from a private `0600` file given with
+  `--passphrase-file`. It needs at least 12 characters.
+- Each file is named after the signer (the first 16 characters of its dex key) and its journal position: the time
+  of its newest record write, in milliseconds. A newer file replaces an older one. An export with nothing new
+  writes nothing. `export` lists the older files it replaces but doesn't delete them. It refuses to write next
+  to a newer backup of the same signer.
+- `verify` decrypts the file in memory and checks it wasn't changed, that the keys belong to the signer and that
+  every record is there. It writes nothing. It counts the stake pieces with a final share, the ones still being
+  created and the ones already returned.
+- `restore` writes only into an empty data folder and asks for a new keyring password. It refuses a folder that
+  already holds this signer. With `--journal`, give the newest journal position you know of for this signer, from
+  a later file name or the last export. A file older than that is refused, because its pieces may lack later
+  decisions.
+
+Never run two copies of one signer. Start a restored signer only once the old one is stopped for good: two copies
+of one identity can sign two different outcomes for the same stake. A wrong passphrase and a changed or damaged
+file give the same error.
+
 ## Running the venue
 
 The venue publishes the registry, the order book, tickers and the trade log, checks every reported trade on both
@@ -405,3 +439,32 @@ after payment; do not use Trac transfer timing in deadline decisions.
 DKG uses a common qualified set Q with at least n−1 dealers and at least n−1 matching readiness attestations.
 Store sealed shares for offline members at the venue. Signers can be replaced by handover while at least k
 survive. Put writers retain the program refund after `refundAfter`; RESET/TNK have no trustless fallback.
+
+## Stake release gates
+
+Arm `sellerBond` only after every role below runs 0.1.48. Its admission guard stops
+new unsupported trades while existing recovery continues. 0.1.48 integrates the
+fixed 4/3 stake epoch, certified price/day index, DKG funding and capacity grants,
+reservation acknowledgements, complete finalized Solana history, independently
+established transfer finality time, proof inbox and health-clock certificates,
+share/penalty interlock, payout wallet/block listener, and audit transport. Its
+acceptance pass proves that an outdated buyer receives a plain update refusal
+before payment, updated buyers can trade, and the signer software floor is
+unchanged.
+
+After those checks, upgrade signers and their retained recovery stores first, then
+venue and traders, and start the separate pool payout service. Publish authenticated
+settings with a full one-hour notice and a separately scheduled activation. Never
+roll back to software unable to recover funded stake. Pool mining/funding is a
+separate operator action. See [stake policy](STAKE.md).
+
+The development venue supports a draining committee handoff through its
+authenticated loopback `POST /stake/quiesce {}` and `POST /stake/handoff
+{nextPolicy}` routes. Keep original signers and complete encrypted stores online.
+The successor policy must keep admissions closed and reattest unchanged effective
+economics; do not discard a pending economic schedule. Original quorum capacity
+release and successor quorum adoption precede registry publication. Retry the
+same request after interruption. The result remains `draining`: full price and
+reward inventory reconciliation is required before new admission/accrual can
+resume. Existing original-epoch settlements and withdrawals retain their original
+keys, decisions and wait. No deployment or activation is implied by local tests.

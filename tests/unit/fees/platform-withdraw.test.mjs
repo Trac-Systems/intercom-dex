@@ -10,7 +10,7 @@ import { deriveConfigPda, deriveVaultAta } from '../../../src/solana/escrow.js';
 import { PROGRAM_ID } from '../../../src/solana/constants.js';
 import { chainFixture } from './chain.mjs';
 
-const root = resolve('.test-tmp/wallet-fees'); mkdirSync(root, { recursive: true });
+const root = resolve(process.env.TMPDIR ?? '.test-tmp', 'wallet-fees'); mkdirSync(root, { recursive: true });
 function setup(t) {
   const f = chainFixture(t), records = new Map(), dir = mkdtempSync(join(root, 'withdraw-'));
   const authorityFile = join(dir, 'throwaway-authority.json'); writeFileSync(authorityFile, JSON.stringify([...f.platform.secretKey]), { mode: 0o600 });

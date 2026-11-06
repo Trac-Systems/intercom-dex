@@ -9,8 +9,8 @@ import { validAddressProof } from '../core/address-proof.js';
 export const FUNDS_TTL_SEC = 300, FUNDS_READS_AT_ONCE = 4, FAILED_READS = 3;
 
 export class MakerFunds {
-  constructor({ solana, trac, now, addressProof = () => ({ required: false }), log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
-    Object.assign(this, { solana, trac, now, addressProof, log, ttlSec, readsAtOnce });
+  constructor({ solana, trac, now, addressProof = () => ({ required: false }), fullSells = () => false, log = () => {}, ttlSec = FUNDS_TTL_SEC, readsAtOnce = FUNDS_READS_AT_ONCE }) {
+    Object.assign(this, { solana, trac, now, addressProof, fullSells, log, ttlSec, readsAtOnce });
     this.wallets = new Map();   // `${chain}:${address}` -> { balances, at, failures } (balances null after a failed read)
     this.lastGood = new Map();  // chain -> time of the latest successful read on it
     this.reading = new Set();
@@ -19,13 +19,13 @@ export class MakerFunds {
   // Proof admission fails closed. Once admitted, an unknown balance or read error keeps the offer.
   funded(offer, pair) {
     if (!this.#proven(offer)) return false;
-    try { return this.#funded(offer, pair); } catch { return true; }
+    try { return this.#funded(offer, pair); } catch { return !(offer.side === 'sell' && this.fullSells()); }
   }
 
   // Entries carry the offer's original fee terms and venue first-seen time. Allocate globally before publishing any
   // pair: highest price, then oldest, then id. All integer floors match the quote and escrow fee formulas.
   allocate(entries, pending = new Map(), purchases = []) {
-    const budgets = new Map(), sizes = new Map();
+    const budgets = new Map(), sellers = new Map(), sizes = new Map();
     const cost = (quote, fees = {}) => quote + quote * BigInt(fees.platformFeeBps ?? 0) / 10000n +
       quote * BigInt(fees.tradeFeeBps ?? 0) / 10000n;
     const ordered = [...entries].sort((a, b) => {
@@ -34,7 +34,25 @@ export class MakerFunds {
     });
     for (const { offer: o, pair, fees } of ordered) {
       let free = BigInt(o.baseAmount) - (pending.get(o.offerId) ?? 0n);
-      if (!this.funded(o, pair) || free < BigInt(pair.minBaseAmount)) { sizes.set(o.offerId, '0'); continue; }
+      if (!this.funded(o.side === 'sell' && this.fullSells() ? { ...o, baseAmount: free.toString() } : o, pair) || free < BigInt(pair.minBaseAmount)) { sizes.set(o.offerId, '0'); continue; }
+      if (o.side === 'sell' && this.fullSells()) {
+        const address = o.maker.tracAddr, asset = pair.base.id;
+        if (!sellers.has(address)) {
+          const b = this.balances(o), coins = new Map();
+          if (!b || typeof b.feeTnk !== 'string' || !/^(0|[1-9][0-9]*)$/.test(b.feeTnk)) { sizes.set(o.offerId, '0'); continue; }
+          for (const key of new Set(['TNK', ...entries.map(e => e.pair.base.id)])) {
+            const value = b?.[key]; coins.set(key, typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? BigInt(value) : 0n);
+          }
+          const fee = BigInt(b.feeTnk), read = this.wallets.get(`trac:${address}`);
+          for (const t of purchases) if (t.seller?.tracAddr === address && !(t.settledAt != null && t.settledAt < (read.readAt ?? read.at))) {
+            coins.set(t.base.id, (coins.get(t.base.id) ?? 0n) - BigInt(t.baseAmount)); coins.set('TNK', coins.get('TNK') - fee);
+          }
+          sellers.set(address, { coins, fee });
+        }
+        const { coins, fee } = sellers.get(address);
+        if (coins.get(asset) < free || coins.get('TNK') < fee + (asset === 'TNK' ? free : 0n)) { sizes.set(o.offerId, '0'); continue; }
+        coins.set(asset, coins.get(asset) - free); coins.set('TNK', coins.get('TNK') - fee);
+      }
       if (o.side === 'buy') {
         const address = o.maker.solAddr;
         if (!budgets.has(address)) {
@@ -88,11 +106,12 @@ export class MakerFunds {
   }
 
   #funded(offer, pair) {
-    const min = BigInt(pair.minBaseAmount);
+    const min = BigInt(offer.side === 'sell' && this.fullSells() ? offer.baseAmount : pair.minBaseAmount);
     if (this.#failing(...(offer.side === 'sell' ? ['trac', offer.maker.tracAddr] : ['solana', offer.maker.solAddr]))) return false;
     if (offer.side === 'sell') {
       const b = this.#cached('trac', offer.maker.tracAddr);
-      if (!b) return true;
+      if (!b) return !this.fullSells();
+      if (this.fullSells() && [b[pair.base.id], b.TNK, b.feeTnk].some(v => typeof v !== 'string' || !/^(0|[1-9][0-9]*)$/.test(v))) return false;
       const base = pair.base.id, fee = BigInt(b.feeTnk);
       if (base === 'TNK') return BigInt(b.TNK) >= min + fee;
       return BigInt(b[base] ?? '0') >= min && BigInt(b.TNK) >= fee;
@@ -102,14 +121,19 @@ export class MakerFunds {
     return BigInt(b.USDC) >= BigInt(quoteAmount(pair, min.toString(), offer.price)) && BigInt(b.SOL) >= BigInt(MIN_SOL);
   }
 
-  // Start reads for makers whose reading is missing or older than the TTL, a few at a time; never waits for them.
+  // Refresh strict sell snapshots early so an ordinary read does not create a
+  // listing gap at every expiry. Slow/failed reads still expire at the same TTL.
   refresh(offers) {
     const due = [];
     for (const o of offers) {
       if (!this.#proven(o)) continue;
       const [chain, address] = o.side === 'sell' ? ['trac', o.maker.tracAddr] : ['solana', o.maker.solAddr];
       const key = `${chain}:${address}`, w = this.wallets.get(key);
-      if (this.reading.has(key) || due.some(d => d.key === key) || (w && this.now() - w.at < this.ttlSec)) continue;
+      const strict = chain === 'trac' && this.fullSells();
+      const ttl = strict ? Math.min(this.ttlSec, 60) : this.ttlSec;
+      const refreshAfter = strict && w?.balances ? Math.ceil(ttl / 2) : ttl;
+      const since = strict && w?.balances ? w.readAt ?? w.at : w?.at;
+      if (this.reading.has(key) || due.some(d => d.key === key) || (w && this.now() - since < refreshAfter)) continue;
       due.push({ key, chain, address });
     }
     for (const d of due.slice(0, Math.max(0, this.readsAtOnce - this.reading.size))) this.#read(d);
@@ -128,7 +152,8 @@ export class MakerFunds {
   #cached(chain, address) {
     const w = this.wallets.get(`${chain}:${address}`);
     // A slow successful response does not make the snapshot newer than the request that obtained it.
-    return w && this.now() - (w.readAt ?? w.at) < 2 * this.ttlSec ? w.balances : null;
+    const ttl = chain === 'trac' && this.fullSells() ? Math.min(this.ttlSec, 60) : 2 * this.ttlSec;
+    return w && this.now() - (w.readAt ?? w.at) < ttl ? w.balances : null;
   }
 
   async #read({ key, chain, address }) {

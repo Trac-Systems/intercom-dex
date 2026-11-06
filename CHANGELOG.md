@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.48
+
+- Sellers stake RESET to list on every pair. A deposit is split into small pieces; one stake per account address
+  covers all pairs and identities, up to $400 when it is admitted. A withdrawal waits 24 hours, and a piece backing
+  an open sale returns only after that sale is settled.
+- A seller who does not deliver in time pays the buyer 3% of the trade (at least $0.50) from the stake reserved for
+  that trade. Delivery inside the 30-minute grace period, or during a certified outage of our services, pays nothing.
+- Stakers share a reward pool of 5 RESET a day, counted per Bitcoin block. Stake that backs live sell offers counts
+  double. Rewards are paid at 0.1 RESET or weekly; an empty pool pauses rewards without creating debt. A seller who
+  does not deliver forfeits unpaid rewards.
+- The app shows stake, rewards, the reserved stake on each sale, delivery deadlines and warnings before a deadline.
+- Buyers and sellers must update. Once the stake rule is switched on (announced one hour ahead), older apps can
+  still finish their existing trades, but sellers cannot list and older buyers are told to update the app.
+- A funded seller no longer reads an empty balance while signed Trac data catches up.
+
 ## 0.1.47
 
 - Peers keep reading when a Trac network replica is slow (bounded reads, automatic reconnect, stalled-reader recovery). Update recommended for all peer operators.

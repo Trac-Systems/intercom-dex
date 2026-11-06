@@ -11,6 +11,7 @@ import {
   buildWithdrawTradeFeesInstruction, buildSetConfigInstruction, buildWithdrawFeesInstruction,
 } from './escrow.js';
 import { checkEscrow as inspectEscrow } from './check.js';
+import { stakeEscrowHistory } from './stake-history.js';
 import { LOCK_START_MARGIN_SEC } from '../core/trade-buyer.js';
 import { rpcCall, readAccount } from './rpc.js';
 import { readAccountQuorum, QuorumError } from './quorum.js';
@@ -485,7 +486,8 @@ export function createSolanaAdapter({
     const intent = tradeIntent('lock', terms, hashHex);
     // A deposit only helps while the seller may still send: a new lock is signed only before sendBy minus the lock-start
     // margin, and journaled bytes are first sent only before sendBy.
-    const window = { signBefore: terms.sendBy - LOCK_START_MARGIN_SEC, sendBefore: terms.sendBy };
+    const lockBy = terms.sendBy - (terms.bond ? 120 : 0);
+    const window = { signBefore: lockBy - LOCK_START_MARGIN_SEC, sendBefore: lockBy };
     const submitLock = async () => {
       try { return await submit(`lock:${hashHex}`, [buildInitInstruction(input)], intent, window); }
       catch (error) {
@@ -865,6 +867,7 @@ export function createSolanaAdapter({
   return {
     lockEscrow: input => guarded(`lock:${input?.hashHex}`, () => lockEscrow(input)),
     checkEscrow: input => inspectTrade(input),
+    stakeEscrowHistory: input => stakeEscrowHistory({ ...input, endpoints: urls, need, timeoutMs, programId: program }),
     buyerPayment: input => buyerPayment({ ...input, endpoints: urls, need, timeoutMs, programId: program }),
     // Read-only: null means a successful read found no settlement; pending means the read could not decide.
     settlementSignature: async ({ terms, hashHex }) => {

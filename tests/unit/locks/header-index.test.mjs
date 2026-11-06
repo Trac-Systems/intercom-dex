@@ -27,7 +27,7 @@ test('concurrent header lookups share one history scan, then index only appended
 });
 
 test('header index survives restart and rebuilds corrupt derived cache entries', async t => {
-  const area = path.resolve('.test-tmp/locks-headers'); await fs.mkdir(area, { recursive: true });
+  const area = path.resolve(process.env.TMPDIR ?? '.test-tmp', 'locks-headers'); await fs.mkdir(area, { recursive: true });
   const directory = await fs.mkdtemp(path.join(area, 'index-')); t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const hx = header(42), hash = headerHash(hx), rows = [packet(hx)], view = history(rows);
   await new LocksHeaders(directory).get(view, hash); view.reads.length = 0;
@@ -55,9 +55,10 @@ test('cached header times still recheck counted height and the signed hash on ev
   counted = 9; await assert.rejects(clock.T(10), /not counted/);
 });
 
-test('a stalled history read keeps the progress made so far', async () => {
+test('a stalled history read keeps the progress made so far', async t => {
   const { LocksHeaders: Index } = await import('../../../peer/features/locks-headers.js');
-  const area = path.resolve('.test-tmp/locks-headers-stall'); await fs.rm(area, { recursive: true, force: true });
+  const parent = path.resolve(process.env.TMPDIR ?? '.test-tmp', 'locks-headers-stall'); await fs.mkdir(parent, { recursive: true });
+  const area = await fs.mkdtemp(path.join(parent, 'index-')); t.after(() => fs.rm(area, { recursive: true, force: true }));
   const index = new Index(area), total = 9000;
   const view = { get: async (key, opts) => {
     assert.ok(opts?.timeout > 0, 'every history read has a timeout');

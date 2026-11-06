@@ -111,7 +111,7 @@ TradeHost.prototype.addTrade = function(trade) {
       if (selected.kind === 'seller-no-send-refund' && input.terms.seller.tracAddr === selected.sellerAddr) {
         throw new Error('test transfer adapter unavailable before submission');
       }
-      if (selected.kind === 'seller-no-send' && input.terms.seller.tracAddr === selected.sellerAddr) {
+      if (['seller-no-send', 'stake-buyer-no-lock'].includes(selected.kind) && input.terms.seller.tracAddr === selected.sellerAddr) {
         return Promise.resolve({ ok: false, reason: 'test seller deliberately withholds transfer' });
       }
       return send(input);

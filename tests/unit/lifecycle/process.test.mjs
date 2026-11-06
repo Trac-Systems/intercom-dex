@@ -66,6 +66,7 @@ test('detached CLI survives launcher exit, reports status/link, rejects unsafe s
   writeFileSync(join(dir, 'peer.json'), JSON.stringify({ network: 'mainnet', role: 'trader', servicePeerKey: config.servicePeerKey, bridge: { port: 1, tokenFile: bridgeToken } }));
   writeFileSync(bridgeToken, 'ab'.repeat(32), { mode: 0o600 });
   const sources = {
+    '/src/stake/runtime.js': 'export function createStakeRuntime(){return {async start(){},stop(){}}}',
     '/peer/scripts/pear-runner.mjs': `import {appendFileSync} from 'node:fs';
 console.log('DEX_PEER_READY {}');
 const stop=()=>{appendFileSync(${JSON.stringify(join(dir, 'order.txt'))},'peer\\n');process.exit(0)};

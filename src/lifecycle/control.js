@@ -1,3 +1,4 @@
+import { deliveryStatus, deliveryWarnings } from '../stake/status.js';
 import { realpathSync } from 'node:fs';
 import { SOFTWARE } from '../core/software.js';
 import { isFinished } from '../roles/host.js';
@@ -26,8 +27,10 @@ export function lifecycleHandler({ id, config, role, wallets, dashboard, stop, f
       try {
         if (req.method === 'GET' && req.url === '/lifecycle') return reply(200, {
           id, dataDir: realpathSync(config.dataDir), pid: process.pid, software: SOFTWARE, node: process.version,
+          ...(role.stakeView?.() ?? {}), warnings: deliveryWarnings([...(role.host?.trades.values() ?? [])], Math.floor(Date.now() / 1000)),
           signers: role.onlineSigners(), dashboard: dashboard(), blockers: stopBlockers(role, wallets), stopping,
           trades: [...(role.host?.trades.values() ?? [])].map(t => ({ key: t.key, tradeId: t.state.tradeId ?? null,
+            ...(deliveryStatus(t, Math.floor(Date.now() / 1000)) ? { delivery: deliveryStatus(t, Math.floor(Date.now() / 1000)) } : {}),
             role: t.role, phase: t.state.phase, reason: t.state.reason ?? null,
             claimFailure: t.state.claimFailure ?? null, warning: claimWarning(t.state) })),
         });

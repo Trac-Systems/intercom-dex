@@ -82,3 +82,14 @@ test('BookView keeps full per-offer inventory apart from reconstructed deltas an
   view.full({ ...full, seq: 2, ts: 120, levels: [], remaining: [] });
   assert.deepEqual(view.inventory.get(o.pair).remaining, []);
 });
+
+test('armed stake books publish covered ask identities immediately when their inventory changes', () => {
+  const feed = new BookFeed(); let seq = 0;
+  const first = feed.next('RESET/USDC', 1, [], 100, () => ++seq, { bindOffers: true });
+  assert.equal(first.kind, 'book');
+  const offer = { offerId: 'a'.repeat(64), side: 'sell', price: '2000', baseAmount: '50000' };
+  const added = feed.next('RESET/USDC', 1, [offer], 105, () => ++seq, { bindOffers: true });
+  assert.equal(added.kind, 'book'); assert.equal(added.body.remaining[0].offerId, offer.offerId);
+  const removed = feed.next('RESET/USDC', 1, [], 110, () => ++seq, { bindOffers: true });
+  assert.equal(removed.kind, 'book'); assert.deepEqual(removed.body.remaining, []);
+});

@@ -5,6 +5,8 @@ import PeerWallet from '../../../peer/node_modules/trac-wallet/index.js';
 import { safeEncodeApplyOperation } from '../../../peer/node_modules/trac-msb/src/utils/protobuf/operationHelpers.js';
 import { normalizeTransferOperation, normalizeTransactionOperation } from '../../../peer/node_modules/trac-msb/src/utils/normalizers.js';
 import { buildTnkTransfer, buildResetTransfer } from '../../../src/trac/transfers.js';
+import { createStakeDeliveryVerifier } from '../../../peer/src/trac/stake-delivery.js';
+import { signedPosition } from '../../../peer/src/trac/stake-position.js';
 import { createTransferVerifier } from '../../../peer/src/trac/verify-transfer.js';
 
 async function fixture(asset = 'TNK') {
@@ -94,5 +96,40 @@ test('RESET rejects wrong MSB operation type, contract, hash, sender, or content
     const f = await fixture('RESET'); change(f);
     f.signed.set(f.request.txHash, safeEncodeApplyOperation(f.op));
     assert.equal((await f.verify(f.request)).reason, expected);
+  }
+});
+
+for (const asset of ['TNK', 'RESET']) test(`${asset} final delivery is classified by signed prefix, never local observation time`, async () => {
+  const f = await fixture(asset), msb = f.options.msb;
+  const early = new Map(), later = f.signed;
+  const core = { key: Buffer.alloc(32, 8), signedLength: 20, treeHash: async length => Buffer.alloc(32, length) };
+  msb.state.base = { view: { core, checkout(length) { return {
+    get: async key => (length === 10 ? early : later).has(key) ? { value: (length === 10 ? early : later).get(key) } : null,
+    close: async () => {},
+  }; } } };
+  const position = await signedPosition(msb, { bootstrap: msb.config.bootstrap.toString('hex'), coreKey: core.key.toString('hex'), length: 10, root: '0a'.repeat(32) });
+  const verify = createStakeDeliveryVerifier(f.options);
+  assert.equal((await verify({ ...f.request, position })).state, 'late');
+  early.set(f.request.txHash, later.get(f.request.txHash));
+  assert.equal((await verify({ ...f.request, position })).state, 'in-time');
+  assert.equal((await verify({ ...f.request, minAmount: '41', position })).state, 'invalid');
+  assert.equal((await verify({ ...f.request, position: { ...position, length: 21 } })).state, 'unknown');
+  early.set(f.request.txHash, Buffer.from('different'));
+  assert.equal((await verify({ ...f.request, position })).state, 'unknown');
+  if (asset === 'RESET') {
+    f.rows.clear();
+    early.set(f.request.txHash, later.get(f.request.txHash));
+    assert.equal((await verify({ ...f.request, position })).state, 'unknown', 'an exact pre-cutoff operation defers while application is pending');
+    early.clear();
+    assert.equal((await verify({ ...f.request, position })).state, 'late', 'an exact operation first included after cutoff cannot defer forever');
+  }
+});
+
+test('only an exact pending RESET operation defers penalty; unrelated signed content is definitively invalid', async () => {
+  const f = await fixture('RESET'), verify = createTransferVerifier({ ...f.options, exactAmount: true });
+  f.rows.clear(); assert.equal((await verify(f.request)).reason, 'reset_not_final');
+  for (const patch of [{ minAmount: '41' }, { to: f.request.from }, { from: f.request.to }, { nonce: '00'.repeat(32) }]) {
+    const result = await verify({ ...f.request, ...patch });
+    assert.equal(result.ok, false); assert.equal(result.final, true);
   }
 });

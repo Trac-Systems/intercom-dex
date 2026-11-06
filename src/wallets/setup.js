@@ -17,23 +17,23 @@ export const walletFile = config => absolute(config.trac?.walletFile ?? join(con
 // Startups are idempotent, including a previous startup interrupted between the two file writes.
 export async function ensureWallets(config, profile, env = process.env) {
   absolute(config.dataDir); validatePayout(config.payout);
-  if (!['trader', 'service', 'signer'].includes(config.role)) throw new Error('Invalid role');
+  if (!['trader', 'service', 'signer', 'payout'].includes(config.role)) throw new Error('Invalid role');
   const password = env[config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'];
   const tracPassword = env[config.trac?.passwordEnv ?? config.keyPasswordEnv ?? 'DEX_KEY_PASSWORD'];
   for (const name of ['identity.key', 'box.key', 'store.key']) if (existsSync(join(config.dataDir, name))) throw new Error('Legacy plaintext keys require an empty data folder');
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   const keyFile = join(config.dataDir, 'keyring.json');
-  if (config.role === 'trader' && walletFile(config) === keyFile) throw new Error('Trac wallet and keyring must be separate files');
+  if (['trader', 'payout'].includes(config.role) && walletFile(config) === keyFile) throw new Error('Trac wallet and keyring must be separate files');
   if (!existsSync(keyFile)) {
     let imported;
     try {
       if (config.solana?.importKeypairFile) imported = solanaImport(config.solana.importKeypairFile);
-      await createKeyring(keyFile, password, { solanaSecret: imported, withSolana: config.role !== 'signer' });
+      await createKeyring(keyFile, password, { solanaSecret: imported, withSolana: !['signer', 'payout'].includes(config.role) });
     } finally { imported?.fill(0); }
   }
   const keys = await openKeyring(keyFile, password);
   try {
-    if (config.role !== 'trader') return { keys, wallet: null };
+    if (!['trader', 'payout'].includes(config.role)) return { keys, wallet: null };
     const file = walletFile(config);
     const wallet = existsSync(file) ? await openWallet(file, tracPassword) : await createWallet(file, tracPassword, { profile });
     return { keys, wallet };
@@ -85,11 +85,11 @@ export function rpcAdvice(config) {
 
 export async function setupWallets(config, profile, { password, tracPassword = password, importSolana, mnemonic, resetKeystore, resetPassword, onMnemonic = () => {} } = {}) {
   absolute(config.dataDir); validatePayout(config.payout);
-  if (!['trader', 'service', 'signer'].includes(config.role)) throw new Error('Invalid role');
+  if (!['trader', 'service', 'signer', 'payout'].includes(config.role)) throw new Error('Invalid role');
   if (typeof password !== 'string' || password.length < 12) throw new Error('Keyring password of at least 12 characters required');
   if (mnemonic !== undefined && resetKeystore) throw new Error('Choose one Trac import method');
-  if (config.role !== 'trader' && (mnemonic !== undefined || resetKeystore)) throw new Error('Trac wallet is for traders');
-  if (config.role === 'signer' && importSolana) throw new Error('Signer has no Solana wallet');
+  if (!['trader', 'payout'].includes(config.role) && (mnemonic !== undefined || resetKeystore)) throw new Error('Trac wallet is for traders');
+  if (['signer', 'payout'].includes(config.role) && importSolana) throw new Error('This role has no Solana wallet');
   const keyFile = join(config.dataDir, 'keyring.json'), tracFile = absolute(walletFile(config));
   if (tracFile === keyFile) throw new Error('Trac wallet and keyring must be separate files');
   for (const file of [keyFile, tracFile, ...['identity.key', 'box.key', 'store.key'].map(n => join(config.dataDir, n))]) {
@@ -103,10 +103,10 @@ export async function setupWallets(config, profile, { password, tracPassword = p
   try {
     if (resetKeystore) mnemonic = await importResetKeystore(resetKeystore, resetPassword, profile);
     mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
-    if (config.role === 'trader') wallet = await createWallet(tracFile, tracPassword, { profile, mnemonic, onMnemonic });
-    const pub = await createKeyring(keyFile, password, { solanaSecret: imported, withSolana: config.role !== 'signer' });
+    if (['trader', 'payout'].includes(config.role)) wallet = await createWallet(tracFile, tracPassword, { profile, mnemonic, onMnemonic });
+    const pub = await createKeyring(keyFile, password, { solanaSecret: imported, withSolana: !['signer', 'payout'].includes(config.role) });
     return { dexKey: pub.dexKey, addresses: { solana: pub.solana ? new PublicKey(Buffer.from(pub.solana, 'hex')).toBase58() : null,
-      trac: wallet?.address ?? null }, minimumFees: { SOL: MIN_SOL, TNK: config.role === 'trader' ? MIN_TNK : '0' }, ...payoutAdvice(config), ...rpcAdvice(config) };
+      trac: wallet?.address ?? null }, minimumFees: { SOL: config.role === 'payout' ? '0' : MIN_SOL, TNK: ['trader', 'payout'].includes(config.role) ? MIN_TNK : '0' }, ...payoutAdvice(config), ...rpcAdvice(config) };
   } finally { wallet?.close(); imported?.fill(0); }
 }
 

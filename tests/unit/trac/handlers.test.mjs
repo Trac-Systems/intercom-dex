@@ -15,7 +15,7 @@ function fixture() {
 test('bridge handlers return local MSB context and only a broadcast hash', async () => {
   const bus = fixture();
   const handlers = makeHandlers({ bus, peer: {}, config: {} });
-  assert.deepEqual(Object.keys(handlers).sort(), ['dex_balances', 'dex_msb_info', 'dex_reset_context', 'dex_tnk_broadcast', 'dex_verify']);
+  assert.deepEqual(Object.keys(handlers).sort(), ['dex_balances', 'dex_msb_info', 'dex_reset_context', 'dex_stake_delivery', 'dex_stake_position', 'dex_tnk_broadcast', 'dex_verify']);
   assert.deepEqual(await handlers.dex_msb_info(), { networkId: 918, txv: '02'.repeat(32), addressPrefix: 'trac', msbBootstrap: '01'.repeat(32), feeTnk: '30000000000000000' });
   assert.deepEqual(await handlers.dex_tnk_broadcast({ payload: { type: 13, tro: { tx: '03'.repeat(32) } } }), { txHash: '03'.repeat(32) });
   await assert.rejects(handlers.dex_tnk_broadcast({}));

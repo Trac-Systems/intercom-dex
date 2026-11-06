@@ -507,6 +507,84 @@ test('a timely observation stays eligible at and after the cutoff across restart
 });
 
 for (const asset of ['TNK', 'RESET']) {
+  test(`${asset} grace retries use only saved bytes through the inclusive boundary and recover after restart`, async t => {
+    let seconds = 1800000000;
+    t.mock.method(Date, 'now', () => seconds * 1000);
+    const f = fixture();
+    f.terms.pair = `${asset}/USDC`; f.terms.base = BASES[asset];
+    const signed = asset === 'TNK'
+      ? { payload: await buildTnkTransfer({ ...f.context, from: f.wallet.address, to: f.request.to,
+        amount: '42', tradeId: f.tradeId, sign: f.wallet.sign }), submission: null }
+      : await buildResetTransfer({ ...f.resetContext, writer: '77'.repeat(32), from: f.wallet.publicKey, to: f.toKey,
+        amount: '42', tradeId: f.tradeId, sign: f.wallet.sign });
+    const txHash = (asset === 'TNK' ? signed.payload.tro : signed.payload.txo).tx;
+    const intent = { tradeId: f.tradeId, asset, from: f.wallet.address, to: f.request.to, amount: '42',
+      sendBy: f.terms.sendBy, createdAt: now(), sentAt: now(), txHash, ...signed };
+    const store = openIntentStore(f.intentFolder); store.save(intent); store.close();
+    const journalFile = path.join(f.intentFolder, 'intents.jsonl'), journal = fs.readFileSync(journalFile, 'utf8');
+    const grace = 300, deadline = intent.sendBy + grace;
+    let proof = { ok: false, final: false }, submissions = 0, crossDeadline = false;
+    f.bridge.call = async (type, params) => {
+      if (type === 'dex_verify') {
+        assert.deepEqual(params, { asset, txHash, from: asset === 'TNK' ? f.wallet.address : f.wallet.publicKey,
+          to: asset === 'TNK' ? f.request.to : f.toKey, minAmount: '42', nonce: transferNonce(f.tradeId) });
+        if (crossDeadline) seconds = deadline + 1;
+        if (proof instanceof Error) throw proof;
+        return proof;
+      }
+      assert.equal(asset, 'TNK'); assert.equal(type, 'dex_tnk_broadcast');
+      assert.deepEqual(params.payload, intent.payload); submissions++;
+      return { txHash };
+    };
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+      assert.equal(asset, 'RESET'); assert.equal(new URL(url).pathname, '/v1/tx/submit');
+      assert.deepEqual(JSON.parse(options.body), intent.submission); submissions++;
+      return new Response(JSON.stringify({ ok: true, result: { txo: { tx: txHash } } }));
+    });
+    let adapter = createTracAdapter({ ...f, wallet: null, resetGatewayUrl: 'http://127.0.0.1:47103' });
+    t.after(() => adapter.close());
+    const request = { terms: f.terms, tradeId: f.tradeId, overdueDelaySec: grace };
+    for (seconds of [intent.sendBy, deadline]) {
+      assert.equal((await adapter.retryOriginalTransfer(request)).ok, true);
+      adapter.close(); adapter = createTracAdapter({ ...f, wallet: null, resetGatewayUrl: 'http://127.0.0.1:47103' });
+    }
+    assert.equal(submissions, 2);
+    seconds = intent.sendBy;
+    assert.equal((await adapter.sendTransfer({ ...f, resume: true })).reason, 'past_send_deadline');
+    for (const patch of [{ baseAmount: '43' }, { sendBy: intent.sendBy + 1 }, { buyer: { tracAddr: f.wallet.address } }]) {
+      assert.equal((await adapter.retryOriginalTransfer({ ...request, terms: { ...f.terms, ...patch } })).reason, 'intent_terms_mismatch');
+    }
+    for (const invalid of [null, 299, 21601, 300.5, '300']) {
+      assert.equal((await adapter.retryOriginalTransfer({ ...request, overdueDelaySec: invalid })).reason, 'invalid_grace_policy');
+    }
+    await assert.rejects(adapter.retryOriginalTransfer(f), /Frozen grace policy/);
+    for (proof of [new Error('offline'), { ok: false, final: true, reason: 'wrong_to' }, { ok: true, final: true, amount: '43' }]) {
+      assert.equal((await adapter.retryOriginalTransfer(request)).ok, false);
+    }
+    for (proof of [{ ok: false, final: false }, new Error('offline')]) {
+      seconds = deadline + 1;
+      assert.equal((await adapter.retryOriginalTransfer(request)).reason, 'past_send_deadline');
+      seconds = deadline; crossDeadline = true;
+      assert.equal((await adapter.retryOriginalTransfer(request)).reason, 'past_send_deadline');
+      crossDeadline = false;
+    }
+    proof = { ok: true, final: true, amount: '42' };
+    assert.equal((await adapter.retryOriginalTransfer(request)).ok, true);
+    assert.equal(submissions, 2);
+    assert.equal(fs.readFileSync(journalFile, 'utf8'), journal);
+  });
+
+  test(`${asset} grace retry never creates an absent original intent`, async t => {
+    const f = fixture(); f.terms.pair = `${asset}/USDC`; f.terms.base = BASES[asset];
+    let calls = 0;
+    f.wallet.sign = () => { calls++; throw Error('Must not sign'); };
+    f.bridge.call = async () => { calls++; throw Error('Must not prepare'); };
+    const adapter = createTracAdapter(f); t.after(() => adapter.close());
+    assert.equal((await adapter.retryOriginalTransfer({ ...f, overdueDelaySec: 300 })).reason, 'original_intent_required');
+    assert.equal(calls, 0);
+    assert.equal(fs.readFileSync(path.join(f.intentFolder, 'intents.jsonl'), 'utf8'), '');
+  });
+
   test(`${asset} saved intents only reconcile at or after sendBy, including lookup failures and mismatches`, async () => {
     const clock = Date.now, savedFetch = globalThis.fetch;
     let milliseconds = 1800000000000;

@@ -6,9 +6,29 @@ import { encodeKey } from '../../../src/core/keys.js';
 import { seal } from '../../../src/core/envelope.js';
 import { simulation } from '../core/simulation.mjs';
 import { hex } from '../core/helpers.mjs';
+import { admissionFixture } from '../stake/admission-helpers.mjs';
+import { prepareBond } from '../../../src/stake/admission.js';
 
 const transcript = simulation({ capturePhases: true });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+test('a finalized deciding block uses background admission evidence without a synchronous signer round', async t => {
+  const clock = { ms: 100000 }, { host } = hostFixture(t, { finalizedSlot: async () => 100, tipSlot: async () => 132 }, clock);
+  await host.start();
+  const state = structuredClone(transcript.snapshots.get('seller:awaitRandomness')), f = admissionFixture();
+  state.draft.bond = prepareBond(f.args); state.draft.committee = f.policy.epoch.members;
+  state.registry.sellerBond = f.policy; state.registry.params.n = 4;
+  state.registry.signers = state.registry.signers.slice(0, 4).map((s, i) => ({ ...s, ...f.policy.epoch.members[i] }));
+  let proposed = 0;
+  host.stakeAdmission = { refresh: () => assert.fail('network refresh blocks the deciding-block queue'),
+    propose: () => { proposed++; return state.draft.bond; } };
+  await host.addTrade({ key: 'bond-background', role: 'seller', state, lifetimeSec: 86400 });
+  clock.ms += 130000;
+  await host.deliver('bond-background', { type: 'tick', chain: { acceptSlot: state.acceptSlot,
+    slot: state.acceptSlot + 96, blockhash: hex(), finalized: true, firstFinalized: true } });
+  assert.equal(proposed, 1);
+  assert.equal(host.trades.get('bond-background').state.phase, 'awaitTerms');
+});
 
 function hostFixture(t, solana, clock) {
   t.mock.method(performance, 'now', () => clock.ms);

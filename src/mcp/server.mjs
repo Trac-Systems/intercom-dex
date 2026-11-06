@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { readPrivateFile } from '../roles/keyring.js';
 import { ensureTrader } from '../lifecycle/manager.js';
+import { registerStakeTools } from './stake-tools.js';
 import { registerWalletTools } from './wallet-tools.js';
 import { registerChatTools } from './chat-tools.js';
 import { registerLocksTools } from './locks-tools.js';
@@ -27,10 +28,10 @@ async function call(method, path, body) {
   const res = await fetch(url + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined });
   const value = await res.json();
-  if (!res.ok) throw new Error(value.error ?? `HTTP ${res.status}`);
+  if (!res.ok && !(value.ok === false && typeof value.code === 'string' && value.details && Array.isArray(value.money))) throw new Error(value.error ?? `HTTP ${res.status}`);
   return value;
 }
-const text = value => ({ content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] });
+const text = value => ({ ...(value?.ok === false ? { isError: true } : {}), content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] });
 const pair = pairSchema.describe('An open pair from dex_status.pairs');
 const units = z.string().regex(/^[1-9][0-9]*$/).describe('Integer base units: TNK 18 decimals, RESET 8 decimals');
 
@@ -38,7 +39,8 @@ const server = new McpServer({ name: 'intercom-dex', version: SOFTWARE });
 registerWalletTools(server, call);
 registerChatTools(server, call);
 registerLocksTools(server, call);
-server.registerTool('dex_status', { description: 'This trader: addresses, own offers, trades, registry pairs and update required status' },
+registerStakeTools(server, call);
+server.registerTool('dex_status', { description: 'This trader: addresses, offers and pause reasons, trades with delivery deadlines and amounts at risk, stake, rewards, warnings, registry pairs and update required status' },
   async () => text(await call('GET', '/status')));
 server.registerTool('dex_book', { description: 'Reconstructed best 50 price levels per side, 24 h ticker, and fresh other-maker offers with venue remaining sizes for a pair', inputSchema: { pair } },
   async ({ pair: p }) => { const s = await call('GET', '/status'); return text({ pair: s.pairs.find(pair => pair.pair === p) ?? null,

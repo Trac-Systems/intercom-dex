@@ -11,6 +11,8 @@ import { encodeKey } from '../../../src/core/keys.js';
 import { accountBalances } from '../../../src/wallets/accounting.js';
 import { offerIdOf } from '../../../src/roles/common.js';
 import { availableOffer } from '../../../src/market/book.js';
+import { stakeStatus, rewardsStatus } from './stake-fixtures.mjs';
+import { Trader } from '../../../src/roles/trader.js';
 
 export const SECRETS = { entropy: 'e1'.repeat(32), nonce: 'a7'.repeat(32), secretHex: '5e'.repeat(32), share: '4f'.repeat(32) };
 export const nowSec = () => Math.floor(Date.now() / 1000);
@@ -75,9 +77,15 @@ export function traderFixture({ now = nowSec() } = {}) {
       { side: 'sell', price: '0.42', baseAmount: '5000000000000000000', offers: 1 }, { side: 'sell', price: '0.44', baseAmount: '10000000000000000000', offers: 1 },
       { side: 'sell', price: '0.45', baseAmount: '2000000000000000000', offers: 1 }, { side: 'buy', price: '0.39', baseAmount: '8000000000000000000', offers: 1 }] }]]),
     tickers: new Map([['TNK/USDC', { pair: 'TNK/USDC', last: '0.41', volume24h: '123450000', ts: now }]]),
+    // SB4 §6: stake, rewards and warnings; a pause per own offer and a delivery per trade, both set by tests.
+    stake: stakeStatus(), rewards: rewardsStatus(now), warnings: [], pauses: new Map(), deliveries: new Map(),
     status() {
       return { software: '0.1.0', updateRequired: false, registryConflict: null, registryVersion: 1, signersOnline: f.registry.signers.slice(0, 4).map(s => s.dexKey),
-        mine: [...this.mine.values()].map(o => ({ ...o, available: '9000000000000000000', reserved: '1000000000000000000', filled: '0' })) };
+        mine: [...this.mine.values()].map(o => ({ ...o, available: '9000000000000000000', reserved: '1000000000000000000', filled: '0',
+          ...(this.pauses.has(o.offerId) ? { listed: false, pause: this.pauses.get(o.offerId) } : {}) })),
+        trades: [...this.host.trades.values()].map(t => ({ key: t.key, role: t.role, phase: t.state.phase, ...(this.bondProjection(t) ? { bond: this.bondProjection(t) } : {}),
+          ...(this.deliveries.has(t.key) ? { delivery: this.deliveries.get(t.key) } : {}) })),
+        stake: this.stake, rewards: this.rewards, warnings: this.warnings };
     },
     availableOffer(id) {
       const seen = this.offers.get(id);
@@ -85,10 +93,20 @@ export function traderFixture({ now = nowSec() } = {}) {
       const book = this.book.get(seen.offer.pair);
       return availableOffer(seen, book, this.bookView?.inventory.get(seen.offer.pair) ?? book, nowSec(), this.bookView?.heard?.get(seen.offer.pair));
     },
+    // The core's own bond status and preview (trades[].bond from the penalty result in `store`, role.bondPreview).
+    bondProjection: Trader.prototype.bondProjection, deliveryProjection: Trader.prototype.deliveryProjection, bondPreview: Trader.prototype.bondPreview,
     calls,
     async makeOffer(input) { calls.push(['offer', input]); return input; },
     async takeOffer(...args) { calls.push(['take', args]); return { key: 'k' }; },
     async cancelOffer(offerId) { calls.push(['cancel', offerId]); return { offerId, cancelled: true }; },
+    // Replies shaped like the core's (src/stake/client.js, Trader.retryDelivery). A preview sends nothing, so it is no call.
+    async stakePreview(units) {
+      return { amount: units, pieces: 2, tnkFee: '120000000000000000', tnkReserve: '180000000000000000', tnkTotal: '300000000000000000',
+        depositUsd: (BigInt(units) * 250000000n / 100000000n).toString(), capUsd: '400000000', expiresAt: nowSec() + 30 * 86400, withdrawDelaySec: 86400, capacityPending: true };
+    },
+    async stakeDeposit(units) { calls.push(['stakeDeposit', units]); return { ok: true, operationId: 'a1'.repeat(32), funded: units }; },
+    async stakeWithdraw(units) { calls.push(['stakeWithdraw', units]); return { ok: true, operationId: 'b2'.repeat(32), pending: true, availableAt: nowSec() + 86400 }; },
+    async retryDelivery(key) { calls.push(['retryDelivery', key]); return { ok: true, tradeId: 'ab'.repeat(32), delivery: this.deliveries.get(key) }; },
   };
   const info = walletInfo({ balances: { USDC: '25000000', SOL: '4000000', TNK: '12000000000000000000', RESET: '350000000', feeTnk: '30000000000000000' },
     offers: [mine], trades: [...trades.values()], registry: f.registry });

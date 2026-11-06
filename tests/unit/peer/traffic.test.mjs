@@ -256,7 +256,8 @@ test('dex config pins the owner operationally, enables one difficulty, defaults 
     assert.deepEqual(policy.sidechannel.powClasses, DEX_POW_CLASSES); assert.deepEqual(policy.sidechannel.powLowKinds, DEX_POW_LOW);
     for (const kind of ['heartbeat', 'transferSent', 'ack', 'sharePublish', 'claimed', 'refunded', 'summon']) assert.ok(DEX_POW_CLASSES[0].includes(kind), kind);
     assert.ok(DEX_POW_CLASSES[1].includes('accept')); assert.ok(DEX_POW_CLASSES[1].includes('reveal'));
-    assert.deepEqual(DEX_POW_CLASSES[2], ['deal']);
+    assert.deepEqual(DEX_POW_CLASSES[2], ['deal', 'stakeReply', 'stakeRequest']);
+    assert.equal(policy.sidechannel.powRequiredChannels.includes('intercom-dex:bonds'), true);
     assert.deepEqual(DEX_POW_LOW, ['decline']);
     const sc = new Sidechannel({}, policy.sidechannel);
     assert.equal(sc._powClass({ kind: 'settled' }), sc.powBackground);

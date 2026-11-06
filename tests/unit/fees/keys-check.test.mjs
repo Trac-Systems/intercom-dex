@@ -11,7 +11,7 @@ import { deriveConfigPda, deriveTradeConfigPda, deriveVaultAta } from '../../../
 import { PROGRAM_ID } from '../../../src/solana/constants.js';
 import { chainFixture } from './chain.mjs';
 
-const root = resolve('.test-tmp/wallet-fees'); mkdirSync(root, { recursive: true });
+const root = resolve(process.env.TMPDIR ?? '.test-tmp', 'wallet-fees'); mkdirSync(root, { recursive: true });
 const password = 'synthetic-key-check-password';
 async function setup(t) {
   const f = chainFixture(t), dir = mkdtempSync(join(root, 'check-'));

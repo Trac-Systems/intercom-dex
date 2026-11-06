@@ -66,6 +66,7 @@ export function resolveProfile(config, pins, isAbsolute) {
 }
 
 export function checkProfileRegistry(registry, profile) {
+  if (registry.sellerBond && registry.sellerBond.networkId !== profile.peer.msbNetworkId) throw new Error('Stake publication differs from the network profile');
   if (!profile.trade) return;
   for (const key of ['sendWindowSec', 'refundSec', 'graceSec']) {
     if (registry.params[key] !== profile.trade[key]) throw new Error(`Registry ${key} differs from the network profile`);

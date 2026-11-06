@@ -45,7 +45,7 @@ export function createTrader(role, { mode, offerId, terms, registry, nonce, entr
 }
 
 export function sendAction(state, kind, body) {
-  return { type: 'send', ch: 'intercom-dex:t:' + (body.tradeId ?? state.offerId), kind, body: parseBody(kind, body) };
+  return { type: 'send', ch: 'intercom-dex:t:' + (kind === 'terms' && body.terms?.bond ? state.offerId : body.tradeId ?? state.offerId), kind, body: parseBody(kind, body) };
 }
 
 export function abortTransition(state, reason) {
@@ -130,8 +130,10 @@ function budgetStage(s) {
 }
 
 function budgetLimit(s, stage) {
+  const bond = (s.terms ?? s.draft)?.bond, economics = s.registry?.sellerBond?.economics;
+  const policy = bond && [economics?.active, economics?.pending].find(p => p?.policyId === bond.policyId);
   return ({ 'take/accept': s.phase === 'awaitAccept' ? STEP_BUDGET_MS.connect : STEP_BUDGET_MS.accept,
-    'deciding block': STEP_BUDGET_MS.randomness, 'terms signatures': s.role === 'signer' ? STEP_BUDGET_MS.terms : STEP_BUDGET_MS.termsExchange,
+    'deciding block': policy?.settings.randomnessWaitSec * 1000 || STEP_BUDGET_MS.randomness, 'terms signatures': s.role === 'signer' ? STEP_BUDGET_MS.terms : STEP_BUDGET_MS.termsExchange,
     deal: s.role === 'buyer' ? STEP_BUDGET_MS.certificate : s.dealBudgetMs ?? STEP_BUDGET_MS.deal, acks: STEP_BUDGET_MS.acks })[stage];
 }
 
@@ -147,10 +149,10 @@ export function verifiedMessage(state, event) {
   hexKey.parse(m.from);
   if (m.kind !== 'deal') parseBody(m.kind, m.body);
   if (m.body.tradeId !== undefined && m.body.tradeId !== state.tradeId &&
-      !(m.kind === 'abort' && m.body.tradeId === state.offerId)) throw new Error('Wrong trade id');
+      !(m.kind === 'abort' && m.body.tradeId === state.offerId) && !(m.kind === 'terms' && state.draft?.bond && m.body.terms?.offerId === state.offerId)) throw new Error('Wrong trade id');
   if (m.body.offerId !== undefined && m.body.offerId !== state.offerId) throw new Error('Wrong offer id');
   const ch = 'intercom-dex:t:' + (m.body.tradeId ?? state.offerId);
-  if (m.ch !== ch && !(m.kind === 'sharePublish' && m.ch === 'intercom-dex:signers')) throw new Error('Wrong trade channel');
+  if (m.ch !== ch && !(m.kind === 'terms' && state.draft?.bond && m.ch === 'intercom-dex:t:' + state.offerId) && !(m.kind === 'sharePublish' && m.ch === 'intercom-dex:signers')) throw new Error('Wrong trade channel');
   const terms = state.terms ?? state.draft;
   if (m.kind === 'sharePublish' && m.body.commitments.length !== terms.k) throw new Error('Invalid publication dimensions');
   let allowed = false;
@@ -172,7 +174,7 @@ export function verifiedMessage(state, event) {
 function participant(draft, role) {
   const p = draft[role];
   return { dexKey: p.dexKey, tracAddr: p.tracAddr, solAddr: p.solPayer ?? p.solRecipient,
-    ...(p.tracProof ? { tracProof: p.tracProof } : {}) };
+    ...(p.tracProof ? { tracProof: p.tracProof } : {}), ...(p.boxKey ? { boxKey: p.boxKey } : {}), ...(p.stakeVersion ? { stakeVersion: p.stakeVersion } : {}) };
 }
 
 export function negotiationStep(state, event, message) {
@@ -189,7 +191,7 @@ export function negotiationStep(state, event, message) {
       actions.push(sendAction(s, 'take', { offerId: s.offerId, baseAmount: s.draft.baseAmount,
         pair: s.draft.pair, registryVersion: s.registry.version, software: SOFTWARE,
         taker: participant(s.draft, s.role), commitment: sha256Hex(hexToBytes(s.nonce, 32)),
-        sendBy: s.draft.sendBy, refundAfter: s.draft.refundAfter }));
+        sendBy: s.draft.sendBy, refundAfter: s.draft.refundAfter, ...(s.draft.bond ? { bond: s.draft.bond } : {}) }));
     }
     return { state: s, actions };
   }
@@ -215,7 +217,7 @@ export function negotiationStep(state, event, message) {
       // leave the reveal only a few seconds before the cutoff.
       s.acceptSlot = event.tipSlot;
       s.phase = 'awaitReveal';
-      actions.push(sendAction(s, 'accept', { offerId: s.offerId, takeCommitment: s.peerCommit, commitment: sha256Hex(hexToBytes(s.nonce, 32)), slot: s.acceptSlot }),
+      actions.push(sendAction(s, 'accept', { offerId: s.offerId, takeCommitment: s.peerCommit, commitment: sha256Hex(hexToBytes(s.nonce, 32)), slot: s.acceptSlot, ...(s.draft.bond ? { bond: s.draft.bond } : {}) }),
         sendAction(s, 'reveal', { offerId: s.offerId, takeCommitment: s.peerCommit, nonce: s.nonce }));
     } else if (message.kind === 'accept') {
       if (s.phase !== 'awaitAccept' || s.mode !== 'taker') throw new Error('Unexpected accept');
@@ -223,6 +225,10 @@ export function negotiationStep(state, event, message) {
       // randomness block already known, nor so far ahead that the trade stalls.
       if (b.slot < event.observedSlot - ACCEPT_SLOT_BEHIND || b.slot > event.observedSlot + 150) return abortTransition(s, 'Accept slot outside the freshness window');
       if (event.tipSlot >= b.slot + RANDOMNESS.REVEAL_CUTOFF) return abortTransition(s, 'Accept arrived too late');
+      if (b.bond) {
+        if (s.draft.bond && stableJSON(s.draft.bond) !== stableJSON(b.bond)) return abortTransition(s, 'bond_not_reserved');
+        s.draft.bond = b.bond;
+      } else if (s.draft.bond) return abortTransition(s, 'bond_not_reserved');
       s.peerCommit = b.commitment;
       s.acceptSlot = b.slot;
       s.phase = 'awaitReveal';
@@ -235,6 +241,11 @@ export function negotiationStep(state, event, message) {
       s.phase = 'awaitRandomness';
       actions.push({ type: 'persist', scope: 'reveals', tradeId: null, record: { offerId: s.offerId, acceptSlot: s.acceptSlot } });
     } else if (message.kind === 'terms') {
+      if (s.role === 'buyer' && s.phase === 'awaitTerms' && s.draft.bond && b.terms.bond) {
+        if (stableJSON({ ...b.terms, bond: s.terms.bond }) !== stableJSON(s.terms)) throw new Error('Terms disagreement');
+        s.terms = validateTerms(b.terms); s.tradeId = tradeId(s.terms);
+        actions.push(sendAction(s, 'terms', { tradeId: s.tradeId, terms: s.terms }));
+      }
       if (s.phase !== 'awaitTerms' || stableJSON(b.terms) !== stableJSON(s.terms) || b.tradeId !== tradeId(b.terms)) throw new Error('Terms disagreement');
       if (event.onlineSigners && s.terms.committee.filter(c => event.onlineSigners.includes(c.dexKey)).length < s.terms.k + 1) {
         return abortTransition(s, 'Not enough committee signers online');
@@ -252,14 +263,15 @@ export function negotiationStep(state, event, message) {
     const R = tradeRandomness({ ...event.chain, makerNonce: s.mode === 'maker' ? s.nonce : s.peerNonce,
       takerNonce: s.mode === 'taker' ? s.nonce : s.peerNonce });
     const committee = selectCommittee(s.registry, R, { n: s.registry.params.n, k: s.registry.params.k,
-      quoteAmount: s.draft.quoteAmount, pair: s.draft.pair, exclude: [s.self, s.peer] }).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
+      quoteAmount: s.draft.quoteAmount, pair: s.draft.pair, bonded: !!s.draft.bond, exclude: [s.self, s.peer] }).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
+    if (s.role === 'seller' && s.draft.bond && event.bond) s.draft.bond = event.bond;
     s.terms = validateTerms({ ...s.draft, committee, R });
     s.tradeId = tradeId(s.terms);
     if (event.onlineSigners && committee.filter(c => event.onlineSigners.includes(c.dexKey)).length < s.terms.k + 1) {
       return abortTransition(s, 'Not enough committee signers online');
     }
     s.phase = 'awaitTerms';
-    actions.push(sendAction(s, 'terms', { tradeId: s.tradeId, terms: s.terms }));
+    if (!s.draft.bond || s.role === 'seller') actions.push(sendAction(s, 'terms', { tradeId: s.tradeId, terms: s.terms }));
     return { state: s, actions };
   }
   return null;
