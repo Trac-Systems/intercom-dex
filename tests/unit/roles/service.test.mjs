@@ -749,6 +749,29 @@ test('an offer whose maker cannot fund the smallest trade is left out of the pub
   assert.equal(s.service.status().unfunded[s.offer.pair], 0);
 });
 
+test('an offer whose stake check was out of date comes back with its maker\'s wallet already read', async t => {
+  const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const s = setup({ immediate: true }); await s.service.start(); t.after(() => s.service.stop());
+  // Strict seller funding and stake admission are on; the stake check itself is stubbed.
+  let covered = true;
+  s.service.registry.sellerBond = { acceptNew: false };
+  s.service.stakeRuntime = { admission: { covered: () => covered, coverage: () => ({ code: 'stake_stale' }) } };
+  s.service.funds.trac = { balances: async () => ({ TNK: '10000000000000000000', RESET: '0', feeTnk: '30000000000000000' }) };
+  await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS));
+  const tick = async seconds => { s.clock.t += seconds; timers.find(x => x.ms === 5000).fn(); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)); };
+  const shown = () => s.bridge.sent.filter(x => ['book', 'bookDelta'].includes(x.envelope.kind) && x.envelope.body.pair === s.offer.pair).at(-1)?.envelope.body;
+  const listed = () => shown()?.remaining?.map(r => r.offerId) ?? shown()?.levels?.filter(l => l.side === 'sell').map(() => s.offer.offerId) ?? [];
+  await tick(5); await tick(5);
+  assert.deepEqual(listed(), [s.offer.offerId]);
+  covered = false;
+  for (let i = 0; i < 24; i++) await s.emit(OFFERS, s.envelope(s.f.seller, 'offer', s.offer, OFFERS)), await tick(5);
+  assert.deepEqual(listed(), [], 'hidden while its stake check is out of date');
+  covered = true; await tick(5);
+  assert.deepEqual(listed(), [s.offer.offerId], 'shown again at once, not hidden once more for an unread wallet');
+  assert.equal(s.service.hidden.has(s.offer.offerId), false);
+});
+
 test('fee rotation publishes old live offers in the current book with their unfilled, unreserved sizes', async t => {
   const timers = []; t.mock.method(globalThis, 'setInterval', (fn, ms) => { timers.push({ fn, ms }); return timers.length; });
   t.mock.method(globalThis, 'clearInterval', () => {});

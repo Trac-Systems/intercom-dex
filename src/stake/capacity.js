@@ -74,15 +74,22 @@ function restore(free, released) {
   }
   return result;
 }
+// A piece is retired by its certified collection, or by a certified abandonment when its key setup failed before any
+// funding (custody-signer abandonVote).
+export const abandonSchema = z.object({ unitId: hex, ownerAddress: z.string(), principalReset: units, descriptorDigest: hex }).strict();
 function retireState(state, certificate, current) {
   const id = certificate?.[0]?.fact.body.unitId, piece = state.pieces[id];
   const origin = piece?.epochId ?? state.epochId;
   const context = origin === current.epoch.id ? current : state.predecessors?.[origin];
   if (!context) throw new Error('Original capacity epoch required');
-  const fact = verifyCertificate(certificate, context, 'collected');
-  z.object({ unitId: hex, generation: uint, decisionId: hex, txHash: hex.nullable(), asset: z.literal('TNK').optional() }).strict().parse(fact.body);
+  const abandoned = certificate?.[0]?.fact.kind === 'capacity-abandon';
+  const fact = verifyCertificate(certificate, context, abandoned ? 'capacity-abandon' : 'collected');
+  if (abandoned) abandonSchema.parse(fact.body);
+  else z.object({ unitId: hex, generation: uint, decisionId: hex, txHash: hex.nullable(), asset: z.literal('TNK').optional() }).strict().parse(fact.body);
   const digest = factDigest(fact);
   if (!piece) throw new Error('Unknown capacity retirement');
+  if (abandoned && (piece.ownerAddress !== fact.body.ownerAddress || piece.principalReset !== fact.body.principalReset))
+    throw new Error('Abandoned capacity differs');
   if (piece.retired) { if (piece.retirementDigest !== digest) throw new Error('Conflicting capacity retirement'); return piece; }
   const owner = state.owners[piece.ownerAddress];
   state.tokens[piece.globalToken.id] = { generation: uint.parse(piece.globalToken.generation + 1) };

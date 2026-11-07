@@ -1160,6 +1160,12 @@ custody includes exact funding, certified inventory, withdrawal barriers, the
 signed wait, sealed return and retirement. Pending operations resume automatically;
 `stake.operationId` and `stake.operationPending` identify their progress. Poll
 status after an accepted request rather than originating a new deposit.
+A deposit piece whose lock-address setup failed before funding can never be funded
+(funding waits for three members' readiness). Its owner asks the members for
+`abandonVote {descriptor}`; a member votes only when its own setup failed (or never
+started within the funding window) and then refuses that piece's setup, funding and
+return. Three votes form a `capacity-abandon` certificate that `capacityRetire`
+accepts like a collection. The deposit result then reports `notDeposited` base units.
 
 Direct dashboard methods are `role.stakeDeposit(units)`,
 `role.stakeWithdraw(units|'all')`, `role.stakePreview(units)`, and

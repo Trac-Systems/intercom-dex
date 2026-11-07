@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.57
+
+- A stake deposit whose key setup failed no longer stays pending forever. Before any RESET or TNK is sent, the four
+  stake signers build the deposit's lock address together; if the app relays their messages too late (as with the
+  stake backlog fixed in 0.1.56), the setup fails for good. The app then waited for it without end, kept the amount
+  held in the wallet and blocked any new stake action. Now the app asks the signers to release the place held for
+  that deposit, ends it, and reports the amount as not deposited (`notDeposited`). Nothing was sent, so nothing needs
+  to come back; the wallet's RESET and TNK are free again and a new deposit works at once.
+- The stake price no longer blinks out between two checks. Since 0.1.56 an app without a sell offer renews it once a
+  minute, but the status showed it for only 60 seconds, so it read "price unavailable" for part of every minute. The
+  status now shows the last certified price (and reward status) for up to three minutes; bonds still use a fresh one.
+- Signers accept a price or stake check from the venue whose time is up to five seconds ahead of their own. Each side
+  reads Solana's time from its own servers, which can be a second or two apart; the signers turned down about one
+  check in thirty for that alone ("Price head is stale or omits a completion").
+- A seller's offers no longer drop out of the book for a few seconds at a time. When one signer had missed a note on
+  a stake piece already on its way out, the seller's stake check needed all three other signers at once, and when one
+  was slow the check expired and all the seller's offers were hidden together. Such notes no longer count, and offers
+  that come back are shown at once instead of being hidden once more until the seller's wallet is read again.
+- Servers (venue, signers) and apps. Update the servers first; apps on 0.1.56 keep working.
+
 ## 0.1.56
 
 - A maker that does not answer a take at all is passed over, with all its offers, for ten minutes. One maker whose app

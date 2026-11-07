@@ -26,13 +26,13 @@ test('venue price index verifies final legs, retains completion time and rejects
     exclude: [terms.buyer.dexKey, terms.seller.dexKey] }).map(({ dexKey, boxKey }) => ({ dexKey, boxKey }));
   const id = tradeId(terms), summon = { tradeId: id, terms, sigs: [f.buyer, f.seller].map(identity => seal({ kind: 'termsSig',
     ch: `intercom-dex:t:${id}`, body: { tradeId: id } }, identity.secretKey, { ts: 100, nonce: hex() })) };
-  let now = 1100, transferFinal = true, claimed = true;
+  let now = 1100, transferFinal = true, claimed = true, lag = 0;
   const stores = f.signers.map(memoryStore), venueStore = memoryStore();
   const common = { registry: () => f.registry, snapshot: () => f.registry, clock: async () => ({ at: now }),
     solana: { checkEscrow: async () => ({ ok: true, status: claimed ? 'claimed' : 'active' }) },
     trac: { verifyTransfer: async () => ({ ok: true, final: transferFinal }) },
     request: (to, method, body) => venue().handle(method, body, venueKey) };
-  const signer = i => new StakePriceService({ ...common, store: stores[i], identity: {
+  const signer = i => new StakePriceService({ ...common, clock: async () => ({ at: now - lag }), store: stores[i], identity: {
     publicKey: encodeKey(f.signers[i].identity.publicKey), secretKey: f.signers[i].identity.secretKey } });
   let signers = f.signers.map((_, i) => signer(i));
   const venue = () => new StakePriceService({ ...common, store: venueStore, identity: { publicKey: venueKey, secretKey: f.service.secretKey },
@@ -63,6 +63,10 @@ test('venue price index verifies final legs, retains completion time and rejects
   await assert.rejects(sharedVenue.handle('priceSnapshot', {}, terms.buyer.dexKey), /Three/);
   sharedVenue.request = originalRequest;
   await sharedVenue.handle('priceSnapshot', {}, terms.buyer.dexKey);
+  // Members whose readers trail the venue's by up to the clocks' agreement window still vote its head.
+  lag = 5; now++; await sharedVenue.handle('priceSnapshot', {}, terms.buyer.dexKey);
+  lag = 6; now++; await assert.rejects(sharedVenue.handle('priceSnapshot', {}, terms.buyer.dexKey), /Price head is stale/);
+  lag = 0;
   const reader = new StakePriceService({ ...common, store: memoryStore() });
   assert.deepEqual(await reader.import(snapshot), snapshot.reference.q);
   const conflicting = signFact({ ...first.venue.fact, body: { ...first.entry, completedAt: 1101 } }, f.service.secretKey);

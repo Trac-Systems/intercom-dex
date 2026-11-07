@@ -1,7 +1,7 @@
 import { effectiveSettings } from '../stake/settings.js';
 import { stakeAdmissionRequired, buyerCapabilityReason } from '../stake/prevention.js';
 import { stakeError } from '../stake/errors.js';
-import { stakeStatus, rewardsStatus, stakeRequestSchema, retryDeliverySchema, deliveryStatus, deliveryWarnings, withdrawalStatus } from '../stake/status.js';
+import { stakeStatus, rewardsStatus, stakeRequestSchema, retryDeliverySchema, deliveryStatus, deliveryWarnings, withdrawalStatus, STAKE_SHOWN_SEC } from '../stake/status.js';
 import { StakeLedger } from '../stake/ledger.js';
 import { tradeBondStatus } from '../stake/trade-status.js';
 import { previewBond } from '../stake/bond-preview.js';
@@ -671,15 +671,15 @@ export class Trader {
       }
     }
     const reference = this.store.get('stake-price-reference'), now = nowSec();
-    const price = reference && reference.epochId === r?.sellerBond?.epoch.id && reference.cutoffAt <= now && now - reference.cutoffAt <= 60 ? reference.q : null;
+    const price = reference && reference.epochId === r?.sellerBond?.epoch.id && reference.cutoffAt <= now && now - reference.cutoffAt <= STAKE_SHOWN_SEC ? reference.q : null;
     const operation = this.store.get('stake-client-operation');
-    const pending = operation?.kind === 'deposit' && !operation.done ? operation.pieces.filter(p => !pieces.some(x => x.unitId === p.funded?.[0]?.fact.body.unitId))
+    const pending = operation?.kind === 'deposit' && !operation.done ? operation.pieces.filter(p => !p.abandoning && !p.abandoned && !pieces.some(x => x.unitId === p.funded?.[0]?.fact.body.unitId))
       .reduce((sum, p) => sum + BigInt(p.descriptor.principalReset), 0n).toString() : '0';
     const requested = operation?.kind === 'withdraw' && !operation.done ? new Set(operation.pieces.map(p => p.unitId)) : new Set();
     const projectedPieces = pieces.map(p => requested.has(p.unitId) && p.state === 'free' ? { ...p, state: 'withdrawing' } : p);
     const rewardRecord = this.store.get('stake-reward-status');
     const reward = rewardRecord?.source === r?.sellerBond?.rewardService?.dexKey && rewardRecord?.address === this.me.tracAddr ? rewardRecord.rewards : null;
-    const rewardFresh = rewardRecord?.at <= now && now - rewardRecord.at <= 60;
+    const rewardFresh = rewardRecord?.at <= now && now - rewardRecord.at <= STAKE_SHOWN_SEC;
     return { stake: { ...stakeStatus({ pieces: projectedPieces, pending, price, openOffersUsd: openOffersUsd.toString(), settings: policy?.settings ?? null }),
       ...(operation ? { operationId: operation.operationId, operationPending: !operation.done } : {}),
       ...(withdrawalStatus(operation, pieces) ? { withdrawal: withdrawalStatus(operation, pieces) } : {}) }, rewards: rewardsStatus({

@@ -4,6 +4,9 @@ import { settingsSchema } from './settings.js';
 export const DELIVERY_STATES = Object.freeze(['delivery_sending', 'delivery_failed', 'delivery_overdue', 'delivery_confirming', 'delivered', 'penalty_paid']);
 export const DELIVERY_REASONS = Object.freeze(['coin_short', 'tnk_short', 'gateway_paused', 'offline', 'send_failed', 'confirmation_pending']);
 export const STAKE_REASONS = Object.freeze(['price_unavailable', 'over_cap', 'tnk_short']);
+// An app without a sell offer renews its certified price and reward status once a minute. Status keeps showing the
+// last reading for three rounds so it does not blink out between two renewals; bonds still need a fresh price.
+export const STAKE_SHOWN_SEC = 180;
 const deliveryMessages = {
   coin_short: 'The wallet does not have enough of the sold coin to deliver',
   tnk_short: 'The wallet needs more TNK to pay the delivery fee',

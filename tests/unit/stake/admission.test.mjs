@@ -99,3 +99,24 @@ test('venue stake checks: small batches inside the transport limit, recently che
   assert.deepEqual([a.cache.get(hex(1)).priceReference, a.cache.get(hex(2)).priceCheckpoint], ['new-reference', 'new-checkpoint']);
   assert.ok(a.cache.has(hex(2)), 'a failed read keeps a check that may still be usable');
 });
+
+test('inventory votes agree when a member missed a withdrawal or return mark on a piece that cannot back a bond', () => {
+  const f = fixture(), record = f.ledger.read(), piece = record.pieces[f.id];
+  const leaving = { ...piece, unitId: hex(60), state: 'funding-return' }, behind = structuredClone(leaving);
+  leaving.returnIntent = { at: 1 };
+  const inventory = r => admissionInventory(r, f.terms.seller, 4000, f.context.epoch.id);
+  assert.deepEqual(inventory({ ...record, pieces: { ...record.pieces, [hex(60)]: leaving } }),
+    inventory({ ...record, pieces: { ...record.pieces, [hex(60)]: behind } }));
+  // A mark on a free piece still decides whether it can back a bond, so members must agree on it.
+  assert.notDeepEqual(inventory({ ...record, pieces: { [f.id]: { ...piece, withdrawal: { at: 1 } } } }), inventory(record));
+});
+
+test('a member votes the inventory when the venue reading is up to five seconds ahead of its own clock', async () => {
+  const f = fixture(); let now = 4000;
+  const admission = new StakeAdmission({ store: f.store, identity: { publicKey: f.policy.epoch.members[0].dexKey, secretKey: secrets[0] },
+    registry: () => ({ sellerBond: f.policy }), clock: async () => ({ at: now }) });
+  const vote = await admission.inventoryVote({ owner: f.terms.seller, at: now + 5 });
+  assert.equal(vote.fact.body.pieces.length, 1);
+  await assert.rejects(admission.inventoryVote({ owner: f.terms.seller, at: now + 6 }), /Fresh original signer inventory/);
+  await assert.rejects(admission.inventoryVote({ owner: f.terms.seller, at: now - 31 }), /Fresh original signer inventory/);
+});

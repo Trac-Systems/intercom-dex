@@ -4,6 +4,7 @@ import { sha256Hex, stableJSON } from '../core/canonical.js';
 import { verifySummon } from '../roles/common.js';
 import { transferNonce } from '../trac/transfers.js';
 import { effectiveSettings } from './settings.js';
+import { CLOCK_SKEW_SEC } from './chain.js';
 
 export const stakeContext = registry => {
   const p = registry?.sellerBond;
@@ -214,7 +215,8 @@ export class StakePriceService {
       const f = verifyFact(body.venue, context, 'price-head', context.venueKey);
       await this.catchUp(f.body.headPosition);
       const head = log.read(), now = (await this.clock()).at;
-      if (f.body.cutoffAt > now || now - f.body.cutoffAt > 30 || !head.position || f.body.headPosition !== head.position || f.body.headHash !== head.hash)
+      // The venue's reading may be a few seconds ahead of this member's own readers.
+      if (f.body.cutoffAt > now + CLOCK_SKEW_SEC || now - f.body.cutoffAt > 30 || !head.position || f.body.headPosition !== head.position || f.body.headHash !== head.hash)
         throw new Error('Price head is stale or omits a completion');
       const name = `stake-price-head-vote-${f.body.cutoffAt}`, prior = this.store.get(name);
       if (prior && factDigest(prior.fact) !== factDigest(f)) throw new Error('Conflicting price head');

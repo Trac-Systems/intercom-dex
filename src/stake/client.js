@@ -21,9 +21,12 @@ export function tnkShort(count, reserve, fee, free) {
     `its own fee when the RESET is returned. About ${tnkText(back)} TNK comes back when you withdraw. Buy TNK on intercom-dex or send TNK to this wallet, then try again.`;
 }
 const positive = x => typeof x === 'string' && /^[1-9][0-9]{0,30}$/.test(x);
+// Deposit pieces released because their key setup failed: nothing was sent to them.
+const notDeposited = op => op.pieces.some(p => p.abandoned)
+  ? { notDeposited: op.pieces.filter(p => p.abandoned).reduce((n, p) => n + BigInt(p.descriptor.principalReset), 0n).toString() } : {};
 export class StakeClient {
-  constructor({ store, identity, box, me, registry, clock, trac, price, request, funding, collector, exclusive = fn => fn(), freeBalances = null }) {
-    Object.assign(this, { store, identity, box, me, registry, clock, trac, price, request, funding, collector, exclusive, freeBalances });
+  constructor({ store, identity, box, me, registry, clock, trac, price, request, funding, collector, exclusive = fn => fn(), freeBalances = null, log = () => {} }) {
+    Object.assign(this, { store, identity, box, me, registry, clock, trac, price, request, funding, collector, exclusive, freeBalances, log });
     this.queue = Promise.resolve();
     this.retirementQueue = Promise.resolve();
   }
@@ -41,12 +44,20 @@ export class StakeClient {
   async certificate(method, body, kind) {
     return matchingCertificate(await this.all(method, body), this.context(), kind);
   }
+  // Members whose own setup failed vote first; two of their votes let the others vote too (custody-signer abandonVote).
+  async abandonCertificate(descriptor) {
+    const members = this.context().epoch.members, ask = async (list, body) => (await Promise.allSettled(list.map(m =>
+      this.request(m.dexKey, 'abandonVote', body)))).flatMap((r, i) => r.status === 'fulfilled' && r.value?.from === list[i].dexKey ? [r.value] : []);
+    let votes = await ask(members, { descriptor });
+    if (votes.length === 2) votes = [...votes, ...await ask(members.filter(m => !votes.some(v => v.from === m.dexKey)), { descriptor, votes })];
+    return matchingCertificate(votes, this.context(), 'capacity-abandon');
+  }
   async archive(kind, certificate) { return this.request(this.context().venueKey, 'custodyRecord', { kind, certificate }); }
   retirementWork(fn) {
     const work = this.retirementQueue.then(fn); this.retirementQueue = work.catch(() => {}); return work;
   }
   retireCapacity(certificate, context = this.context()) { return this.retirementWork(async () => {
-    const fact = verifyCertificate(certificate, context, 'collected');
+    const fact = verifyCertificate(certificate, context, certificate?.[0]?.fact.kind === 'capacity-abandon' ? 'capacity-abandon' : 'collected');
     const name = `stake-capacity-retirement-${fact.body.unitId}`, prior = this.store.get(name);
     if (prior && factDigest(prior.certificate[0].fact) !== factDigest(fact)) throw new Error('Conflicting capacity retirement');
     const op = prior ?? { certificate, context, members: context.epoch.members.map(m => m.dexKey), confirmed: [] };
@@ -172,7 +183,8 @@ export class StakeClient {
   receipt(op) {
     return { ok: true, operationId: op.operationId, ...(op.kind === 'deposit' ? {
       funded: op.pieces.filter(p => p.funded).reduce((n, p) => n + BigInt(p.descriptor.principalReset), 0n).toString(),
-      ...(op.pieces.some(p => p.refund) ? { refunded: op.pieces.filter(p => p.refund).reduce((n, p) => n + BigInt(p.refund[0].fact.body.returnReset), 0n).toString() } : {})
+      ...(op.pieces.some(p => p.refund) ? { refunded: op.pieces.filter(p => p.refund).reduce((n, p) => n + BigInt(p.refund[0].fact.body.returnReset), 0n).toString() } : {}),
+      ...notDeposited(op)
     } : { collected: !op.targets?.some(t => t.forfeited),
       ...(op.targets ? { returned: op.targets.filter(t => !t.forfeited).reduce((n, t) => n + BigInt(t.amount), 0n).toString(),
         forfeited: op.targets.filter(t => t.forfeited).reduce((n, t) => n + BigInt(t.amount), 0n).toString() } : {}) }) };
@@ -251,7 +263,8 @@ export class StakeClient {
     }
     for (const p of op.pieces) {
       const id = unitId(p.descriptor);
-      if (!p.ready) {
+      if (p.abandoned) continue;
+      if (!p.ready && !p.abandoning) {
         const starts = await this.all('dkgStart', { descriptor: p.descriptor, capacity: op.capacity });
         const deals = starts.flatMap(r => r.messages).filter(v => v.fact.kind === 'dkg-deal');
         // Original deals are retained before relay, including across a partial DKG restart.
@@ -261,8 +274,19 @@ export class StakeClient {
         for (const v of ready) verifyFact(v, this.context(), 'dkg-ready', v.from);
         const lock = identicalReady(ready.map(v => ({ kind: 'lockReady', from: v.from, body: v.fact.body })),
           this.context().epoch.members.map(m => ({ lockKey: m.dexKey, boxKey: m.boxKey })), id, undefined, 3);
-        if (!lock) return { ok: true, pending: true, operationId: op.operationId };
-        p.ready = ready; p.lock = lock; this.save(op);
+        if (!lock) {
+          // A member whose key setup failed answers with nothing. With two of them, three readiness signatures can
+          // never come together, so nothing was sent to this piece and it never can be: release it instead of waiting.
+          if (starts.filter(r => !r.messages?.length).length < 2) return { ok: true, pending: true, operationId: op.operationId };
+          p.abandoning = true; this.save(op);
+        } else { p.ready = ready; p.lock = lock; this.save(op); }
+      }
+      if (p.abandoning) {
+        p.abandon ??= await this.abandonCertificate(p.descriptor); this.save(op);
+        await this.retireCapacity(p.abandon);
+        p.abandoned = true; this.save(op);
+        this.log('stake deposit piece not created: its key setup failed, nothing was sent', id.slice(0, 12), p.descriptor.principalReset);
+        continue;
       }
       p.funding ??= {};
       const expired = (await this.clock()).at >= p.descriptor.createdAt + op.policy.custody.fundingWindowSec;
@@ -313,7 +337,8 @@ export class StakeClient {
     op.done = true; this.save(op);
     return { ok: true, operationId: op.operationId,
       funded: op.pieces.filter(p => p.funded).reduce((n, p) => n + BigInt(p.descriptor.principalReset), 0n).toString(),
-      ...(op.pieces.some(p => p.refund) ? { refunded: op.pieces.filter(p => p.refund).reduce((n, p) => n + BigInt(p.refund[0].fact.body.returnReset), 0n).toString() } : {}) };
+      ...(op.pieces.some(p => p.refund) ? { refunded: op.pieces.filter(p => p.refund).reduce((n, p) => n + BigInt(p.refund[0].fact.body.returnReset), 0n).toString() } : {}),
+      ...notDeposited(op) };
   }
   async collect(op) {
     const at = (await this.clock()).at, inventory = this.ledger().read().pieces;

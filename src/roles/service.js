@@ -268,8 +268,9 @@ export class Service {
     this.#saveBook();
     const makers = new Set(), pending = this.#pendingByOffer(), busy = this.busySellers();
     const pairs = this.registry.pairs.filter(p => supportedBase(p.base) && p.status === 'open');
+    const bookByPair = new Map(pairs.map(p => [p.pair, this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))]));
     const listedByPair = new Map(pairs.map(p => [p.pair,
-      this.book.snapshot(p.pair, now).filter(o => meetsVersion(o.software, this.registry.minSoftware))
+      bookByPair.get(p.pair)
         .filter(o => {
           const covered = o.side !== 'sell' || !stakeAdmissionRequired(this.registry, now) || !!this.stakeRuntime?.admission.covered(o, now);
           if (covered === (this.stakeHidden ??= new Set()).has(o.offerId)) {
@@ -279,7 +280,11 @@ export class Service {
           }
           return covered;
         })]));
-    this.funds.refresh([...listedByPair.values()].flat());
+    // Wallets are read and kept for every offer in the book, also while its stake check is out of date: the offers
+    // come back with a known balance instead of being hidden once more until the next read.
+    const booked = [...bookByPair.values()].flat();
+    for (const o of booked) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
+    this.funds.refresh(booked);
     const sizes = this.funds.allocate(pairs.flatMap(p => listedByPair.get(p.pair).filter(o => o.side !== 'buy' || !this.buyerPauses.refusal(o.maker)).map(offer => ({ offer, pair: p,
       fees: this.registries.get(offer.registryVersion).fee, firstSeen: this.book.get(offer.offerId, now).firstSeen }))),
     pending, [...[...this.inFlight.values()].map(t => t.terms), ...[...this.settlements.values()]
@@ -287,7 +292,6 @@ export class Service {
       .map(r => ({ ...r.report.terms, settledAt: r.loggedAt }))]);
     for (const p of pairs) {
       const listed = listedByPair.get(p.pair);
-      for (const o of listed) makers.add(o.side === 'sell' ? `trac:${o.maker.tracAddr}` : `solana:${o.maker.solAddr}`);
       const offers = listed.filter(o => !(o.side === 'sell' && busy.has(o.maker.dexKey))).filter(o => {
         const funded = BigInt(sizes.get(o.offerId) ?? '0') >= BigInt(p.minBaseAmount);
         if (funded === this.hidden.has(o.offerId)) {

@@ -62,6 +62,13 @@ test('trader reads stake inventory in its authenticated publication scope withou
     me: { tracAddr: address }, mine: new Map() });
   assert.equal(status.stake.locked, '2500000'); assert.equal(status.stake.free, '2500000');
   assert.equal(status.stake.capUsd, '10000000000'); assert.equal(status.rewards.poolState, 'unknown');
+  // An app without a sell offer renews its price once a minute: the last one keeps showing between two renewals.
+  const view = () => Trader.prototype.stakeView.call({ registry: { usable: { sellerBond: policy } }, store, me: { tracAddr: address }, mine: new Map() });
+  const q = { numerator: '20000000', denominator: '1' };
+  store.put('stake-price-reference', { epochId: policy.epoch.id, cutoffAt: 4000 - 179, q });
+  assert.equal(view().stake.priceUsd, '20'); assert.equal(view().stake.reason, undefined);
+  store.put('stake-price-reference', { epochId: policy.epoch.id, cutoffAt: 4000 - 181, q });
+  assert.equal(view().stake.priceUsd, null); assert.equal(view().stake.reason, 'price_unavailable');
 });
 test('delivery states and warnings bind deadline and fixed amount at risk; negotiation has none', () => {
   const trade = { role: 'seller', state: { tradeId: h, phase: 'transferring', escrowOk: true, terms: { sendBy: 1000,

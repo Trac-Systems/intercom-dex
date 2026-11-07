@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { StakeLedger, unitId } from './ledger.js';
-import { CapacityLedger, assertEpochAdmission, capacityName } from './capacity.js';
+import { CapacityLedger, assertEpochAdmission, capacityName, abandonSchema } from './capacity.js';
 import { StakeDkg } from './dkg.js';
 import { effectiveSettings, validatePolicyTransition } from './settings.js';
 import { stakeContext } from './price-service.js';
@@ -79,6 +79,8 @@ export class StakeCustodySigner {
       } finally { this.selectedPolicy = null; }
     }); this.queue = work.catch(() => {}); return work;
   }
+  // This member voted to release the piece's capacity because its key setup failed before any funding.
+  abandoned(id) { return !!this.store.get(`stake-abandon-vote-${id}`); }
   piece(id, from) {
     hex.parse(id); const record = this.dkg(0).read(id);
     if (!record || record.descriptor.owner.dexKey !== from) throw new Error('Stake owner authorization required');
@@ -118,12 +120,15 @@ export class StakeCustodySigner {
       assertEpochAdmission(this.store, c);
       exact(b, ['descriptor', 'capacity']);
       if (b.descriptor?.owner.dexKey !== from || !policy.custody) throw new Error('Deposit owner required');
+      const id = unitId(b.descriptor);
+      if (this.abandoned(id) || this.capacity().read().pieces[id]?.retired) throw new Error('Stake piece was abandoned before funding');
       const grant = verifyCertificate(b.capacity, c, 'capacity');
       if (!this.capacity().read().grants[grant.body.grantId]) throw new Error('Recover the capacity grant before DKG');
       return { messages: dkg.start(b.descriptor, b.capacity, { timeoutSec: policy.custody.dkgTimeoutSec }) };
     }
     if (method === 'dkgDeals') {
       exact(b, ['unitId', 'deals']); this.piece(b.unitId, from);
+      if (this.abandoned(b.unitId)) throw new Error('Stake piece was abandoned before funding');
       if (!Array.isArray(b.deals) || b.deals.length > 4) throw new Error('Invalid DKG bundle');
       const messages = [];
       for (const vote of b.deals) {
@@ -136,6 +141,7 @@ export class StakeCustodySigner {
     if (method === 'fundedVote') {
       exact(b, ['unitId', 'ready', 'funding', 'price']);
       const record = this.piece(b.unitId, from), d = record.descriptor;
+      if (this.abandoned(b.unitId)) throw new Error('Stake piece was abandoned before funding');
       const lock = dkg.readiness(b.unitId, b.ready);
       const existing = this.store.get(`stake-funded-vote-${b.unitId}`);
       if (existing) return existing.vote;
@@ -153,6 +159,37 @@ export class StakeCustodySigner {
       this.store.put(`stake-funded-vote-${b.unitId}`, { vote, options: { settings, price, now: at } });
       return vote;
     }
+    // A deposit piece whose key setup failed holds capacity but can never be funded: funding waits for three members'
+    // readiness. A member votes to release it when its own setup failed (or never started within the funding window),
+    // or when two other members show their votes: they never become ready, so three readiness signatures, and with
+    // them a lock address, can never exist. A member that voted refuses that piece's setup, funding and return for
+    // good. The certificate retires the capacity through capacityRetire.
+    if (method === 'abandonVote') {
+      exact(b, ['descriptor', 'votes']);
+      const d = b.descriptor, id = unitId(d), name = `stake-abandon-vote-${id}`, prior = this.store.get(name);
+      if (d.owner.dexKey !== from) throw new Error('Stake owner authorization required');
+      if (prior) return prior;
+      const held = this.capacity().read().pieces[id];
+      if (!held || held.retired || held.ownerAddress !== d.owner.tracAddr || held.principalReset !== d.principalReset) throw new Error('Stake capacity is unavailable');
+      if (this.store.get(`stake-funded-vote-${id}`) || this.store.get(`stake-refund-vote-${id}`) || this.ledger(d.owner.tracAddr).read().pieces[id])
+        throw new Error('Stake piece may hold funding; it returns through its funding refund');
+      const body = abandonSchema.parse({ unitId: id, ownerAddress: d.owner.tracAddr, principalReset: d.principalReset,
+        descriptorDigest: sha256Hex(stableJSON(d)) }), fact = { v: 1, networkId: c.networkId, venueKey: c.venueKey, epochId: c.epoch.id, kind: 'capacity-abandon', body };
+      if (b.votes !== undefined && (!Array.isArray(b.votes) || b.votes.length > 3)) throw new Error('Invalid abandonment votes');
+      const others = new Set((b.votes ?? []).filter(v => {
+        try { return v.from !== this.identity.publicKey && c.epoch.members.some(m => m.dexKey === v.from) &&
+          factDigest(verifyFact(v, c, 'capacity-abandon', v.from)) === factDigest(fact); } catch { return false; }
+      }).map(v => v.from));
+      if (others.size < 2) {
+        if (dkg.read(id)) {
+          if (stableJSON(dkg.read(id).descriptor) !== stableJSON(d)) throw new Error('Stake creation conflicts');
+          dkg.resume(id); // A setup past its wait settles first.
+          if (dkg.read(id).state.phase !== 'failed') throw new Error('Stake key setup is still usable');
+        } else if (at < d.createdAt + policy.custody.fundingWindowSec) throw new Error('Stake key setup may still start');
+      }
+      const vote = this.sign('capacity-abandon', body);
+      this.store.put(name, vote); return vote;
+    }
     if (method === 'fundedCommit') {
       exact(b, ['certificate']); const fact = verifyCertificate(b.certificate, c, 'funded');
       const id = fact.body.unitId, saved = this.store.get(`stake-funded-vote-${id}`), options = saved?.options;
@@ -161,6 +198,7 @@ export class StakeCustodySigner {
     }
     if (method === 'refundVote') {
       exact(b, ['unitId', 'ready', 'returnReset']);
+      if (this.abandoned(b.unitId)) throw new Error('Stake piece was abandoned before funding');
       const record = this.piece(b.unitId, from), d = record.descriptor, lock = dkg.readiness(b.unitId, b.ready);
       const name = `stake-refund-vote-${b.unitId}`, prior = this.store.get(name);
       if (prior) return prior;

@@ -166,7 +166,7 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
     };
     client = new StakeClient({ store, identity, box, me: role.me, registry, clock, trac, price, request, funding: adapter(wallet),
       exclusive: fn => { if (!role.wallets) throw new Error('Wallet accounting is unavailable'); return role.wallets.exclusive(fn); },
-      freeBalances: () => role.wallets.balances(),
+      freeBalances: () => role.wallets.balances(), log,
       collector: scalar => { const w = scalarSigner(scalar); return adapter({ ...w, address: address(w.publicKey) }); } });
   }
   if (client) {

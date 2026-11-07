@@ -5,6 +5,7 @@ import { StakeLedger } from './ledger.js';
 import { signFact, matchingCertificate } from './certificates.js';
 import { quoteAmount, registryPair } from '../market/assets.js';
 import { assertEpochAdmission } from './capacity.js';
+import { CLOCK_SKEW_SEC } from './chain.js';
 
 export class StakeAdmission {
   constructor({ store, identity, registry, price, clock, request, role, trader = false }) {
@@ -15,7 +16,7 @@ export class StakeAdmission {
   ledger(address) { return new StakeLedger({ store: this.store, context: this.context(), address }); }
   async inventoryVote({ owner, at }) {
     const c = this.context(), now = (await this.clock()).at;
-    if (!c.epoch.members.some(m => m.dexKey === this.identity.publicKey) || !Number.isSafeInteger(at) || at > now || now - at > 30)
+    if (!c.epoch.members.some(m => m.dexKey === this.identity.publicKey) || !Number.isSafeInteger(at) || at > now + CLOCK_SKEW_SEC || now - at > 30)
       throw new Error('Fresh original signer inventory required');
     const body = admissionInventory(this.ledger(owner.tracAddr).read(), owner, at, c.epoch.id);
     return signFact({ v: 1, networkId: c.networkId, venueKey: c.venueKey, epochId: c.epoch.id, kind: 'admission-inventory', body }, this.identity.secretKey);

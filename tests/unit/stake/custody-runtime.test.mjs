@@ -33,7 +33,10 @@ test('finalized stake clock uses lower agreeing readers and fails closed', async
   await assert.rejects(finalizedStakeClock({ endpoints: ['100', '102'], read: async () => { throw Error('offline'); } }), /unavailable/);
 });
 
-for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk']) test(mode.startsWith('late-') ? `expired unadmitted funding returns ${mode === 'late-full' ? 'finalized RESET and TNK' : 'TNK-only residue'} without signing another deposit or requiring price`
+for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split']) test(mode === 'dkg-failed'
+  ? 'a deposit whose key setup failed ends without sending anything and frees its capacity for a new deposit'
+  : mode === 'dkg-split' ? 'a deposit whose key setup finished on only two members is released by all four on the proof of two votes'
+  : mode.startsWith('late-') ? `expired unadmitted funding returns ${mode === 'late-full' ? 'finalized RESET and TNK' : 'TNK-only residue'} without signing another deposit or requiring price`
   : mode === 'mixed' ? 'one withdraw-all intent returns mixed original epochs with separately certified barriers and retirements'
   : mode === 'deferred' ? 'withdraw all persists across a reserved trade and starts cooldown only after certified closure'
   : mode === 'exact' ? 'exact withdrawal uses certified prior-day price, retains expiry and allowance, and recovers each funding leg'
@@ -102,10 +105,12 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
         final: true, amount: tx?.amount };
     } } }) });
   const signers = members.map((m, i) => makeSigner(stores[i], { publicKey: m.dexKey, secretKey: secrets[i] }, boxes[i]));
-  let badFreezeReplies = 2;
+  // The app relays no deals in time (as when its stake messages queued behind a backlog): those members' setup fails.
+  let badFreezeReplies = 2, dropDeals = new Set(mode === 'dkg-failed' ? [0, 1, 2, 3] : mode === 'dkg-split' ? [0, 1] : []);
   const request = async (to, method, body) => {
     if (to === scope.venueKey) { if (method === 'priceSnapshot') return exactMode ? priceSnapshot() : {}; archives.push(body); return { archived: true }; }
     const index = roster.findIndex(m => m.dexKey === to);
+    if (dropDeals.has(index) && method === 'dkgDeals') return { messages: [] };
     const result = await signers[index].handle(method, body, identity.publicKey);
     return (method === 'freezePrepare' && index >= 4 - badFreezeReplies) ||
       (index === 3 && ['fundedVote', 'returnVote', 'release'].includes(method)) ? { ...result, sig: '0'.repeat(128) } : result;
@@ -126,6 +131,35 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
   const live = client(), first = live.deposit('2500000');
   assert.equal(live.deposit('2500000'), first, 'simultaneous clicks share one operation');
   const pending = await first; assert.equal(pending.pending, true);
+  if (mode.startsWith('dkg-')) {
+    const op = () => clientStore.get('stake-client-operation'), d = op().pieces[0].descriptor;
+    const { unitId } = await import('../../../src/stake/ledger.js'), id = unitId(d);
+    await assert.rejects(signers[0].handle('abandonVote', { descriptor: d }, identity.publicKey), /still usable/);
+    await assert.rejects(signers[0].handle('abandonVote', { descriptor: d }, members[1].dexKey), /authorization/);
+    assert.equal((await live.recover()).pending, true, 'a setup inside its wait keeps waiting');
+    localNow += 31;
+    const done = await live.recover();
+    assert.equal(done.operationId, pending.operationId); assert.equal(done.funded, '0'); assert.equal(done.notDeposited, '2500000');
+    assert.equal(sends, 0); assert.equal(op().done, true); assert.equal(op().pieces[0].abandoned, true);
+    assert.deepEqual((await live.recover()), undefined, 'a finished deposit is not resumed');
+    assert.equal(op().pieces[0].abandon.length, 4, 'all four members released it');
+    for (const [i, store] of stores.entries()) {
+      assert.equal(store.get(capacityName(scope)).pieces[id].retired, true);
+      assert.equal(store.get(`stake-dkg-${id}`).state.phase, mode === 'dkg-split' && i >= 2 ? 'ready' : 'failed');
+    }
+    if (mode === 'dkg-split') {
+      const ready = await Promise.all([2, 3].map(i => signers[i].handle('dkgDeals', { unitId: id, deals: [] }, identity.publicKey).catch(e => e.message)));
+      assert.deepEqual(ready, ['Stake piece was abandoned before funding', 'Stake piece was abandoned before funding']);
+    }
+    assert.equal(clientStore.get(`stake-capacity-retirement-${id}`).done, true);
+    await assert.rejects(signers[0].handle('dkgStart', { descriptor: d, capacity: op().capacity }, identity.publicKey), /abandoned/);
+    await assert.rejects(signers[0].handle('refundVote', { unitId: id, ready: [], returnReset: '0' }, identity.publicKey), /abandoned/);
+    // The capacity is free again: the same amount deposits normally.
+    dropDeals = new Set();
+    await client().deposit('2500000'); const again = await client().recover();
+    assert.equal(again.funded, '2500000'); assert.equal(sends, 2);
+    return;
+  }
   if (mode.startsWith('late-')) now += 3601;
   const recovering = live.recover(), retry = live.deposit('2500000');
   const [deposited, replay] = await Promise.all([recovering, retry]);

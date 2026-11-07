@@ -9,7 +9,7 @@ export function stakeWalletHolds(operation, feeTnk) {
     return stakeWalletHolds(operation.replacementOperation, feeTnk);
   const held = { RESET: 0n, TNK: 0n }, fee = BigInt(feeTnk);
   if (operation?.kind === 'deposit' && !operation.done) for (const p of operation.pieces) {
-    if (p.returning) continue;
+    if (p.returning || p.abandoning || p.abandoned) continue;
     if (!p.funding?.TNK) held.TNK += BigInt(p.descriptor.tnkReserve) + fee;
     if (!p.funding?.RESET) { held.RESET += BigInt(p.descriptor.principalReset); held.TNK += fee; }
   }

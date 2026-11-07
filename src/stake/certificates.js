@@ -4,7 +4,7 @@ import { bytesToHex, hexToBytes, sha256Hex, stableJSON, utf8 } from '../core/can
 
 const hex = z.string().regex(/^[0-9a-f]{64}$(?![\s\S])/);
 const factSchema = z.object({ v: z.literal(1), networkId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  venueKey: hex, epochId: hex, kind: z.enum(['admission-inventory', 'delivery-cutoff', 'delivery-result', 'penalty-health', 'penalty-prepare', 'funded', 'funding-refund', 'withdraw-intent', 'resolved', 'freeze-accept', 'freeze', 'decision', 'collected', 'clock', 'delivery-observed', 'inventory', 'book', 'price', 'reward-head', 'completion', 'price-head', 'history-head', 'liability-handoff', 'capacity', 'capacity-handoff', 'dkg-deal', 'dkg-ready', 'release']),
+  venueKey: hex, epochId: hex, kind: z.enum(['admission-inventory', 'delivery-cutoff', 'delivery-result', 'penalty-health', 'penalty-prepare', 'funded', 'funding-refund', 'withdraw-intent', 'resolved', 'freeze-accept', 'freeze', 'decision', 'collected', 'clock', 'delivery-observed', 'inventory', 'book', 'price', 'reward-head', 'completion', 'price-head', 'history-head', 'liability-handoff', 'capacity', 'capacity-handoff', 'capacity-abandon', 'dkg-deal', 'dkg-ready', 'release']),
   body: z.record(z.string(), z.unknown()) }).strict();
 const voteSchema = z.object({ fact: factSchema, from: hex, sig: z.string().regex(/^[0-9a-f]{128}$(?![\s\S])/) }).strict();
 const bytes = fact => utf8('intercom-dex/stake/v1/fact\n' + stableJSON(factSchema.parse(fact)));

@@ -13,11 +13,14 @@ const inventorySchema = z.object({ address: z.string(), dexKey: hex, at: uint,
   pieces: z.array(z.object({ unitId: hex, generation: uint, principalReset: units, expiresAt: uint,
     purpose: z.enum(['seller', 'buyer']), state: z.string(), blocked: z.boolean() }).strict()).max(200) }).strict();
 
+// Members vote this summary and three must match. Only a free piece can back a bond, so `blocked` is reported for free
+// pieces only: a member that missed a withdrawal or return mark on a piece already on its way out still agrees.
 export function admissionInventory(record, owner, at, epochId) {
   return inventorySchema.parse({ address: owner.tracAddr, dexKey: owner.dexKey, at,
     pieces: Object.values(record.pieces).filter(p => p.state !== 'retired' && p.descriptor.owner.dexKey === owner.dexKey && p.descriptor.epochId === epochId)
       .map(p => ({ unitId: p.unitId, generation: p.generation, principalReset: p.descriptor.principalReset, expiresAt: p.descriptor.expiresAt,
-        purpose: p.descriptor.purpose, state: p.state, blocked: !!(p.withdrawal || p.returnIntent || p.decisionVote) })).sort((a, b) => a.unitId.localeCompare(b.unitId)) });
+        purpose: p.descriptor.purpose, state: p.state, blocked: p.state === 'free' && !!(p.withdrawal || p.returnIntent || p.decisionVote) }))
+      .sort((a, b) => a.unitId.localeCompare(b.unitId)) });
 }
 
 export function prepareBond({ terms, policy, context, inventoryCertificate, priceCheckpoint, priceReference, priceLog, now, historyFromSlot = terms.bond?.historyFromSlot ?? 0 }) {
