@@ -49,15 +49,29 @@ export class StakePriceService {
     const c = this.context();
     return { v: 1, networkId: c.networkId, venueKey: c.venueKey, epochId: c.epoch.id, kind, body };
   }
-  async quorum(method, body) {
-    const context = this.context();
-    const results = await Promise.allSettled(context.epoch.members.map(m => this.request(m.dexKey, method, body)));
-    const votes = results.flatMap((r, i) => r.status === 'fulfilled' && r.value?.from === context.epoch.members[i].dexKey ? [r.value] : []);
-    // Name each member's refusal so a missing quorum explains itself in the logs.
-    const refusals = results.flatMap((r, i) => r.status === 'rejected' ? [`${context.epoch.members[i].dexKey.slice(0, 8)}: ${String(r.reason?.message ?? r.reason).slice(0, 160)}`]
-      : r.value?.from !== context.epoch.members[i].dexKey ? [`${context.epoch.members[i].dexKey.slice(0, 8)}: wrong signer`] : []);
-    if (votes.length < 3) throw new Error(`Three stake signers are required (${method}; ${refusals.join('; ')})`);
-    return matchingCertificate(votes, context, method === 'priceVote' ? 'completion' : 'price-head');
+  // Finishes as soon as three matching original members have voted: waiting for a slow fourth spent the caller's whole
+  // 30 s on every price snapshot. Outstanding requests keep their rejection handlers and their own transport deadlines.
+  quorum(method, body) {
+    const context = this.context(), members = context.epoch.members, kind = method === 'priceVote' ? 'completion' : 'price-head';
+    return new Promise((resolve, reject) => {
+      const votes = [], refusals = new Array(members.length).fill(null);
+      let remaining = members.length, finished = false;
+      const settle = () => {
+        if (finished) return;
+        if (votes.length >= 3) {
+          try { const certificate = matchingCertificate(votes, context, kind); finished = true; resolve(certificate); return; } catch {}
+        }
+        if (--remaining > 0) return;
+        finished = true;
+        // Name each member's refusal so a missing quorum explains itself in the logs.
+        if (votes.length < 3) reject(new Error(`Three stake signers are required (${method}; ${refusals.filter(Boolean).join('; ')})`));
+        else reject(new Error('Three matching stake votes are required'));
+      };
+      members.forEach((m, i) => Promise.resolve().then(() => this.request(m.dexKey, method, body)).then(value => {
+        if (value?.from === m.dexKey) votes.push(value); else refusals[i] = `${m.dexKey.slice(0, 8)}: wrong signer`;
+        settle();
+      }, error => { refusals[i] = `${m.dexKey.slice(0, 8)}: ${String(error?.message ?? error).slice(0, 160)}`; settle(); }));
+    });
   }
   // Called only when the venue first verifies both settlement legs, before its
   // report is published. The original signed completion time is retained.

@@ -188,6 +188,12 @@ class Sidechannel extends Feature {
     this.powLowPending = Number.isSafeInteger(config.powLowPending) && config.powLowPending > 0 ? config.powLowPending : 4;
     this.powDifficulty = Number.isInteger(config.powDifficulty) ? config.powDifficulty : 0;
     if (config.powWorkers !== undefined && config.powWorkers > powWorker.size) powWorker.resize(config.powWorkers);
+    // Channels whose messages are independent requests and replies stamp side by side, one lane per worker; every
+    // other message keeps its class's single order. One stake lane on a server queued replies past the 30 s timeout.
+    this.powParallelChannels = new Set(Array.isArray(config.powParallelChannels) ? config.powParallelChannels.map(String) : []);
+    this.powLanes = powClasses.map(() => []);
+    // A message nobody waits for any more is dropped before its stamp starts instead of delaying the ones behind it.
+    this.powExpired = typeof config.powExpired === 'function' ? config.powExpired : () => false;
     if (this.powDifficulty < 0 || this.powDifficulty > 30) throw new Error('Invalid PoW difficulty');
     this.powRequireEntry = config.powRequireEntry === true;
     this.powRequiredChannels = Array.isArray(config.powRequiredChannels)
@@ -794,8 +800,12 @@ class Sidechannel extends Feature {
     return this.powClassOf.get(message?.kind) ?? this.powBackground;
   }
 
+  // Settles once every stamp of the class queued so far has finished, in its ordered queue and in its lanes.
+  _powTail(level) { return Promise.all([this.powQueues[level], ...this.powLanes[level].map(lane => lane.tail)]); }
+
   async _attachPow(payload) {
     if (!this._powRequired(payload?.channel ?? '')) return;
+    if (this.powExpired(payload.channel, payload.message)) throw new Error('Message expired before stamping');
     const difficulty = this.powDifficulty, level = this._powClass(payload.message);
     const urgent = () => this.powPending.findIndex((n, i) => i < level && n > 0);
     const job = await powWorker.open(...this._powParts(payload), difficulty);
@@ -808,7 +818,7 @@ class Sidechannel extends Feature {
         for (let i = urgent(); i >= 0 && waitLeft > 0; i = urgent()) {
           const started = Date.now();
           let timer;
-          await Promise.race([this.powQueues[i], new Promise(resolve => { timer = setTimeout(resolve, waitLeft); })]);
+          await Promise.race([this._powTail(i), new Promise(resolve => { timer = setTimeout(resolve, waitLeft); })]);
           clearTimeout(timer);
           waitLeft -= Math.max(1, Date.now() - started);
         }
@@ -840,7 +850,14 @@ class Sidechannel extends Feature {
       if (entry.done) { this.stamped.delete(key); this.stampedBytes -= entry.bytes; }
     }
     const entry = { at: now, bytes, done: false, reuseMs: channel.startsWith('intercom-dex:t:') ? 10000 : 60000 };
-    const queue = required ? this.powQueues[level] : Promise.resolve();
+    let lane = null;
+    if (required && this.powParallelChannels.has(channel)) {
+      const lanes = this.powLanes[level];
+      lane = lanes.find(l => l.pending === 0) ?? (lanes.length < powWorker.size ? null : lanes.reduce((a, b) => (b.pending < a.pending ? b : a)));
+      if (!lane) { lane = { tail: Promise.resolve(), pending: 0 }; lanes.push(lane); }
+      lane.pending++;
+    }
+    const queue = lane ? lane.tail : required ? this.powQueues[level] : Promise.resolve();
     if (required) this.powPending[level]++;
     entry.promise = queue.then(() => this._buildPayload(channel, copy.message, copy.invite)).then(payload => {
       entry.at = payload.ts; entry.done = true;
@@ -848,8 +865,9 @@ class Sidechannel extends Feature {
     }).catch(error => {
       if (this.stamped.get(id) === entry) { this.stamped.delete(id); this.stampedBytes -= bytes; }
       throw error;
-    }).finally(() => { if (required) this.powPending[level]--; });
-    if (required) this.powQueues[level] = entry.promise.catch(() => {});
+    }).finally(() => { if (required) this.powPending[level]--; if (lane) lane.pending--; });
+    if (lane) lane.tail = entry.promise.catch(() => {});
+    else if (required) this.powQueues[level] = entry.promise.catch(() => {});
     this.stamped.set(id, entry); this.stampedBytes += bytes;
     return entry.promise;
   }

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.55
+
+- Staking answers again. Every stake message from the venue, signers and payout needs a proof-of-work stamp; 0.1.52
+  gave those servers eight stamping threads, but stake messages still waited for each other, so one thread did all the
+  work. With more traders the queue grew past the 30-second stake timeout and stayed there, and prices, deposits and
+  reward checks timed out. Servers now stamp stake messages side by side, one per thread (trade messages keep their
+  order), and drop a stake message whose sender has already given up instead of stamping it.
+- A signer now serves up to 16 stake requests at once from the venue, the other signers and the payout server (others
+  keep 4 each, 32 together). The venue's routine seller stake checks held three of four slots at every signer, so its
+  price votes were dropped unanswered.
+- The venue's price vote finishes as soon as three signers agree instead of waiting for the slowest of four.
+- Server update only (venue, signers, payout); apps need nothing.
+
 ## 0.1.54
 
 - The weekly reward payout skips balances below the payout role's new `rewards.minWeeklyReset` setting (RESET base

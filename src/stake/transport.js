@@ -29,13 +29,19 @@ export function openStakeMessage(raw, now = Math.floor(Date.now() / 1000)) {
   return m;
 }
 
+// A requester waits 30 s (rewardBlock 60 s, runtime.js); 15 s later nobody reads the request or its reply any more.
+// The server peers apply the same rule before stamping (peer/features/dex-transport.js).
+export function stakeMessageExpired(m, now = Math.floor(Date.now() / 1000)) {
+  return now - m.at > (m.method === 'rewardBlock' ? 75 : 45);
+}
+
 // Each authenticated request has a bounded reply window. Mutating handlers own
 // durable operation IDs; a transport retry never authorizes a second operation.
 export class StakeTransport {
   constructor({ bridge, identity, handle = async () => { throw new Error('Unsupported stake request'); }, now = () => Math.floor(Date.now() / 1000), timeoutMs = 30000, allowPagingPeer = () => false, pageRate = () => 0, transferMs = STAKE_TRANSFER_MS }) {
     Object.assign(this, { bridge, identity, handle, now, timeoutMs, allowPagingPeer, pageRate, transferMs });
     this.transfers = new Map(); this.finished = new Map(); this.bufferBytes = 0; this.outbound = new Map(); this.pacing = new Map();
-    this.pending = new Map(); this.active = new Map(); this.closed = true;
+    this.pending = new Map(); this.active = new Map(); this.servers = new Set(); this.closed = true;
     this.listener = (ch, raw) => { if (ch === STAKE_CHANNEL) void this.receive(raw).catch(() => {}); };
   }
   async start() { this.closed = false; this.bridge.on('message', this.listener); await this.bridge.join(STAKE_CHANNEL); }
@@ -141,17 +147,24 @@ export class StakeTransport {
       p.done(m.body.ok === true ? null : new Error(typeof m.body.error === 'string' ? m.body.error : 'Stake request refused'), m.body.value);
       return;
     }
-    const count = this.active.get(m.from) ?? 0;
-    if (count >= 4 || [...this.active.values()].reduce((a, b) => a + b, 0) >= 32) return;
+    // A request queued behind others until its requester gave up is not worth a handler slot or a stamped reply.
+    if (stakeMessageExpired(m, this.now())) return;
+    // Venue, committee and payout may run 16 requests each, outside the public total: the venue's owner inventory
+    // batches alone held three of four slots at every signer, so its price head votes were dropped unanswered.
+    // Every other sender keeps 4 at a time and 32 together.
+    const server = this.allowPagingPeer(m.from), count = this.active.get(m.from) ?? 0;
+    if (count >= (server ? 16 : 4)) return;
+    if (!server && [...this.active].reduce((total, [key, n]) => total + (this.servers.has(key) ? 0 : n), 0) >= 32) return;
+    if (server) this.servers.add(m.from);
     this.active.set(m.from, count + 1);
     try {
       let body;
       try { body = { ok: true, value: await this.handle(m.method, m.body, m.from) }; }
       catch (error) { body = { ok: false, error: String(error.message).slice(0, 256) }; }
-      if (!this.closed) await this.send({ kind: 'stakeReply', to: m.from, id: m.id, method: m.method, body });
+      if (!this.closed && !stakeMessageExpired(m, this.now())) await this.send({ kind: 'stakeReply', to: m.from, id: m.id, method: m.method, body });
     } finally {
       const remaining = this.active.get(m.from) - 1;
-      if (remaining) this.active.set(m.from, remaining); else this.active.delete(m.from);
+      if (remaining) this.active.set(m.from, remaining); else { this.active.delete(m.from); this.servers.delete(m.from); }
     }
   }
 }
