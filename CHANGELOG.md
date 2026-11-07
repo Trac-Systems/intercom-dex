@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.54
+
+- The weekly reward payout skips balances below the payout role's new `rewards.minWeeklyReset` setting (RESET base
+  units, default 0; mainnet 0.0025 RESET, about one transfer fee). A tiny stake no longer costs the pool a 0.03 TNK
+  fee every week to send a few millionths of a RESET; its rewards keep accruing and are paid once they reach that
+  amount or 0.1 RESET. Payout update only.
+
 ## 0.1.53
 
 - Rewards are counted again. The venue asks the signers to certify a block's reward checkpoint right when it captures

@@ -4,10 +4,11 @@ import { settingsSchema } from '../stake/settings.js';
 // Separate ordinary RESET wallet. The adapter never receives stake keys or a stake collection method.
 // prepare signs without broadcasting; sendPrepared only rebroadcasts the exact saved bytes; outcome proves finality.
 export class PayoutService {
-  constructor({ store, context, identity, adapter, settings, publish = async () => {}, now = () => Math.floor(Date.now() / 1000) }) {
+  constructor({ store, context, identity, adapter, settings, minWeeklyReset = '0', publish = async () => {}, now = () => Math.floor(Date.now() / 1000) }) {
+    if (!/^(0|[1-9][0-9]*)$/.test(minWeeklyReset)) throw new Error('minWeeklyReset must be RESET base units');
     for (const method of ['pool', 'prepare', 'sendPrepared', 'outcome']) if (typeof adapter?.[method] !== 'function') throw new Error(`Payout adapter requires ${method}`);
     this.ledger = new RewardLedger({ store, context, identity });
-    Object.assign(this, { adapter, settings, publish, now }); this.queue = Promise.resolve();
+    Object.assign(this, { adapter, settings, minWeeklyReset, publish, now }); this.queue = Promise.resolve();
   }
   enqueue(fn) { const work = this.queue.then(fn); this.queue = work.catch(() => {}); return work; }
   onBlock(facts) {
@@ -41,7 +42,7 @@ export class PayoutService {
       const pool = await this.adapter.pool();
       if (pool.confirmed !== true || !/^(0|[1-9][0-9]*)$/.test(pool.TNK ?? '') || !/^(0|[1-9][0-9]*)$/.test(pool.feeTnk ?? '')) throw new Error('Confirmed payout fee balance unavailable');
       if (BigInt(pool.TNK) < BigInt(pool.feeTnk)) return { state: 'pending', reason: 'tnk_short' };
-      p ??= this.ledger.beginPayout(now, settings);
+      p ??= this.ledger.beginPayout(now, settings, this.minWeeklyReset);
       if (!p) return { state: 'idle' };
       if (BigInt(pool.RESET) < BigInt(p.amount)) return { state: 'pending', reason: 'pool_empty', operationId: p.id };
       if (!p.transfer) p = this.ledger.prepared(p.id, await this.adapter.prepare({ operationId: p.id, nonce: p.id, to: p.address, amount: p.amount, asset: 'RESET' }));

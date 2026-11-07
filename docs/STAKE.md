@@ -249,7 +249,10 @@ at the next block, without back-pay. Each block has a signed audit summary and
 retained source certificates. A gap or chain reorganization stops processing
 until facts are reconciled.
 
-Payout is due at 0.1 RESET unpaid, or weekly for a positive balance. The payout
+Payout is due at 0.1 RESET unpaid, or weekly for a positive balance of at least the
+payout role's `rewards.minWeeklyReset` (RESET base units, default `"0"`; mainnet uses
+`"250000"`, 0.0025 RESET, about one transfer fee). A smaller balance keeps accruing
+and is paid once it reaches that amount or 0.1 RESET. The payout
 service writes an intent, stores signed transfer bytes, then broadcasts. It keeps
 only one outstanding transfer and reconciles that exact transaction after restart.
 Unknown confirmation cannot create a second payment. TNK fee funds are checked

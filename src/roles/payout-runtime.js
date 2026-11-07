@@ -10,8 +10,8 @@ import { Clock } from '../locks/clock.js';
 import { rewardsStatus } from '../stake/status.js';
 
 export class PayoutRole {
-  constructor({ bridge, identity, store, serviceKey, profile, adapter, address, log = () => {}, blockClock = new Clock({ bridge }), now = () => Math.floor(Date.now() / 1000) }) {
-    Object.assign(this, { bridge, identity, store, serviceKey, adapter, address, log, blockClock, now });
+  constructor({ bridge, identity, store, serviceKey, profile, adapter, address, minWeeklyReset = '0', log = () => {}, blockClock = new Clock({ bridge }), now = () => Math.floor(Date.now() / 1000) }) {
+    Object.assign(this, { bridge, identity, store, serviceKey, adapter, address, minWeeklyReset, log, blockClock, now });
     this.adapter = { ...adapter, pool: async input => {
       const result = await adapter.pool(input);
       this.poolSnapshot = result?.confirmed === true ? { ...result, at: this.now() } : null;
@@ -44,7 +44,7 @@ export class PayoutRole {
     const { policy } = this.policy(), context = stakeContext({ sellerBond: policy });
     if (!this.service) {
       this.epochId = policy.epoch.id;
-      this.service = new PayoutService({ store: this.store, context, identity: this.identity, adapter: this.adapter,
+      this.service = new PayoutService({ store: this.store, context, identity: this.identity, adapter: this.adapter, minWeeklyReset: this.minWeeklyReset,
         settings: facts => this.policy(facts?.at).settings.settings, now: this.now,
         publish: async summary => { this.store.put(`stake-payout-audit-${summary.body.height}`, summary); } });
     }

@@ -93,6 +93,12 @@ if (command.startsWith('signer-backup ')) {
 // Reject a mistyped safety switch before opening keys, connecting a peer or starting a role.
 if (config.role === 'signer') config.strikes = strikeSettings(config.strikes);
 else if (config.strikes !== undefined) throw new Error('strikes is signer-only configuration');
+if (config.rewards !== undefined) {
+  if (config.role !== 'payout') throw new Error('rewards is payout-only configuration');
+  const keys = Object.keys(config.rewards ?? {}), min = config.rewards?.minWeeklyReset;
+  if (keys.some(k => k !== 'minWeeklyReset') || typeof min !== 'string' || !/^(0|[1-9][0-9]{0,10})$/.test(min) || BigInt(min) > 10000000000n)
+    throw new Error('rewards.minWeeklyReset must be RESET base units up to 100 RESET');
+}
 let managedStop = () => process.exit(75);
 if (process.env.DEX_LIFECYCLE_ID) {
   process.on('disconnect', () => managedStop());
@@ -272,6 +278,7 @@ if (locksRole) {
   } else if (config.role === 'payout') {
     if (config.dashboard || config.payout) throw new Error('The reward pool uses its own configured ordinary wallet');
     role = new PayoutRole({ bridge, identity, store, profile, serviceKey: config.serviceKey, address: wallet.address, log,
+      minWeeklyReset: config.rewards?.minWeeklyReset ?? '0',
       adapter: createPayoutWallet({ bridge, wallet, profile, store, trac, resetGatewayUrl: config.trac?.resetGatewayUrl }) });
   } else throw new Error('role must be service, signer, trader or payout');
   role.stakeRuntime = createStakeRuntime({ type: config.role, role, bridge, identity, box: keys.box, store, solana, trac, rpc: stakeClockSettings(config, rpc), wallet, profile,

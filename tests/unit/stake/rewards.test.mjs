@@ -83,7 +83,10 @@ test('certified penalty forfeits only that seller unpaid amount; replay cannot f
 test('payout eligibility honors the threshold or weekly positive balance and journals one transfer', () => {
   const l = ledger(); l.accrue(block());
   const weekly = { ...settings, rewards: { ...settings.rewards, payoutMinReset: '10000000000' } };
-  assert.equal(l.beginPayout(601, weekly), null); const p = l.beginPayout(600 + 604800, weekly); assert.ok(p);
+  assert.equal(l.beginPayout(601, weekly), null);
+  const most = Object.values(l.read().accounts).reduce((m, a) => BigInt(a.unpaid) > m ? BigInt(a.unpaid) : m, 0n);
+  assert.equal(l.beginPayout(600 + 604800, weekly, String(most + 1n)), null, 'a weekly balance below the floor stays unpaid');
+  const p = l.beginPayout(600 + 604800, weekly, String(most)); assert.ok(p); assert.equal(p.amount, String(most));
   assert.deepEqual(l.beginPayout(700000, weekly), p);
   assert.throws(() => l.prepared(p.id, { txHash: h(50), bytes: 'synthetic', amount: '999', to: p.address, nonce: p.id, feeTnk: '3' }), /mismatch/);
   l.prepared(p.id, { txHash: h(50), bytes: 'synthetic', amount: p.amount, to: p.address, nonce: p.id, feeTnk: '3' });

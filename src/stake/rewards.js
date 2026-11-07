@@ -136,13 +136,16 @@ export class RewardLedger {
     this.read(); return summary;
   }
 
-  beginPayout(now, settings) {
-    uint.parse(now); const s = settingsSchema.parse(settings), r = this.read();
+  // The weekly payout skips a balance below minWeeklyReset (an operator setting of the payout role): sending dust would
+  // cost the pool more TNK fee than the reward is worth. The balance keeps accruing and is paid once it reaches it.
+  beginPayout(now, settings, minWeeklyReset = '0') {
+    uint.parse(now); const s = settingsSchema.parse(settings), r = this.read(), weeklyFloor = BigInt(minWeeklyReset);
     if (r.pending) return structuredClone(r.pending);
     const account = Object.keys(r.accounts).sort().find(address => {
       const a = r.accounts[address];
       if (Object.values(r.forfeits).some(f => f.address === address && f.state === 'pending')) return false;
-      return BigInt(a.unpaid) > 0n && (BigInt(a.unpaid) >= BigInt(s.rewards.payoutMinReset) || now - (a.lastPayout?.atUnix ?? a.since) >= s.rewards.payoutIntervalSec);
+      return BigInt(a.unpaid) > 0n && (BigInt(a.unpaid) >= BigInt(s.rewards.payoutMinReset) ||
+        BigInt(a.unpaid) >= weeklyFloor && now - (a.lastPayout?.atUnix ?? a.since) >= s.rewards.payoutIntervalSec);
     });
     if (!account) return null;
     const id = sha256Hex('intercom-dex/rewards/v1/payout\n' + stableJSON({ address: account, sequence: ++r.payoutSequence, networkId: this.context.networkId, venueKey: this.context.venueKey }));
