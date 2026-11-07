@@ -32,6 +32,18 @@ import { archiveCustodyTransition } from './custody-archive.js';
 
 // Stake is an independent authenticated channel, with existing spot registry and
 // original signer identities. It does not depend on optional Locks configuration.
+export const STAKE_IDLE_POLL_MS = 60000;
+
+// Runs `work` at most once per `ms`, unless `urgent()`, and never twice at the same time.
+export function paced(ms, work, { urgent = () => false, now = Date.now } = {}) {
+  let running = false, last = -Infinity;
+  return async (...args) => {
+    if (running || !urgent() && now() - last < ms) return false;
+    running = true; last = now();
+    try { await work(...args); return true; } finally { running = false; }
+  };
+}
+
 export function createStakeRuntime({ type, role, bridge, identity, box, store, solana, trac, rpc, wallet, profile, resetGatewayUrl, log }) {
   const registry = () => type === 'service' ? role.registry : role.registry.usable;
   const clock = () => finalizedStakeClock(rpc ?? {});
@@ -234,14 +246,15 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
       if (rewardOffers) await rewardOffers.start();
       if (coordinator || client) { void penaltyTick(); penaltyTimer = setInterval(penaltyTick, 5000); penaltyTimer.unref?.(); }
       if (['trader', 'service'].includes(type)) {
-        let refreshing = false;
-        const refresh = async () => {
-          if (refreshing || !registry()?.sellerBond) return;
-          refreshing = true;
+        // A trader renews its check every 15 s only while it has a sell offer that may have to propose a bond; otherwise
+        // once a minute keeps its status. Every check costs stamped stake messages, and a slow machine fell behind.
+        const selling = () => [...(role.mine?.values() ?? [])].some(o => o.side === 'sell' && o.expiresAt > Math.floor(Date.now() / 1000));
+        const refresh = paced(STAKE_IDLE_POLL_MS, async () => {
           try { await admission.refresh(type === 'service' ? [...new Map(role.registry.pairs.flatMap(p => role.book.snapshot(p.pair, role.now())).filter(o => o.side === 'sell').map(o => [o.maker.dexKey, o.maker])).values()] : []); }
-          catch (e) { log('stake admission waiting', e.message); } finally { refreshing = false; }
-        };
-        void refresh(); admissionTimer = setInterval(refresh, 15000); admissionTimer.unref?.();
+          catch (e) { log('stake admission waiting', e.message); }
+        }, { urgent: () => type === 'service' || selling() });
+        const tick = () => { if (registry()?.sellerBond) void refresh(); };
+        tick(); admissionTimer = setInterval(tick, 15000); admissionTimer.unref?.();
       }
       if (rewards) {
         let observing = false;
@@ -254,17 +267,20 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
         void observe(); rewardTimer = setInterval(observe, 5000); rewardTimer.unref?.();
       }
       if (client) { const recover = () => client.recover().catch(e => log('stake recovery', e.message));
-        const poll = async () => {
-          void recover();
-          const source = registry()?.sellerBond?.rewardService?.dexKey;
-          if (!source) return;
+        // Reward balances move once per block: one status read a minute, never two at once. Recovery keeps its 15 s.
+        const status = paced(STAKE_IDLE_POLL_MS, async source => {
           try {
             const response = await request(source, 'rewardStatus', { address: role.me.tracAddr });
             if (response.address !== role.me.tracAddr) throw new Error('Wrong reward address');
             store.put('stake-reward-status', { source, address: response.address, at: Math.floor(Date.now() / 1000), rewards: rewardsStatus(response.rewards) });
           } catch (e) { log('rewards waiting', e.message); }
+        });
+        const poll = () => {
+          void recover();
+          const source = registry()?.sellerBond?.rewardService?.dexKey;
+          if (source) void status(source);
         };
-        void poll(); timer = setInterval(poll, 15000); timer.unref?.(); }
+        poll(); timer = setInterval(poll, 15000); timer.unref?.(); }
     },
     restore: () => bridge.join(STAKE_CHANNEL),
     stop() { clearInterval(timer); clearInterval(rewardTimer); clearInterval(admissionTimer); clearInterval(penaltyTimer); transport.stop(); rewardOffers?.stop(); },

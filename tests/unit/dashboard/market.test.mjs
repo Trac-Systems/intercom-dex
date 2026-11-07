@@ -162,3 +162,23 @@ test("another maker's rest below the pair's smallest trade is not shown", () => 
   const strict = { ...pair, minBaseAmount: '100' };
   assert.deepEqual(buildBook({ pair: strict, offers: [dust, real], dexKey, now }).asks.map(l => l.price), ['2']);
 });
+
+test('a maker that did not answer a take is passed over with all its offers for ten minutes', () => {
+  const silent = 'c'.repeat(64), other = 'd'.repeat(64);
+  const by = (id, maker, firstSeen) => { const o = offer(id, '1', 'sell', '100000000', firstSeen); o.offer.maker = { dexKey: maker }; return o; };
+  const a = by(1, silent, 800), b = by(2, silent, 810), c = by(3, other, 820);
+  const take = (o, reason, at) => ({ state: { mode: 'taker', offerId: o.offer.offerId, phase: 'aborted', reason, peer: o.offer.maker.dexKey, now: at,
+    draft: { baseAmount: '50000000' } } });
+  let taken = ownTakes([take(a, 'Timed out: take/accept', 990)], now);
+  assert.deepEqual([...taken.silentMakers], [silent]);
+  const level = build([a, b, c], { taken }).asks[0];
+  assert.deepEqual([level.take.offerId, level.count], [c.offer.offerId, 1]);
+  // A decline is an answer: only that offer is skipped, the maker's next offer is still the take.
+  taken = ownTakes([take(a, 'busy', 990)], now);
+  assert.equal(taken.silentMakers.size, 0);
+  assert.equal(build([a, b, c], { taken }).asks[0].take.offerId, b.offer.offerId);
+  // Ten minutes after the unanswered take the maker's other offers are taken again.
+  taken = ownTakes([take(a, 'Timed out: take/accept', 990)], 990 + 600);
+  assert.equal(taken.silentMakers.size, 0);
+  assert.equal(build([a, b, c], { taken }).asks[0].take.offerId, b.offer.offerId);
+});

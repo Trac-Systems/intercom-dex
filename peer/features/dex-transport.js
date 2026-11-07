@@ -20,7 +20,7 @@ export const DEX_POW_LOW = ['decline'];
 export const SERVER_ROLES = ['service', 'signer'];
 // Venue, signers and payout stamp every stake request and reply; eight threads keep replies inside the stake timeout.
 export const SERVER_POW_WORKERS = 8;
-// Stake requests and replies are independent, so servers stamp them side by side. A stake message carries its signed
+// Stake requests and replies are independent, so peers stamp them side by side, one lane per worker. A stake message carries its signed
 // time `at` (seconds) and its method; its requester gives up after 30 s (rewardBlock 60 s, src/stake/runtime.js), so
 // one still unstamped 15 s after that is dropped (same rule as src/stake/transport.js stakeMessageExpired).
 export const STAKE_POW_CHANNEL = 'intercom-dex:bonds';
@@ -51,8 +51,10 @@ export function dexTransport(config) {
       } : {}),
       acceptMessage: (channel, payload) => channel !== CHAT_CHANNEL || chat.receive(payload?.message) !== null,
       ownerWriteChannels: ['intercom-dex'], ownerKeys: { 'intercom-dex': config.servicePeerKey },
-      powEnabled: true, powDifficulty: DEX_POW_BITS, ...(['service', 'signer', 'payout'].includes(config.role) ? { powWorkers: SERVER_POW_WORKERS,
-        powParallelChannels: [STAKE_POW_CHANNEL], powExpired: stakeMessageExpired } : {}),
+      // Every peer stamps stake messages in their own lanes, apart from trade messages, and drops expired ones; a trader's
+      // single worker otherwise queued hours of stake polls in front of its own answers. Servers get eight workers.
+      powEnabled: true, powDifficulty: DEX_POW_BITS, powParallelChannels: [STAKE_POW_CHANNEL], powExpired: stakeMessageExpired,
+      ...(['service', 'signer', 'payout'].includes(config.role) ? { powWorkers: SERVER_POW_WORKERS } : {}),
       powClasses: DEX_POW_CLASSES, powLowKinds: DEX_POW_LOW,
       powRequiredChannels: ['intercom-dex:offers', 'intercom-dex:signers', CHAT_CHANNEL, 'intercom-dex:bonds'], powRequiredPrefixes: ['intercom-dex:t:'],
       maxMessageBytes: 200_000, ...(SERVER_ROLES.includes(config.role) ? SERVER_RATE : TRADER_RATE) },

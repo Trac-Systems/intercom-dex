@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.56
+
+- A maker that does not answer a take at all is passed over, with all its offers, for ten minutes. One maker whose app
+  had stalled kept several offers at the best price, so every take went to it and timed out ("the other side took too
+  long to answer"); the next take now goes to another maker. A maker that declines still only loses that one offer.
+- Apps stamp stake messages in their own lane, apart from trade messages, and drop the ones nobody waits for any more.
+  An app on a slow or low-priority machine queued stake requests faster than it could stamp them; the queue kept
+  growing and every stake call timed out ("Stake response timed out", no stake price, a deposit stuck at
+  "Stake quorum unavailable"). Restarting the app clears an existing queue.
+- Apps ask for their stake and reward status once a minute instead of every 15 seconds, unless they have a sell offer
+  open (sellers keep the 15-second check their bonds need). About a quarter of the stake messages, so of the work.
+- App update; servers need nothing.
+
 ## 0.1.55
 
 - Staking answers again. Every stake message from the venue, signers and payout needs a proof-of-work stamp; 0.1.52

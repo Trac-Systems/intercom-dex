@@ -21,11 +21,12 @@ export function createNextOffer({ role, log = () => {}, defer = fn => setTimeout
   const running = (pair, side) => [...follows.values()].some(f => f.pair === pair && f.side === side);
 
   function next(f) {
-    const price = priceUnits(f.price), { skip, running: held } = ownTakes(role.host.trades.values());
+    const price = priceUnits(f.price), { skip, running: held, silentMakers } = ownTakes(role.host.trades.values());
     const rows = [];
     for (const seen of role.offers.values()) {
       const id = seen.offer.offerId;
-      if (seen.offer.pair !== f.pair || seen.offer.side !== f.side || f.tried.has(id) || skip.has(id) || held.has(id)) continue;
+      if (seen.offer.pair !== f.pair || seen.offer.side !== f.side || f.tried.has(id) || skip.has(id) || held.has(id) ||
+        silentMakers.has(seen.offer.maker.dexKey)) continue;
       let same; try { same = priceUnits(seen.offer.price) === price; } catch { same = false; }
       const o = same ? role.availableOffer(id) : null;
       if (!o) continue;

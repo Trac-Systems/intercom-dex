@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Sidechannel from '../../../peer/features/sidechannel/index.js';
 import { powWorker } from '../../../peer/features/sidechannel/pow-client.js';
-import { stakeMessageExpired, STAKE_POW_CHANNEL } from '../../../peer/features/dex-transport.js';
+import { stakeMessageExpired, STAKE_POW_CHANNEL, dexTransport } from '../../../peer/features/dex-transport.js';
 
 const classes = [['heartbeat'], ['deal', 'stakeRequest', 'stakeReply']];
 function channel(t) {
@@ -45,4 +45,13 @@ test('a stake message nobody waits for any more is dropped before stamping', asy
   await assert.rejects(sc._attachPow({ channel: 'x', from: null, id: '1', message: { old: true }, origin: null, ts: 100000 }), /expired before stamping/);
   const fresh = { channel: 'x', from: null, id: '2', message: { old: false }, origin: null, ts: 100000 };
   await sc._attachPow(fresh); assert.equal(sc._checkPow(fresh, 'x'), true);
+});
+
+test('every DEX peer, traders included, stamps stake messages in their own lane and drops expired ones', () => {
+  for (const role of ['trader', 'service', 'signer', 'payout']) {
+    const sc = dexTransport({ role, servicePeerKey: 'f'.repeat(64) }).sidechannel;
+    assert.deepEqual(sc.powParallelChannels, [STAKE_POW_CHANNEL]);
+    assert.equal(sc.powExpired, stakeMessageExpired);
+    assert.equal(sc.powWorkers, role === 'trader' ? undefined : 8);
+  }
 });

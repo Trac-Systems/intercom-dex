@@ -1,6 +1,7 @@
 import { priceUnits, formatPrice } from '../market/assets.js';
 import { availableOffer } from '../market/book.js';
 import { amount } from './format.js';
+import { nowSec } from '../roles/common.js';
 
 // Called-off reasons that are about the signers, not the maker: the same offer may work on the next try.
 const NOT_THE_MAKER = /signers|RESET gateway/i;
@@ -8,22 +9,28 @@ const NOT_THE_MAKER = /signers|RESET gateway/i;
 // A take called off before anything was locked, for a reason that lies with the maker.
 export const calledOffByMaker = s => s.phase === 'aborted' && !s.lockAttempted && !s.locked && !NOT_THE_MAKER.test(String(s.reason ?? ''));
 
+// A maker that did not answer a take at all (neither accept nor decline) is passed over with all its offers for ten
+// minutes: one silent maker with many offers at the best price otherwise caught every take there.
+export const SILENT_MAKER_SEC = 600;
+const unanswered = s => /^Timed out: take\/accept/.test(String(s.reason ?? ''));
+
 // What this trader's own takes say about other traders' offers. An offer whose take was called off before anything
 // was locked (the maker did not answer, declined, or gave up) is skipped from then on, so the next click on its price
 // goes to the next offer there; own takes still running count against the offer they took from.
-export function ownTakes(trades) {
-  const skip = new Set(), running = new Map();
+export function ownTakes(trades, now = nowSec()) {
+  const skip = new Set(), running = new Map(), silentMakers = new Set();
   for (const t of trades) {
     const s = t.state;
     if (s.mode !== 'taker' || !s.offerId) continue;
     if (s.phase === 'aborted') {
       if (calledOffByMaker(s)) skip.add(s.offerId);
+      if (calledOffByMaker(s) && unanswered(s) && s.peer && now - s.now < SILENT_MAKER_SEC) silentMakers.add(s.peer);
       continue;
     }
     if (['complete', 'refunded', 'lost'].includes(s.phase)) continue;
     running.set(s.offerId, (running.get(s.offerId) ?? 0n) + BigInt((s.terms ?? s.draft).baseAmount));
   }
-  return { skip, running };
+  return { skip, running, silentMakers };
 }
 
 // Offers whose maker went quiet are already left out (book.js liveOffer). A take at a price level goes to the oldest offer.
@@ -48,7 +55,7 @@ export function buildBook({ pair, offers, mine = [], dexKey, book, inventory = b
   };
   for (const seen of offers) {
     if (seen.offer.pair !== pair.pair || seen.offer.maker.dexKey === dexKey) continue;
-    if (taken.skip.has(seen.offer.offerId)) continue;
+    if (taken.skip.has(seen.offer.offerId) || taken.silentMakers?.has(seen.offer.maker.dexKey)) continue;
     const o = availableOffer(seen, book, inventory, now, heardAt), left = o ? BigInt(o.baseAmount) - (taken.running.get(o.offerId) ?? 0n) : 0n;
     // A rest below the pair's smallest trade cannot be taken.
     if (left > 0n && left >= BigInt(pair.minBaseAmount ?? 1)) add({ ...o, baseAmount: left.toString() }, seen.firstSeen ?? seen.lastSeen, false);
