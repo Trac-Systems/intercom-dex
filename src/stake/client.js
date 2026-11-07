@@ -21,6 +21,7 @@ export function tnkShort(count, reserve, fee, free) {
     `its own fee when the RESET is returned. About ${tnkText(back)} TNK comes back when you withdraw. Buy TNK on intercom-dex or send TNK to this wallet, then try again.`;
 }
 const positive = x => typeof x === 'string' && /^[1-9][0-9]{0,30}$/.test(x);
+export const FUNDING_AT_ONCE = 8;
 // Deposit pieces released because their key setup failed: nothing was sent to them.
 const notDeposited = op => op.pieces.some(p => p.abandoned)
   ? { notDeposited: op.pieces.filter(p => p.abandoned).reduce((n, p) => n + BigInt(p.descriptor.principalReset), 0n).toString() } : {};
@@ -261,84 +262,95 @@ export class StakeClient {
       op.grant ??= await this.request(this.context().epoch.members[0].dexKey, 'capacityPropose', body); this.save(op);
       op.capacity = await this.certificate('capacityVote', { ...body, grant: op.grant }, 'capacity'); this.save(op);
     }
+    // Pieces are funded side by side, up to FUNDING_AT_ONCE at a time: one piece waiting for its transfers no longer
+    // holds up the others, so a deposit split into many pieces finishes within its funding window. A piece that is
+    // committed and archived is settled and never sent again.
+    let open = 0;
     for (const p of op.pieces) {
-      const id = unitId(p.descriptor);
-      if (p.abandoned) continue;
-      if (!p.ready && !p.abandoning) {
-        const starts = await this.all('dkgStart', { descriptor: p.descriptor, capacity: op.capacity });
-        const deals = starts.flatMap(r => r.messages).filter(v => v.fact.kind === 'dkg-deal');
-        // Original deals are retained before relay, including across a partial DKG restart.
-        p.deals = [...new Map([...(p.deals ?? []), ...deals].map(v => [v.from, v])).values()]; this.save(op);
-        const replies = await this.all('dkgDeals', { unitId: id, deals: p.deals });
-        const ready = [...new Map(replies.flatMap(r => r.messages).filter(v => v.fact.kind === 'dkg-ready').map(v => [v.from, v])).values()];
-        for (const v of ready) verifyFact(v, this.context(), 'dkg-ready', v.from);
-        const lock = identicalReady(ready.map(v => ({ kind: 'lockReady', from: v.from, body: v.fact.body })),
-          this.context().epoch.members.map(m => ({ lockKey: m.dexKey, boxKey: m.boxKey })), id, undefined, 3);
-        if (!lock) {
-          // A member whose key setup failed answers with nothing. With two of them, three readiness signatures can
-          // never come together, so nothing was sent to this piece and it never can be: release it instead of waiting.
-          if (starts.filter(r => !r.messages?.length).length < 2) return { ok: true, pending: true, operationId: op.operationId };
-          p.abandoning = true; this.save(op);
-        } else { p.ready = ready; p.lock = lock; this.save(op); }
-      }
-      if (p.abandoning) {
-        p.abandon ??= await this.abandonCertificate(p.descriptor); this.save(op);
-        await this.retireCapacity(p.abandon);
-        p.abandoned = true; this.save(op);
-        this.log('stake deposit piece not created: its key setup failed, nothing was sent', id.slice(0, 12), p.descriptor.principalReset);
-        continue;
-      }
-      p.funding ??= {};
-      const expired = (await this.clock()).at >= p.descriptor.createdAt + op.policy.custody.fundingWindowSec;
-      for (const asset of ['TNK', 'RESET']) if (!p.funding[asset]) {
-        const transferId = sha256Hex(`stake-fund:${id}:${asset}`), at = (await this.clock()).at;
-        if (op.fundingFeeTnk && !this.funding.hasIntent?.(transferId) &&
-            BigInt((await this.trac.balances(this.me.tracAddr)).feeTnk) > BigInt(op.fundingFeeTnk))
-          throw new Error('Replacement fee exceeds its recorded TNK ceiling');
-        const until = p.descriptor.createdAt + (op.policy ?? this.registry().sellerBond).custody.fundingWindowSec;
-        if (at >= until && !this.funding.hasIntent?.(transferId)) continue;
-        const transfer = await this.funding.transfer({ id: transferId, asset,
-          to: p.lock.address, amount: asset === 'RESET' ? p.descriptor.principalReset : p.descriptor.tnkReserve, nonce: fundingNonce(id, asset) });
-        if (!transfer.ok) return { ok: true, pending: true, operationId: op.operationId };
-        p.funding[asset] = transfer.txHash; this.save(op);
-      }
-      if (expired && !p.funded) {
-        // Recover the original funding quorum before considering an unadmitted return.
-        if (p.funding.RESET && p.funding.TNK && !p.refund) {
-          try {
-            p.funded = await this.certificate('fundedVote', { unitId: id, ready: p.ready, funding: p.funding, price: op.snapshot }, 'funded');
-            p.q = op.q; p.fundedAt = p.descriptor.createdAt; this.save(op);
-          } catch { /* Refunding members independently refuse any competing funded vote. */ }
-        }
-        if (!p.funded) {
-          p.returning = true; this.save(op);
-          if (!p.refund) {
-            const balance = await this.trac.balances(p.lock.address);
-            p.refund = await this.certificate('refundVote', { unitId: id, ready: p.ready, returnReset: balance.RESET }, 'funding-refund'); this.save(op);
-          }
-          await this.all('refundCommit', { certificate: p.refund }); await this.archive('funding-refund', p.refund);
-          this.ledger().admitRefund(p.refund);
-          p.refundOperation ??= { kind: 'withdraw', operationId: random(), refund: true, amount: p.refund[0].fact.body.returnReset,
-            policy: op.policy, context: op.context, pieces: [{ unitId: id, generation: 0 }] };
-          this.save(op); await this.collect(p.refundOperation);
-          if (!p.refundOperation.done) return { ok: true, pending: true, operationId: op.operationId };
-          continue;
-        }
-      }
-      if (!p.funded) {
-        const price = await this.request(this.context().venueKey, 'priceSnapshot', {});
-        p.funded = await this.certificate('fundedVote', { unitId: id, ready: p.ready, funding: p.funding, price }, 'funded');
-        p.q = await this.price.import(price); p.fundedAt = (await this.clock()).at; this.save(op);
-      }
-      await this.all('fundedCommit', { certificate: p.funded });
-      await this.archive('funded', p.funded);
-      this.ledger().admitFunded(p.funded, { settings: op.settings, price: p.q, now: p.fundedAt });
+      if (p.abandoned || p.settled) continue;
+      if (open >= FUNDING_AT_ONCE) break;
+      if (!await this.fundPiece(op, p)) open++;
     }
+    if (op.pieces.some(p => !p.abandoned && !p.settled)) return { ok: true, pending: true, operationId: op.operationId };
     op.done = true; this.save(op);
     return { ok: true, operationId: op.operationId,
       funded: op.pieces.filter(p => p.funded).reduce((n, p) => n + BigInt(p.descriptor.principalReset), 0n).toString(),
       ...(op.pieces.some(p => p.refund) ? { refunded: op.pieces.filter(p => p.refund).reduce((n, p) => n + BigInt(p.refund[0].fact.body.returnReset), 0n).toString() } : {}),
       ...notDeposited(op) };
+  }
+  // One deposit piece: key setup, both funding transfers, certification. True once settled, false while it waits.
+  async fundPiece(op, p) {
+    const id = unitId(p.descriptor);
+    if (!p.ready && !p.abandoning) {
+      const starts = await this.all('dkgStart', { descriptor: p.descriptor, capacity: op.capacity });
+      const deals = starts.flatMap(r => r.messages).filter(v => v.fact.kind === 'dkg-deal');
+      // Original deals are retained before relay, including across a partial DKG restart.
+      p.deals = [...new Map([...(p.deals ?? []), ...deals].map(v => [v.from, v])).values()]; this.save(op);
+      const replies = await this.all('dkgDeals', { unitId: id, deals: p.deals });
+      const ready = [...new Map(replies.flatMap(r => r.messages).filter(v => v.fact.kind === 'dkg-ready').map(v => [v.from, v])).values()];
+      for (const v of ready) verifyFact(v, this.context(), 'dkg-ready', v.from);
+      const lock = identicalReady(ready.map(v => ({ kind: 'lockReady', from: v.from, body: v.fact.body })),
+        this.context().epoch.members.map(m => ({ lockKey: m.dexKey, boxKey: m.boxKey })), id, undefined, 3);
+      if (!lock) {
+        // A member whose key setup failed answers with nothing. With two of them, three readiness signatures can
+        // never come together, so nothing was sent to this piece and it never can be: release it instead of waiting.
+        if (starts.filter(r => !r.messages?.length).length < 2) return false;
+        p.abandoning = true; this.save(op);
+      } else { p.ready = ready; p.lock = lock; this.save(op); }
+    }
+    if (p.abandoning) {
+      p.abandon ??= await this.abandonCertificate(p.descriptor); this.save(op);
+      await this.retireCapacity(p.abandon);
+      p.abandoned = true; this.save(op);
+      this.log('stake deposit piece not created: its key setup failed, nothing was sent', id.slice(0, 12), p.descriptor.principalReset);
+      return true;
+    }
+    p.funding ??= {};
+    const expired = (await this.clock()).at >= p.descriptor.createdAt + op.policy.custody.fundingWindowSec;
+    for (const asset of ['TNK', 'RESET']) if (!p.funding[asset]) {
+      const transferId = sha256Hex(`stake-fund:${id}:${asset}`), at = (await this.clock()).at;
+      if (op.fundingFeeTnk && !this.funding.hasIntent?.(transferId) &&
+          BigInt((await this.trac.balances(this.me.tracAddr)).feeTnk) > BigInt(op.fundingFeeTnk))
+        throw new Error('Replacement fee exceeds its recorded TNK ceiling');
+      const until = p.descriptor.createdAt + (op.policy ?? this.registry().sellerBond).custody.fundingWindowSec;
+      if (at >= until && !this.funding.hasIntent?.(transferId)) continue;
+      const transfer = await this.funding.transfer({ id: transferId, asset,
+        to: p.lock.address, amount: asset === 'RESET' ? p.descriptor.principalReset : p.descriptor.tnkReserve, nonce: fundingNonce(id, asset) });
+      if (!transfer.ok) return false;
+      p.funding[asset] = transfer.txHash; this.save(op);
+    }
+    if (expired && !p.funded) {
+      // Recover the original funding quorum before considering an unadmitted return.
+      if (p.funding.RESET && p.funding.TNK && !p.refund) {
+        try {
+          p.funded = await this.certificate('fundedVote', { unitId: id, ready: p.ready, funding: p.funding, price: op.snapshot }, 'funded');
+          p.q = op.q; p.fundedAt = p.descriptor.createdAt; this.save(op);
+        } catch { /* Refunding members independently refuse any competing funded vote. */ }
+      }
+      if (!p.funded) {
+        p.returning = true; this.save(op);
+        if (!p.refund) {
+          const balance = await this.trac.balances(p.lock.address);
+          p.refund = await this.certificate('refundVote', { unitId: id, ready: p.ready, returnReset: balance.RESET }, 'funding-refund'); this.save(op);
+        }
+        await this.all('refundCommit', { certificate: p.refund }); await this.archive('funding-refund', p.refund);
+        this.ledger().admitRefund(p.refund);
+        p.refundOperation ??= { kind: 'withdraw', operationId: random(), refund: true, amount: p.refund[0].fact.body.returnReset,
+          policy: op.policy, context: op.context, pieces: [{ unitId: id, generation: 0 }] };
+        this.save(op); await this.collect(p.refundOperation);
+        if (!p.refundOperation.done) return false;
+        p.settled = true; this.save(op); return true;
+      }
+    }
+    if (!p.funded) {
+      const price = await this.request(this.context().venueKey, 'priceSnapshot', {});
+      p.funded = await this.certificate('fundedVote', { unitId: id, ready: p.ready, funding: p.funding, price }, 'funded');
+      p.q = await this.price.import(price); p.fundedAt = (await this.clock()).at; this.save(op);
+    }
+    await this.all('fundedCommit', { certificate: p.funded });
+    await this.archive('funded', p.funded);
+    this.ledger().admitFunded(p.funded, { settings: op.settings, price: p.q, now: p.fundedAt });
+    p.settled = true; this.save(op); return true;
   }
   async collect(op) {
     const at = (await this.clock()).at, inventory = this.ledger().read().pieces;

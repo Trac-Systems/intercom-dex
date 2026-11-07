@@ -33,7 +33,9 @@ test('finalized stake clock uses lower agreeing readers and fails closed', async
   await assert.rejects(finalizedStakeClock({ endpoints: ['100', '102'], read: async () => { throw Error('offline'); } }), /unavailable/);
 });
 
-for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split']) test(mode === 'dkg-failed'
+for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split', 'many-pieces']) test(mode === 'many-pieces'
+  ? 'a deposit split into many pieces funds them side by side and commits each funded piece once'
+  : mode === 'dkg-failed'
   ? 'a deposit whose key setup failed ends without sending anything and frees its capacity for a new deposit'
   : mode === 'dkg-split' ? 'a deposit whose key setup finished on only two members is released by all four on the proof of two votes'
   : mode.startsWith('late-') ? `expired unadmitted funding returns ${mode === 'late-full' ? 'finalized RESET and TNK' : 'TNK-only residue'} without signing another deposit or requiring price`
@@ -75,7 +77,8 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
     ? priceLog.verifyReference(snapshot.reference, snapshot.checkpoint, now, 60, effectiveSettings(policy, now).settings.priceLookbackSec)
     : { numerator: '20000000', denominator: '1' } };
   const balances = new Map([[me.tracAddr, { RESET: '10000000', TNK: '10000', feeTnk: '30' }]]), sent = new Map();
-  let sends = 0, deferFunding = true;
+  let sends = 0, deferFunding = mode !== 'many-pieces';
+  const submitted = new Set(), commits = [];
   const trac = { balances: async address => balances.get(address) ?? { RESET: '0', TNK: '0', feeTnk: '30' },
     proveAddress: async args => createAddressProof(wallet, { ...args, networkId: 1 }),
     verifyTransfer: async args => { const tx = sent.get(args.txHash); return { ok: !!tx && tx.from === args.from && tx.to === args.to && tx.asset === args.asset && tx.amount === args.minAmount && tx.nonce === args.nonce, final: true }; } };
@@ -111,12 +114,15 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
     if (to === scope.venueKey) { if (method === 'priceSnapshot') return exactMode ? priceSnapshot() : {}; archives.push(body); return { archived: true }; }
     const index = roster.findIndex(m => m.dexKey === to);
     if (dropDeals.has(index) && method === 'dkgDeals') return { messages: [] };
+    if (method === 'fundedCommit') commits.push(body.certificate[0].fact.body.unitId);
     const result = await signers[index].handle(method, body, identity.publicKey);
     return (method === 'freezePrepare' && index >= 4 - badFreezeReplies) ||
       (index === 3 && ['fundedVote', 'returnVote', 'release'].includes(method)) ? { ...result, sig: '0'.repeat(128) } : result;
   };
   const makeClient = () => new StakeClient({ store: clientStore, identity, box, me, registry, clock, trac, price, request,
     funding: { hasIntent: id => sent.has(sha256Hex(id)), transfer: async args => { const sent = await transfer(me.tracAddr, args);
+      // Each transfer is final only when checked again on a later pass, like a real chain.
+      if (mode === 'many-pieces' && !submitted.has(args.id)) { submitted.add(args.id); return { ...sent, ok: false }; }
       if (deferFunding && (mode !== 'late-full' || args.asset === 'RESET')) { deferFunding = false; return { ...sent, ok: false }; } return sent; } } });
   // Collector uses the actual reconstructed point, while transfers are synthetic chain receipts in this unit test.
   const { publicOf } = await import('../../../src/locks/crypto/edvss.js');
@@ -128,6 +134,20 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
   }; return c; };
   const preview = await client().preview('2500000');
   assert.equal(preview.tnkTotal, '180'); assert.equal(preview.pieces, 1); assert.equal(sends, 0);
+  if (mode === 'many-pieces') {
+    balances.set(me.tracAddr, { RESET: '30000000', TNK: '10000', feeTnk: '30' });
+    const c = client(), op = () => clientStore.get('stake-client-operation');
+    let result = await c.deposit('25000000'), passes = 1;
+    assert.equal(op().pieces.length, 10);
+    assert.equal(submitted.size, 8, 'eight pieces start side by side: each sent its TNK');
+    while (result.pending && passes < 12) { result = await c.recover(); passes++; }
+    assert.equal(result.funded, '25000000'); assert.equal(passes, 5, 'two transfers and a vote per wave of eight');
+    assert.equal(sends, 20);
+    const funded = archives.filter(a => a.kind === 'funded').map(a => a.certificate[0].fact.body.unitId);
+    assert.equal(funded.length, 10); assert.equal(new Set(funded).size, 10, 'each funded piece is archived once');
+    assert.equal(commits.length, 40); assert.equal(new Set(commits).size, 10, 'each funded piece is committed once per member');
+    return;
+  }
   const live = client(), first = live.deposit('2500000');
   assert.equal(live.deposit('2500000'), first, 'simultaneous clicks share one operation');
   const pending = await first; assert.equal(pending.pending, true);

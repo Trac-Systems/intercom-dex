@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.58
+
+- A stake deposit is cut into pieces sized in dollars at the stake price (the smallest $0.50, the smallest penalty a
+  bond can need), and the app funded those pieces one after another. With RESET at $47, a 0.2 RESET deposit became 19
+  pieces and took about an hour, and a deposit of more than about 17 pieces could run past its one-hour funding window
+  for the last ones. The app now funds up to eight pieces side by side: one piece waiting for its transfers no longer
+  holds up the others.
+- Every 15-second check re-sent the confirmation of every piece already funded, to all four stake signers and the
+  venue, until the whole deposit was done. Each further piece took longer (from under a minute to about four) and the
+  stake servers got the extra work. A funded piece is now confirmed once.
+- App update; servers need nothing.
+
 ## 0.1.57
 
 - A stake deposit whose key setup failed no longer stays pending forever. Before any RESET or TNK is sent, the four
