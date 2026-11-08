@@ -1,4 +1,5 @@
 import { PublicKey } from '@solana/web3.js';
+import { outboundFetch } from '../net/outbound-fetch.js';
 
 export class RpcError extends Error {
   constructor(kind, message, details = {}) {
@@ -16,7 +17,7 @@ export async function rpcCall(endpoint, method, params = [], { timeoutMs = 5000 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, {
+    const response = await outboundFetch(url, {
       method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
     });

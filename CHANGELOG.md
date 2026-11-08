@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.59
+
+- The app could freeze: its process kept one CPU core busy, the dashboard and control port accepted connections but
+  never answered, the log stopped, and stake timers no longer ran, so the app had to be restarted. Newer Node versions
+  (Node 26) let the built-in fetch speak HTTP/2 to every HTTPS server, and a stalled HTTP/2 connection could keep the
+  app busy. The app's outside requests (Solana RPC, RESET gateway, explorer, market prices) now always use HTTP/1.1,
+  with the same timeouts as before.
+- App update; servers need nothing.
+
 ## 0.1.58
 
 - A stake deposit is cut into pieces sized in dollars at the stake price (the smallest $0.50, the smallest penalty a

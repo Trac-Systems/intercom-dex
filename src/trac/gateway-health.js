@@ -1,3 +1,4 @@
+import { outboundFetch } from '../net/outbound-fetch.js';
 export const GATEWAY_TIMEOUT_MS = 30000;
 export const GATEWAY_CACHE_MS = 15000;
 
@@ -11,7 +12,7 @@ export function resetGatewayOrigin(value) {
 }
 
 // One reader per adapter, shared by admission, display and sending. Unknown is never healthy.
-export function createGatewayHealth({ resetGatewayUrl = null, request = (...args) => fetch(...args), now = Date.now } = {}) {
+export function createGatewayHealth({ resetGatewayUrl = null, request = (...args) => outboundFetch(...args), now = Date.now } = {}) {
   const origin = resetGatewayOrigin(resetGatewayUrl);
   let last = null, pending = null;
   const result = (ok, eligible, reason) => Object.freeze({ ok, eligible, checkedAt: now(), reason });

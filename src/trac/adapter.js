@@ -9,6 +9,7 @@ import { supportedBase } from '../market/assets.js';
 import { createAddressProof } from '../core/address-proof.js';
 import { createGatewayHealth, resetGatewayOrigin, GATEWAY_TIMEOUT_MS } from './gateway-health.js';
 import { RESET_PAUSED_MESSAGE } from '../market/gateway-status.js';
+import { outboundFetch } from '../net/outbound-fetch.js';
 
 const isHash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const isAmount = value => typeof value === 'string' && value.length <= 78 && /^[1-9][0-9]*$/.test(value);
@@ -79,7 +80,7 @@ function observations(folder) {
 }
 
 async function gatewayCall(origin, route, body) {
-  const response = await fetch(new URL(route, origin), { method: 'POST', headers: { 'content-type': 'application/json' },
+  const response = await outboundFetch(new URL(route, origin), { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS) });
   if (!response.ok) { await response.body?.cancel(); reject('gateway_rejected'); }
   const chunks = [];
@@ -290,7 +291,7 @@ export function createTracAdapter({ bridge, wallet = null, profile = null, reset
       publicKey(from); publicKey(to);
       const url = new URL('/api/transactions', explorer);
       url.searchParams.set('address', from);
-      const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) });
+      const response = await outboundFetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) });
       if (!response.ok) { await response.body?.cancel(); reject('explorer_rejected'); }
       const body = await response.json();
       const rows = JSON.parse(body.transactions);

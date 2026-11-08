@@ -10,6 +10,7 @@ import { lockError, errorResult } from '../locks/position.js';
 import { TrafficLog } from './traffic.js';
 import { decimalAmount } from './format.js';
 import { priceUnits } from '../market/assets.js';
+import { outboundFetch } from '../net/outbound-fetch.js';
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8' };
@@ -134,7 +135,7 @@ export function createMarketFeed({ url, clock = () => Date.now() }) {
         reader?.cancel().catch(() => {});
       }, MARKET_TIMEOUT_MS);
       try {
-        response = await fetch(new URL(`/v1/market/${key}`, url), { signal: controller.signal, redirect: 'error', headers: { accept: 'application/json' } });
+        response = await outboundFetch(new URL(`/v1/market/${key}`, url), { signal: controller.signal, redirect: 'error', headers: { accept: 'application/json' } });
         if (!response.ok || !/^application\/json\b/i.test(response.headers.get('content-type') ?? '')) throw new Error('bad response');
         let size = 0; const chunks = [];
         reader = response.body.getReader();
