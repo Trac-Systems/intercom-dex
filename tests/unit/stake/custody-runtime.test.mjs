@@ -16,6 +16,9 @@ import { publicationBytes, effectiveSettings } from '../../../src/stake/settings
 import { matchingCertificate, signFact } from '../../../src/stake/certificates.js';
 import { CompletionLog } from '../../../src/stake/price.js';
 import { capacityName } from '../../../src/stake/capacity.js';
+import { FundingRecovery } from '../../../src/stake/funding-recovery.js';
+import { StakeAdmission } from '../../../src/stake/admission-runtime.js';
+import { reservationId } from '../../../src/stake/ledger.js';
 
 const hex = n => n.toString(16).padStart(64, '0');
 const publicKey = secret => Buffer.from(ed25519.getPublicKey(secret)).toString('hex');
@@ -33,7 +36,9 @@ test('finalized stake clock uses lower agreeing readers and fails closed', async
   await assert.rejects(finalizedStakeClock({ endpoints: ['100', '102'], read: async () => { throw Error('offline'); } }), /unavailable/);
 });
 
-for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split', 'many-pieces']) test(mode === 'many-pieces'
+for (const mode of ['funding-catchup', 'withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split', 'many-pieces']) test(mode === 'funding-catchup'
+  ? 'a member missing its funding vote verifies receipts after the window and catches up missed generations through bounded app retries'
+  : mode === 'many-pieces'
   ? 'a deposit split into many pieces funds them side by side and commits each funded piece once'
   : mode === 'dkg-failed'
   ? 'a deposit whose key setup failed ends without sending anything and frees its capacity for a new deposit'
@@ -108,11 +113,16 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
         final: true, amount: tx?.amount };
     } } }) });
   const signers = members.map((m, i) => makeSigner(stores[i], { publicKey: m.dexKey, secretKey: secrets[i] }, boxes[i]));
+  let readerStale = mode === 'funding-catchup', recoveryChecks = 0;
+  const verifyFourth = signers[3].verifyFunding;
+  signers[3].verifyFunding = async args => { recoveryChecks++; if (readerStale) throw Error('reset_not_final'); return verifyFourth(args); };
   // The app relays no deals in time (as when its stake messages queued behind a backlog): those members' setup fails.
   let badFreezeReplies = 2, dropDeals = new Set(mode === 'dkg-failed' ? [0, 1, 2, 3] : mode === 'dkg-split' ? [0, 1] : []);
   const request = async (to, method, body) => {
     if (to === scope.venueKey) { if (method === 'priceSnapshot') return exactMode ? priceSnapshot() : {}; archives.push(body); return { archived: true }; }
     const index = roster.findIndex(m => m.dexKey === to);
+    if (method === 'admissionInventory') return new StakeAdmission({ store: stores[index], identity: signers[index].identity,
+      registry, clock }).inventoryVote(body);
     if (dropDeals.has(index) && method === 'dkgDeals') return { messages: [] };
     if (method === 'fundedCommit') commits.push(body.certificate[0].fact.body.unitId);
     const result = await signers[index].handle(method, body, identity.publicKey);
@@ -202,6 +212,51 @@ for (const mode of ['withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'd
   assert.equal(deposited.funded, '2500000'); assert.equal(sends, 2);
   const ledger = () => new StakeLedger({ store: clientStore, context, address: me.tracAddr });
   assert.equal(Object.values(ledger().read().pieces)[0].state, 'free');
+  if (mode === 'funding-catchup') {
+    const piece = Object.values(ledger().read().pieces)[0], id = piece.unitId, op = clientStore.get('stake-client-operation');
+    const missing = () => new StakeLedger({ store: stores[3], context, address: me.tracAddr });
+    assert.equal(missing().read().pieces[id], undefined);
+    assert.equal(stores[3].get(`stake-funded-vote-${id}`), null);
+    await assert.rejects(signers[3].handle('fundedCommit', { certificate: piece.fundingCertificate }, me.dexKey), /Independent funding/);
+    now += 3601;
+    await assert.rejects(signers[3].handle('fundedVote', { unitId: id, ready: op.pieces[0].ready, funding: op.pieces[0].funding, price: {} }, me.dexKey), /window expired/);
+    const refs = [{ unitId: id, generation: 0 }], reservation = { tradeId: hex(31), H: hex(32), sellerDexKey: me.dexKey,
+      buyerAddress: tracAddress(hex(33)), buyerBoxKey: hex(34), policyId: policy.economics.active.policyId,
+      targetReset: '2500000', payoutReset: '2500000', pieces: refs, expiresNotBefore: 10000 };
+    const certificate = secrets.slice(0, 3).map(secret => signFact({ v: 1, networkId: context.networkId, venueKey: context.venueKey,
+      epochId: context.epoch.id, kind: 'resolved', body: { reservationId: reservationId(reservation), pieces: refs, outcome: 'delivered', evidenceDigest: hex(35) } }, secret));
+    for (const l of [ledger(), ...stores.slice(0, 3).map(store => new StakeLedger({ store, context, address: me.tracAddr }))]) { l.reserve(reservation); l.resolve(certificate); }
+    let ms = 0;
+    const options = { store: clientStore, registry, owner: me, clock, request, now: () => ms };
+    const driver = new FundingRecovery(options);
+    await driver.tick();
+    assert.equal(missing().read().pieces[id], undefined, 'signatures alone cannot admit while the independent reader is stale');
+    const before = recoveryChecks;
+    assert.equal(await driver.tick(), false); assert.equal(recoveryChecks, before);
+    readerStale = false;
+    const inventoryCertificate = matchingCertificate(await Promise.all(members.slice(0, 3).map(m => request(m.dexKey, 'admissionInventory', { owner: me, at: now }))), context, 'admission-inventory');
+    const recoveryBody = { certificate: piece.fundingCertificate, funding: op.pieces[0].funding, price: {}, inventoryCertificate };
+    await assert.rejects(signers[3].handle('fundedRecover', recoveryBody, members[0].dexKey), /owner authorization/);
+    await assert.rejects(signers[3].handle('fundedRecover', { ...recoveryBody, funding: { ...recoveryBody.funding, RESET: hex(999) } }, me.dexKey), /receipts differ/);
+    await assert.rejects(signers[3].handle('fundedRecover', { ...recoveryBody, inventoryCertificate: inventoryCertificate.slice(0, 2) }, me.dexKey), /three distinct/);
+    assert.equal(missing().read().pieces[id], undefined, 'a rejected successor leaves no newly admitted generation zero piece');
+    const heldBalance = balances.get(piece.address); balances.set(piece.address, { ...heldBalance, RESET: '0' });
+    await assert.rejects(signers[3].handle('fundedRecover', recoveryBody, me.dexKey), /principal or TNK reserve/);
+    balances.set(piece.address, heldBalance);
+    const capacityBefore = stores[3].get(capacityName(scope));
+    ms += 60000;
+    await new FundingRecovery(options).tick();
+    assert.equal(missing().read().pieces[id].generation, 1);
+    assert.equal(missing().read().pieces[id].state, 'free');
+    assert.equal(clientStore.get('stake-funding-recovery').confirmed[id].length, 4);
+    assert.equal(sends, 2, 'catch-up never broadcasts another funding transfer');
+    assert.deepEqual(stores[3].get(capacityName(scope)), capacityBefore, 'catch-up cannot edit signer capacity records');
+    const recovered = stores[3].get(`stake-funded-vote-${id}`);
+    assert.deepEqual(recovered.vote.fact, piece.fundingCertificate[0].fact);
+    await signers[3].handle('fundedCommit', { certificate: piece.fundingCertificate }, me.dexKey);
+    assert.equal(missing().read().pieces[id].generation, 1, 'an old app retry cannot reset recovered generations');
+    return;
+  }
   if (awardMode) {
     const { StakeAwardClient } = await import('../../../src/stake/award-client.js');
     const { fixture } = await import('../core/helpers.mjs');

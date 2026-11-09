@@ -60,7 +60,7 @@ export class StakeAdmission {
     const c = this.context(), ledger = this.ledger(state.terms.seller.tracAddr), reservation = bondReservation(state.terms, state.H);
     const prior = ledger.read().reservations[bondAck(state.terms, state.H).reservationId];
     if (prior) {
-      if (prior.state !== 'reserved' || stableJSON(prior.body) !== stableJSON(reservation) ||
+      if (prior.state !== 'reserved' || prior.closureVote || prior.orphanClosure || stableJSON(prior.body) !== stableJSON(reservation) ||
           stableJSON(prior.admission?.terms ?? null) !== stableJSON(state.terms)) throw new Error('bond_not_reserved');
       this.store.put(`stake-retained-epoch-${prior.admission.policy.epoch.id}`, prior.admission.policy);
       return bondAck(state.terms, state.H);

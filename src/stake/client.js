@@ -348,6 +348,7 @@ export class StakeClient {
       p.q = await this.price.import(price); p.fundedAt = (await this.clock()).at; this.save(op);
     }
     await this.all('fundedCommit', { certificate: p.funded });
+    this.store.put(`stake-client-funding-${id}`, p.funding);
     await this.archive('funded', p.funded);
     this.ledger().admitFunded(p.funded, { settings: op.settings, price: p.q, now: p.fundedAt });
     p.settled = true; this.save(op); return true;

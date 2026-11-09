@@ -75,10 +75,33 @@ export class StakeLedger {
     this.save(record); return record.pieces[b.unitId];
   }
 
+  // Funding is independently verified by the caller. A fresh original-quorum
+  // free inventory supplies any closures this member missed while unfunded.
+  // Never overwrite a local reservation, withdrawal, or terminal vote.
+  recoverFunded(certificate, options, inventoryCertificate) {
+    const funded = this.fact(certificate, 'funded').body, inventory = this.fact(inventoryCertificate, 'admission-inventory').body;
+    const entry = inventory.pieces?.find(p => p.unitId === funded.unitId);
+    if (!Number.isSafeInteger(inventory.at) || inventory.at > options.now + 5 || options.now - inventory.at > 30 ||
+        inventory.address !== this.address || inventory.dexKey !== funded.descriptor.owner.dexKey || !entry ||
+        entry.state !== 'free' || entry.blocked || entry.principalReset !== funded.descriptor.principalReset ||
+        entry.expiresAt !== funded.descriptor.expiresAt || entry.purpose !== funded.descriptor.purpose)
+      throw new Error('Fresh free funding inventory required');
+    uint.parse(entry.generation);
+    let record = this.read();
+    const staged = new StakeLedger({ context: this.context, address: this.address,
+      store: { get: () => structuredClone(record), put: (_name, value) => { record = value; } } });
+    staged.admitFunded(certificate, options);
+    const p = record.pieces[funded.unitId];
+    if (p.state !== 'free' || p.withdrawal || p.returnIntent || p.decisionVote || p.decisionId || p.generation > entry.generation)
+      throw new Error('Conflicting local funding inventory');
+    p.generation = entry.generation;
+    this.save(record); return structuredClone(p);
+  }
+
   reserve(input, admission = null) {
     const r = reservationSchema.parse(input), id = reservationId(r), record = this.read();
     if (record.reservations[id]) {
-      if (record.reservations[id].state !== 'reserved') throw new Error('bond_not_reserved');
+      if (record.reservations[id].state !== 'reserved' || record.reservations[id].closureVote) throw new Error('bond_not_reserved');
       return structuredClone(record.reservations[id]);
     }
     if (Object.values(record.reservations).some(x => x.body.tradeId === r.tradeId)) throw new Error('Conflicting reservation for trade');
@@ -117,7 +140,7 @@ export class StakeLedger {
   deliveryIntent(id, { txHash, evidenceDigest, share = false }) {
     hex.parse(txHash); hex.parse(evidenceDigest);
     const record = this.read(), r = record.reservations[id];
-    if (!r || r.state !== 'reserved' || r.body.pieces.some(ref => record.pieces[ref.unitId].decisionVote)) throw new Error('Penalty vote blocks settlement');
+    if (!r || r.state !== 'reserved' || r.closureVote && !r.delivery || r.body.pieces.some(ref => record.pieces[ref.unitId].decisionVote)) throw new Error('Penalty vote blocks settlement');
     if (r.delivery && r.delivery.txHash !== txHash) throw new Error('Conflicting delivery');
     r.delivery ??= { txHash, evidenceDigest };
     if (share) r.shareIntent = { txHash, evidenceDigest };
@@ -126,9 +149,50 @@ export class StakeLedger {
 
   closureIntent(id, body) {
     const record = this.read(), r = record.reservations[id], digest = sha256Hex(stableJSON(body));
-    if (!r || r.state !== 'reserved' || r.body.pieces.some(ref => record.pieces[ref.unitId].decisionVote) ||
+    if (!r || r.state !== 'reserved' || body.outcome === 'unfunded' && (r.delivery || r.shareIntent) || r.body.pieces.some(ref => record.pieces[ref.unitId].decisionVote) ||
         r.closureVote && r.closureVote !== digest) throw new Error('Conflicting closure vote');
     r.closureVote = digest; this.save(record);
+  }
+
+  // A non-holder joins only the closure barrier, never the live trade. Check and
+  // lock every referenced generation atomically before making its vote visible.
+  orphanClosure(input, admission, body, certificate = null) {
+    const reservation = reservationSchema.parse(input), id = reservationId(reservation);
+    if (body.reservationId !== id || body.outcome !== 'unfunded' || stableJSON(body.pieces) !== stableJSON(reservation.pieces))
+      throw new Error('Invalid orphan closure');
+    let record = this.read();
+    if (!record.reservations[id]) {
+      if (Object.values(record.reservations).some(r => r.body.tradeId === reservation.tradeId) ||
+          Object.values(record.reservations).filter(r => r.state === 'reserved').length >= 8) throw new Error('Conflicting orphan reservation');
+      // A member can first recover funding at a newer certified generation.
+      // Record this older closure's tombstone without rewinding any piece.
+      if (certificate && reservation.pieces.every(ref => {
+        const p = record.pieces[ref.unitId];
+        return p && p.generation > ref.generation && p.descriptor.owner.dexKey === reservation.sellerDexKey && p.descriptor.epochId === this.context.epoch.id;
+      })) {
+        const fact = this.fact(certificate, 'resolved');
+        if (stableJSON(fact.body) !== stableJSON(body)) throw new Error('Orphan closure certificate differs');
+        record.reservations[id] = { reservationId: id, body: reservation, state: 'unfunded', admission: structuredClone(admission),
+          orphanClosure: true, closureHash: factDigest(fact), closureCertificate: certificate };
+        this.save(record); return;
+      }
+      for (const ref of reservation.pieces) {
+        const p = record.pieces[ref.unitId];
+        if (!p || p.state !== 'free' || p.generation !== ref.generation || p.withdrawal || p.returnIntent || p.decisionVote ||
+            p.descriptor.owner.dexKey !== reservation.sellerDexKey || p.descriptor.epochId !== this.context.epoch.id)
+          throw new Error('Stake generation conflict');
+      }
+      for (const ref of reservation.pieces) {
+        const p = record.pieces[ref.unitId]; p.state = 'reserved'; p.reservationId = id;
+      }
+      record.reservations[id] = { reservationId: id, body: reservation, state: 'reserved', admission: structuredClone(admission), orphanClosure: true };
+    }
+    // Stage both operations so an invalid certificate or competing decision
+    // cannot leave a half-written barrier. resolve increments all members alike.
+    const staged = new StakeLedger({ context: this.context, address: this.address,
+      store: { get: () => structuredClone(record), put: (_name, value) => { record = value; } } });
+    if (certificate) staged.resolve(certificate); else staged.closureIntent(id, body);
+    this.store.put(this.name, record);
   }
 
   prepareFreeze(input) {

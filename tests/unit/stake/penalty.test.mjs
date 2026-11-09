@@ -7,28 +7,37 @@ import { StakeLedger, reservationId } from '../../../src/stake/ledger.js';
 import { PenaltySigner } from '../../../src/stake/penalty-signer.js';
 import { PenaltyCoordinator } from '../../../src/stake/penalty-coordinator.js';
 import { verifyCertificate } from '../../../src/stake/certificates.js';
+import { seal } from '../../../src/core/envelope.js';
+import { admissionInventory } from '../../../src/stake/admission.js';
+import { prepareOrphanClient, recoverOrphanClients } from '../../../src/stake/orphan.js';
 
 const hex = n => n.toString(16).padStart(64, '0');
-function fixture(clockSettings = null) {
+function fixture(clockSettings = null, holders = 4) {
   const f = admissionFixture(), settings = f.policy.economics.active.settings;
   if (clockSettings) settings.proofClock = clockSettings; else delete settings.proofClock;
   f.policy.economics.active = policy(settings);
   const terms = { ...f.terms, bond: prepareBond(f.args) }, H = hex(40);
   const input = bondReservation(terms, H), id = reservationId(input);
   let now = terms.sendBy, healthy = true, version = 10, deliveredAt = null, escrowState = 'active', timely = true;
-  const store = memoryStore(), stores = secrets.map(() => {
+  const sigs = [f.parties.buyer, f.parties.seller].map((p, i) => seal({ kind: 'termsSig', ch: `intercom-dex:t:${input.tradeId}`,
+    body: { tradeId: input.tradeId } }, p.secretKey, { ts: 4000, nonce: hex(70 + i) }));
+  const store = memoryStore(), stores = secrets.map((_, i) => {
     const s = memoryStore(); for (const name of f.store.list('')) s.put(name, f.store.get(name));
-    new StakeLedger({ store: s, context: f.context, address: terms.seller.tracAddr }).reserve(input, { terms, fromSlot: 1, policy: f.policy, sigs: [] }); return s;
+    if (i < holders) new StakeLedger({ store: s, context: f.context, address: terms.seller.tracAddr }).reserve(input, { terms, fromSlot: 1, policy: f.policy, sigs }); return s;
   });
   const position = async p => p ?? { bootstrap: hex(1), coreKey: hex(2), root: hex(version), length: version };
   const clock = async () => ({ at: now, slot: now });
   const signers = stores.map((store, i) => new PenaltySigner({ store, identity: { publicKey: f.context.epoch.members[i].dexKey, secretKey: secrets[i] }, clock, position,
+    policyFor: () => f.policy,
     history: async () => ({ status: 'complete', evidenceDigest: hex(4), escrowState, locks: timely ? [{ includedAt: terms.sendBy - (timely === 'late' ? 120 : 121), exact: true }] : [] }),
     health: async () => healthy, verifyDelivery: async (t, tx, p) => ({ state: deliveredAt === null ? 'unknown' : deliveredAt <= p.length ? 'in-time' : 'late', ...(deliveredAt === null ? { reason: 'unknown_or_not_final' } : {}), txHash: tx }) }));
   for (const signer of signers) signer.timing = () => ({ triggerAt: terms.sendBy + 5, windowSec: 10 });
-  const request = (to, method, body) => signers[f.context.epoch.members.findIndex(m => m.dexKey === to)].handle(method, body, f.context.venueKey);
+  const prepare = reservation => prepareOrphanClient({ reservation, policy: f.policy,
+    identity: { publicKey: terms.seller.dexKey, secretKey: f.parties.seller.secretKey }, store: f.store, from: f.context.venueKey, now });
+  const request = (to, method, body) => to === terms.seller.dexKey && method === 'orphanPrepare' ? prepare(body.reservation) :
+    signers[f.context.epoch.members.findIndex(m => m.dexKey === to)].handle(method, body, f.context.venueKey);
   const coordinator = new PenaltyCoordinator({ store, registry: () => ({ sellerBond: f.policy }), request, clock, position, timing: signers[0].timing });
-  return { ...f, terms, id, stores, signers, coordinator, store, set: values => {
+  return { ...f, terms, id, stores, signers, coordinator, store, prepare, set: values => {
     if (values.now !== undefined) now = values.now; if (values.healthy !== undefined) healthy = values.healthy;
     if (values.version !== undefined) version = values.version; if (values.deliveredAt !== undefined) deliveredAt = values.deliveredAt;
     if (values.escrowState !== undefined) escrowState = values.escrowState; if (values.timely !== undefined) timely = values.timely;
@@ -284,4 +293,137 @@ test('a proof submitted after trigger but before the first cutoff cannot deadloc
   await f.tick(5011);
   assert.equal(f.coordinator.result(f.id).decision, null);
   assert.equal(f.coordinator.result(f.id).resolved?.[0].fact.body.outcome, 'delivered', f.coordinator.result(f.id).error);
+});
+
+test('one or two holders close an unfunded orphan with three votes and identical generations', async () => {
+  for (const holders of [1, 2]) {
+    const f = fixture(null, holders); f.set({ timely: false });
+    await f.tick(5300);
+    assert.equal(f.coordinator.result(f.id).resolved, null, 'the verification deadline is inclusive');
+    await f.tick(5301);
+    const certificate = f.coordinator.result(f.id).resolved;
+    assert.equal(verifyCertificate(certificate, f.context, 'resolved').body.outcome, 'unfunded');
+    const inventories = f.signers.map(s => {
+      const { r, ledger } = s.find(f.id);
+      assert.equal(r.state, 'unfunded');
+      assert.throws(() => ledger.reserve(r.body, r.admission), /bond_not_reserved/);
+      return admissionInventory(ledger.read(), f.terms.seller, 5301, f.context.epoch.id);
+    });
+    assert.ok(inventories.every(i => JSON.stringify(i) === JSON.stringify(inventories[0])));
+    assert.equal(inventories[0].pieces[0].generation, 1);
+    await f.tick(5400);
+    assert.equal(f.signers[3].find(f.id).ledger.read().pieces[inventories[0].pieces[0].unitId].generation, 1);
+  }
+});
+
+test('orphan votes independently reject live locks, incomplete history, forged terms and old history frontiers', async () => {
+  for (const failure of ['live-lock', 'unknown-history', 'forged-signature', 'wrong-policy', 'wrong-reservation']) {
+    const f = fixture(null, 2); f.set({ now: 5301, timely: false });
+    const reservation = f.signers[0].find(f.id).r;
+    const body = { reservationId: f.id, reservation, ready: f.prepare(reservation), evidenceDigest: hex(90), throughSlot: 1 };
+    if (failure === 'live-lock') f.set({ timely: true });
+    if (failure === 'unknown-history') f.signers[2].history = async () => ({ status: 'unknown' });
+    if (failure === 'forged-signature') reservation.admission.sigs[0].sig = '0'.repeat(128);
+    if (failure === 'wrong-policy') reservation.admission.policy.venueKey = hex(99);
+    if (failure === 'wrong-reservation') reservation.body.H = hex(99);
+    await assert.rejects(f.signers[2].handle('penaltyOrphanVote', body, f.context.venueKey));
+    assert.equal(f.stores[2].get(f.stores[2].list('stake-ledger-')[0]).reservations[f.id], undefined);
+  }
+  const f = fixture(null, 2); f.set({ now: 5301, timely: false });
+  let frontier;
+  f.signers[2].history = async args => { frontier = args.throughSlot; return { status: 'complete', locks: [] }; };
+  await f.signers[2].handle('penaltyOrphanVote', { reservationId: f.id, reservation: f.signers[0].find(f.id).r,
+    ready: f.prepare(f.signers[0].find(f.id).r), evidenceDigest: hex(90), throughSlot: 1 }, f.context.venueKey);
+  assert.equal(frontier, 5301);
+  const { ledger, r } = f.signers[2].find(f.id);
+  assert.throws(() => ledger.reserve(r.body, r.admission), /bond_not_reserved/);
+  assert.throws(() => ledger.prepareFreeze({ operationId: hex(91), pieces: r.body.pieces, acceptedAt: 5301 }), /bond_reserved/);
+});
+
+test('two votes cannot free any orphan; conflicting local custody cannot be overwritten', async () => {
+  const f = fixture(null, 2); f.set({ timely: false });
+  for (const s of f.signers.slice(2)) s.history = async () => ({ status: 'unknown' });
+  await f.tick(5301);
+  assert.equal(f.coordinator.result(f.id).resolved, null);
+  assert.ok(f.signers.slice(0, 2).every(s => s.find(f.id).r.state === 'reserved'));
+  const g = fixture(null, 2); g.set({ timely: false, now: 5301 });
+  const r = g.signers[0].find(g.id).r;
+  const ledger = new StakeLedger({ store: g.stores[2], context: g.context, address: g.terms.seller.tracAddr });
+  ledger.reserve({ ...r.body, tradeId: hex(99) });
+  await assert.rejects(g.signers[2].handle('penaltyOrphanVote', { reservationId: g.id, reservation: r, ready: g.prepare(r), evidenceDigest: hex(90) }, g.context.venueKey), /generation conflict/);
+});
+
+test('old holders apply unchanged closure; an old non-holder is retried after upgrade and coordinator restart', async () => {
+  const f = fixture(null, 2); f.set({ timely: false });
+  const request = f.coordinator.request; let fourthUpgraded = false;
+  f.coordinator.request = async (key, method, body) => {
+    const i = f.context.epoch.members.findIndex(m => m.dexKey === key);
+    if ((i < 2 || i === 3 && !fourthUpgraded) && method === 'penaltyOrphanVote') throw Error('Unsupported penalty request');
+    if (i === 3 && !fourthUpgraded && method !== 'penaltyList') throw Error('Unknown penalty reservation');
+    return request(key, method, body);
+  };
+  await f.tick(5301);
+  assert.ok(f.coordinator.result(f.id).resolved);
+  assert.equal(f.store.get(`stake-penalty-job-${f.id}`).resolvedMembers.length, 3);
+  fourthUpgraded = true;
+  const restarted = new PenaltyCoordinator({ ...f.coordinator });
+  await restarted.tick();
+  assert.equal(f.store.get(`stake-penalty-job-${f.id}`).resolvedMembers.length, 4);
+  assert.equal(f.signers[3].find(f.id).r.state, 'unfunded');
+  assert.equal(f.signers[3].find(f.id).ledger.read().pieces[f.terms.bond.pieces[0].unitId].generation, 1);
+});
+
+test('an old seller app cannot be moved to a new generation by the orphan extension', async () => {
+  const f = fixture(null, 2); f.set({ timely: false });
+  const request = f.coordinator.request;
+  f.coordinator.request = (to, method, body) => {
+    if (method === 'orphanPrepare') throw Error('Unsupported stake request');
+    return request(to, method, body);
+  };
+  await f.tick(5301);
+  assert.equal(f.coordinator.result(f.id).resolved, null);
+  assert.equal(f.ledger.read().pieces[f.terms.bond.pieces[0].unitId].generation, 0);
+  f.coordinator.request = request;
+  await f.tick(5401);
+  const certificate = f.coordinator.result(f.id).resolved;
+  assert.ok(certificate);
+  const ownerStore = f.ledger.store;
+  let calls = 0;
+  const requestResult = async (to, method, body) => {
+    calls++; assert.equal(to, f.context.venueKey); assert.equal(method, 'penaltyResult');
+    return f.coordinator.result(body.reservationId);
+  };
+  await recoverOrphanClients({ store: ownerStore, request: requestResult });
+  assert.equal(f.ledger.read().pieces[f.terms.bond.pieces[0].unitId].generation, 1);
+  await recoverOrphanClients({ store: ownerStore, request: requestResult });
+  assert.equal(calls, 1, 'completed closure survives without an active spot trade');
+});
+
+test('funding recovered at a newer generation accepts an older closure tombstone without rewinding', async () => {
+  const f = fixture(null, 2); f.set({ timely: false });
+  const request = f.coordinator.request;
+  f.coordinator.request = (to, method, body) => {
+    if (to === f.context.epoch.members[3].dexKey && method !== 'penaltyList') throw Error('offline');
+    return request(to, method, body);
+  };
+  await f.tick(5301);
+  const result = f.coordinator.result(f.id), l = new StakeLedger({ store: f.stores[3], context: f.context, address: f.terms.seller.tracAddr });
+  const p = Object.values(l.read().pieces)[0], inv = admissionInventory(f.signers[0].find(f.id).ledger.read(), f.terms.seller, 5301, f.context.epoch.id);
+  l.recoverFunded(p.fundingCertificate, { settings: f.policy.economics.active.settings, price: f.priceReference.q, now: 5301 }, f.cert('admission-inventory', inv));
+  f.coordinator.request = request;
+  await f.tick(5302);
+  assert.equal(l.read().pieces[p.unitId].generation, 1);
+  assert.equal(l.read().reservations[f.id].state, 'unfunded');
+  assert.equal(f.store.get(`stake-penalty-job-${f.id}`).resolvedMembers.length, 4);
+  assert.throws(() => l.reserve(result.reservation.body), /bond_not_reserved/);
+});
+
+test('durable non-holder closure vote blocks settlement shares and survives a lost vote reply', async () => {
+  const f = fixture(null, 2); f.set({ timely: false, now: 5301 });
+  const r = f.signers[0].find(f.id).r, b = { reservationId: f.id, reservation: r, ready: f.prepare(r), evidenceDigest: hex(90) };
+  const first = await f.signers[2].handle('penaltyOrphanVote', b, f.context.venueKey);
+  const signer = new PenaltySigner({ ...f.signers[2] });
+  assert.deepEqual(await signer.handle('penaltyOrphanVote', b, f.context.venueKey), first);
+  assert.throws(() => signer.find(f.id).ledger.deliveryIntent(f.id, { txHash: hex(92), evidenceDigest: hex(93), share: true }), /blocks settlement/);
+  await assert.rejects(signer.handle('penaltyOrphanVote', { ...b, evidenceDigest: hex(91) }, f.context.venueKey), /fixed/);
 });

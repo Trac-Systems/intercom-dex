@@ -6,13 +6,14 @@ import { stakeContext } from './price-service.js';
 import { createProofClock, applyProofClock, qualifyingLock } from './proof-clock.js';
 import { penaltyClockBody, positionSchema, penaltySampleSchema } from './penalty-clock.js';
 import { proofClockSettings } from './settings.js';
+import { verifyOrphanReservation, verifyOrphanReady } from './orphan.js';
 
 const hex = z.string().regex(/^[0-9a-f]{64}$(?![\s\S])/);
 const hash = value => sha256Hex(stableJSON(value));
 
 export class PenaltySigner {
-  constructor({ store, identity, clock, position, verifyDelivery, history, health, now = () => Math.ceil(Date.now() / 1000) }) {
-    Object.assign(this, { store, identity, clock, position, verifyDelivery, history, health, now }); this.queue = Promise.resolve();
+  constructor({ store, identity, clock, position, verifyDelivery, history, health, policyFor, now = () => Math.ceil(Date.now() / 1000) }) {
+    Object.assign(this, { store, identity, clock, position, verifyDelivery, history, health, policyFor, now }); this.queue = Promise.resolve();
   }
   timing(terms) { return { triggerAt: terms.sendBy + terms.bond.overdueDelaySec, windowSec: terms.bond.proofWindowSec }; }
   find(id) {
@@ -95,6 +96,38 @@ export class PenaltySigner {
     return { history: h, timely: timely.length === 1 };
   }
   async apply(method, b, from) {
+    if (method === 'penaltyOrphanVote' || method === 'penaltyResolveCommit' && b.reservation) {
+      const policy = this.policyFor?.(b.reservation?.admission?.terms);
+      const { body, admission, context, terms } = verifyOrphanReservation(b.reservation, policy, b.reservationId);
+      if (from !== context.venueKey || !context.epoch.members.some(m => m.dexKey === this.identity.publicKey))
+        throw new Error('Original venue and signer required');
+      const ledger = new StakeLedger({ store: this.store, context, address: terms.seller.tracAddr });
+      if (method === 'penaltyResolveCommit') {
+        const fact = verifyCertificate(b.certificate, context, 'resolved');
+        ledger.orphanClosure(body, admission, fact.body, b.certificate); return { resolved: true };
+      }
+      verifyOrphanReady(b.ready, b.reservation, context);
+      const prior = ledger.read().reservations[b.reservationId];
+      // Existing holders use the original RPC, including old software. This
+      // extension only supplies the missing non-holder votes.
+      if (prior && !prior.orphanClosure) throw new Error('Use holder closure vote');
+      const rec = this.record(b.reservationId);
+      if (rec.resolveVote) {
+        if (rec.resolveVote.fact.body.evidenceDigest !== b.evidenceDigest) throw new Error('Closure already fixed');
+        return rec.resolveVote;
+      }
+      hex.parse(b.evidenceDigest);
+      const clock = await this.clock();
+      if (clock.at <= terms.sendBy + terms.graceSec) throw new Error('Trade verification window is still open');
+      // Never accept the coordinator's possibly old history frontier. The local
+      // finalized clock closes the range after the entire trade window.
+      const h = await this.history({ terms, hashHex: body.H, fromSlot: admission.fromSlot, throughSlot: clock.slot });
+      if (h.status !== 'complete' || h.locks.some(l => qualifyingLock({ ...l, finalized: true, historyComplete: true }, terms.sendBy, 120)))
+        throw new Error('Complete history without a qualifying lock required');
+      const closure = { reservationId: b.reservationId, outcome: 'unfunded', pieces: body.pieces, evidenceDigest: b.evidenceDigest };
+      ledger.orphanClosure(body, admission, closure);
+      rec.resolveVote = this.sign(context, 'resolved', closure); this.save(b.reservationId, rec); return rec.resolveVote;
+    }
     if (method === 'penaltyList') {
       const found = [];
       for (const name of this.store.list('stake-ledger-')) {
@@ -197,7 +230,7 @@ export class PenaltySigner {
       this.save(id, rec); return rec.clock;
     }
     if (method === 'penaltyResolveVote') {
-      const checked = await this.check(id, b.throughSlot);
+      const checked = await this.check(id, clock.slot);
       const delivered = !!ledger.read().reservations[id].delivery;
       const outcome = delivered ? 'delivered' : !checked.timely && clock.at > terms.sendBy ? 'unfunded' : null;
       if (!outcome || r.state !== 'reserved' || r.body.pieces.some(ref => ledger.read().pieces[ref.unitId].decisionVote)) throw new Error('No safe reservation closure');

@@ -140,7 +140,7 @@ limits; changing a value requires a new signed policy with one hour of notice.
 | `proofClock.checkpointFreshSec` | 180 | 30 | 300 |
 | `stake.withdrawDelaySec` | 86400 | 3600 | 604800 |
 | `stake.suggestBufferBps` | 15000 | 10000 | 30000 |
-| `stake.maxUsdPerAddress` | 400000000 | 500000 | 400000000 |
+| `stake.maxUsdPerAddress` | 10000000000 | 500000 | 1000000000000 |
 | `rewards.dailyReset` | 500000000 | 0 | 100000000000 |
 | `rewards.activeWeightBps` | 20000 | 10000 | 50000 |
 | `rewards.payoutMinReset` | 10000000 | 1 | 10000000000 |

@@ -173,8 +173,9 @@ export class Signer {
   }
 
   status() {
+    const tracReaders = this.stakeRuntime?.readerHealth?.status();
     return { software: SOFTWARE, strikes: { enabled: this.strikes.enabled }, updateRequired: !!this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware),
-      message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : '', pairs: pairStatus(this.registry.usable), dexKey: this.identity.publicKey, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
+      tracReaders, message: this.registry.usable && !meetsVersion(SOFTWARE, this.registry.usable.minSoftware) ? 'update required' : tracReaders?.message ?? '', pairs: pairStatus(this.registry.usable), dexKey: this.identity.publicKey, registryVersion: this.registry.current?.version ?? null, registryConflict: this.registry.conflict,
       trades: [...this.host.trades.values()].map(t => ({ tradeId: t.state.tradeId, phase: t.state.phase, reason: t.state.reason ?? null })) };
   }
 }

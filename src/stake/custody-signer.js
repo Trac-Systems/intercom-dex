@@ -196,6 +196,32 @@ export class StakeCustodySigner {
       if (!options || factDigest(saved?.vote.fact) !== factDigest(fact)) throw new Error('Independent funding verification required');
       this.ledger(fact.body.descriptor.owner.tracAddr).admitFunded(b.certificate, options); return { funded: true };
     }
+    if (method === 'fundedRecover') {
+      exact(b, ['certificate', 'funding', 'price', 'inventoryCertificate']);
+      const fact = verifyCertificate(b.certificate, c, 'funded'), f = fact.body;
+      const record = this.piece(f.unitId, from), d = record.descriptor, ledger = this.ledger(d.owner.tracAddr);
+      if (unitId(d) !== f.unitId || stableJSON(d) !== stableJSON(f.descriptor) || !record.lock || record.state.phase !== 'ready' ||
+          record.lock.address !== f.address || record.release || this.abandoned(f.unitId) || this.store.get(`stake-refund-vote-${f.unitId}`))
+        throw new Error('Original active funding custody required');
+      const grant = this.capacity().read().pieces[f.unitId];
+      if (!grant || grant.retired) throw new Error('Stake capacity is unavailable');
+      const saved = this.store.get(`stake-funded-vote-${f.unitId}`);
+      if (saved && factDigest(saved.vote.fact) !== factDigest(fact)) throw new Error('Conflicting original funding vote');
+      const prior = ledger.read().pieces[f.unitId];
+      if (!prior) {
+        if (sha256Hex(stableJSON(b.funding)) !== f.fundingDigest) throw new Error('Funding receipts differ from certificate');
+        const balances = await this.trac.balances(f.address);
+        if (BigInt(balances.RESET) < BigInt(d.principalReset) || BigInt(balances.TNK) < BigInt(d.tnkReserve) ||
+            BigInt(d.tnkReserve) < 3n * BigInt(balances.feeTnk)) throw new Error('Stake principal or TNK reserve is not confirmed');
+        await this.verifyFunding({ descriptor: d, unitId: f.unitId, address: f.address, funding: b.funding });
+      }
+      const price = await this.price.import(b.price), options = { settings, price, now: at };
+      const piece = ledger.recoverFunded(b.certificate, options, b.inventoryCertificate);
+      // Retain the exact independently checked fact so ordinary fundedCommit
+      // retries from released apps continue to work after catch-up.
+      this.store.put(`stake-funded-vote-${f.unitId}`, { vote: this.sign('funded', f), options });
+      return { funded: true, generation: piece.generation };
+    }
     if (method === 'refundVote') {
       exact(b, ['unitId', 'ready', 'returnReset']);
       if (this.abandoned(b.unitId)) throw new Error('Stake piece was abandoned before funding');

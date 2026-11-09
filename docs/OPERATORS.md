@@ -12,9 +12,9 @@ Do not wrap systemd roles in the desktop launcher. Keep the role's shutdown orde
 
 Install from a tagged release, never from `main`. Download `intercom-dex-vX.Y.Z.tar.gz` from the
 [releases page](https://github.com/Trac-Systems/intercom-dex/releases), compare its sha256 with the release page,
-unpack it into a new folder, and run `npm ci` and `npm ci --prefix peer` there. `npm ci --prefix peer` also applies the peer's
-patches to its installed dependencies (`peer/scripts/apply-patches.mjs`); after an install with `--ignore-scripts`,
-run `node peer/scripts/apply-patches.mjs` yourself. Keep configs and data folders
+unpack it into a new folder, and run `npm ci` and `npm ci --prefix peer` there. The peer install applies its bounded
+startup-wait patch and runs both trac-msb's and trac-peer's Hypercore replication stall fixes. After an install with
+`--ignore-scripts`, run `npm run postinstall --prefix peer` to apply all three. Running it again is safe. Keep configs and data folders
 outside the release folder, so that an upgrade only replaces the program.
 
 To upgrade, install the new release the same way next to the old one. Stop the role program, then its peer, start

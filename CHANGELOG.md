@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.60
+
+- Stake reserved by only one or two signers after a failed trade can now be freed after the updated seller app
+  prepares the recovery and three original committee members agree, each checking that no qualifying buyer payment
+  exists. The venue and app keep retrying unfinished closures after restart, even after the trade leaves recent history.
+- Updating apps lets lagging stake members catch up. The app retries missing funding from its saved transfer receipts;
+  an updated signer independently checks the original transfers and current balances before accepting the piece and
+  its certified generation. This sends no replacement deposit and does not reset signer capacity.
+- A peer could stop copying chain blocks forever after a stale proof or a silent request. The updated trac-msb and
+  trac-peer dependencies apply the Hypercore stall fix during installation, retry stuck block requests and reconnect
+  stalled readers. Signer status reports stalled signed views and warns when the loaded fix is missing.
+- Update apps, signers and their peers, and the venue. Keep existing data folders. Older versions keep their existing
+  paths, but the new stake recovery needs updated participants; the minimum software version is unchanged.
+
 ## 0.1.59
 
 - The app could freeze: its process kept one CPU core busy, the dashboard and control port accepted connections but

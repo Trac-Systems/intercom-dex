@@ -29,6 +29,9 @@ import { Clock } from '../locks/clock.js';
 import { rewardsStatus } from './status.js';
 import { StakeEpochHandoff } from './epoch-handoff.js';
 import { archiveCustodyTransition } from './custody-archive.js';
+import { FundingRecovery, FUNDING_RECOVERY_MS } from './funding-recovery.js';
+import { SignerReaderHealth } from './reader-health.js';
+import { prepareOrphanClient, retainedOrphanPolicy, recoverOrphanClients } from './orphan.js';
 
 // Stake is an independent authenticated channel, with existing spot registry and
 // original signer identities. It does not depend on optional Locks configuration.
@@ -50,6 +53,12 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
   let price, signer, client, rewards, admission, penalty, coordinator, award;
   const rewardOffers = type === 'signer' ? new RewardOffers({ bridge, registry }) : null;
   const handle = async (method, body, from) => {
+    if (type === 'trader' && method === 'orphanPrepare') {
+      const terms = body.reservation?.admission?.terms;
+      const policy = retainedOrphanPolicy(terms, role.registry.snapshot(terms?.registryVersion)?.sellerBond,
+        store.get(`stake-client-epoch-${terms?.bond?.epochId}`), registry()?.sellerBond);
+      return prepareOrphanClient({ reservation: body.reservation, policy, identity, store, from, now: (await clock()).at });
+    }
     if (type === 'signer' && method.startsWith('penalty')) return penalty.handle(method, body, from);
     if (type === 'service' && method === 'penaltyPing') {
       const current = registry().sellerBond;
@@ -143,6 +152,8 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
   const position = p => bridge.call('dex_stake_position', p ? { position: p } : {});
   if (type === 'signer') {
     penalty = new PenaltySigner({ store, identity, clock, position, history: args => solana.stakeEscrowHistory(args),
+      policyFor: terms => retainedOrphanPolicy(terms, role.registry.snapshot(terms?.registryVersion)?.sellerBond,
+        store.get(`stake-retained-epoch-${terms?.bond?.epochId}`), registry()?.sellerBond),
       verifyDelivery: (terms, txHash, position) => {
         const key = address => Buffer.from(tracPublicKey(address)).toString('hex'), reset = terms.base.id === 'RESET';
         return bridge.call('dex_stake_delivery', { asset: terms.base.id, txHash, from: reset ? key(terms.seller.tracAddr) : terms.seller.tracAddr,
@@ -179,13 +190,17 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
       }
     });
   }
-  let timer, rewardTimer, admissionTimer, penaltyTimer;
+  const fundingRecovery = client ? new FundingRecovery({ store, registry, owner: role.me, clock, request }) : null;
+  const readerHealth = type === 'signer' ? new SignerReaderHealth({ bridge }) : null;
+  const recoverOrphans = client ? paced(STAKE_IDLE_POLL_MS, () => recoverOrphanClients({ store, request })) : null;
+  let timer, rewardTimer, admissionTimer, penaltyTimer, fundingTimer, readerTimer;
   let penaltyRunning = false;
   const penaltyTick = async () => {
     if (penaltyRunning || !registry()?.sellerBond) return;
     penaltyRunning = true;
     try {
       if (coordinator) await coordinator.tick();
+      if (recoverOrphans) await recoverOrphans();
       if (client) for (const trade of role.host.trades.values()) {
         try {
         const s = trade.state; if (!s.terms?.bond || !s.H) continue;
@@ -240,10 +255,17 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
       }
     } catch (e) { log('stake penalty waiting', e.message); } finally { penaltyRunning = false; }
   };
-  return { price, client, request, admission, penalty, coordinator, boxKey: box?.publicKey,
+  return { price, client, request, admission, penalty, coordinator, readerHealth, boxKey: box?.publicKey,
     async start() {
       await transport.start();
       if (rewardOffers) await rewardOffers.start();
+      if (readerHealth) {
+        void readerHealth.poll(); readerTimer = setInterval(() => readerHealth.poll(), STAKE_IDLE_POLL_MS); readerTimer.unref?.();
+      }
+      if (fundingRecovery) {
+        const recover = () => fundingRecovery.tick().catch(e => log('stake funding catch-up waiting', e.message));
+        void recover(); fundingTimer = setInterval(recover, FUNDING_RECOVERY_MS); fundingTimer.unref?.();
+      }
       if (coordinator || client) { void penaltyTick(); penaltyTimer = setInterval(penaltyTick, 5000); penaltyTimer.unref?.(); }
       if (['trader', 'service'].includes(type)) {
         // A trader renews its check every 15 s only while it has a sell offer that may have to propose a bond; otherwise
@@ -283,6 +305,7 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
         poll(); timer = setInterval(poll, 15000); timer.unref?.(); }
     },
     restore: () => bridge.join(STAKE_CHANNEL),
-    stop() { clearInterval(timer); clearInterval(rewardTimer); clearInterval(admissionTimer); clearInterval(penaltyTimer); transport.stop(); rewardOffers?.stop(); },
+    stop() { clearInterval(timer); clearInterval(rewardTimer); clearInterval(admissionTimer); clearInterval(penaltyTimer);
+      clearInterval(fundingTimer); clearInterval(readerTimer); transport.stop(); rewardOffers?.stop(); },
   };
 }

@@ -10,7 +10,7 @@ import { stableJSON } from '../../../src/core/canonical.js';
 const hex = n => n.toString(16).padStart(64, '0');
 export function admissionFixture() {
   const policy = registryPolicy(), context = { networkId: policy.networkId, venueKey: policy.venueKey, epoch: policy.epoch };
-  const store = memoryStore(), terms = tradeFixture({ n: 4, pair: 'RESET/USDC' }).terms;
+  const store = memoryStore(), parties = tradeFixture({ n: 4, pair: 'RESET/USDC' }), terms = parties.terms;
   terms.seller.boxKey = hex(91); terms.buyer.boxKey = hex(92); terms.committee = policy.epoch.members;
   terms.sendBy = 5000; terms.refundAfter = 10000;
   const q = { numerator: '2000000000', denominator: '1' }, priceReference = { cutoffAt: 4000, q }, priceCheckpoint = { head: hex(23) };
@@ -26,6 +26,6 @@ export function admissionFixture() {
   ledger.admitFunded(cert('funded', { descriptor: d, unitId: id, address: tracAddress(hex(70)), fundingDigest: hex(80) }), { settings: policy.economics.active.settings, price: q, now: 4000 });
   const inventory = admissionInventory(ledger.read(), terms.seller, 4000, context.epoch.id);
   const args = { terms, policy, context, inventoryCertificate: cert('admission-inventory', inventory), priceCheckpoint, priceReference, priceLog, now: 4000, historyFromSlot: 1 };
-  return { ...args, args, store, ledger, cert, inventory, id };
+  return { ...args, args, store, ledger, cert, inventory, id, parties };
 }
 

@@ -82,5 +82,7 @@ test('CLI rejects mainnet overrides with a plain message before any key, peer or
   writeFileSync(file, JSON.stringify({ network: 'mainnet', role: 'trader', mint: SOL }));
   const result = spawnSync(process.execPath, ['bin/dex.mjs', '--config', file], { encoding: 'utf8' });
   assert.equal(result.status, 1); assert.equal(result.stdout, '');
-  assert.match(result.stderr, /^Mainnet pins mint; config overrides are refused\n$/);
+  // Solana's optional bigint native binding prints this exact diagnostic on
+  // platforms without a matching binary. Keep all other extra output a failure.
+  assert.match(result.stderr, /^(?:bigint: Failed to load bindings, pure JS will be used \(try npm run rebuild\?\)\n)?Mainnet pins mint; config overrides are refused\n$/);
 });

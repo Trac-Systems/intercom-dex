@@ -4,6 +4,8 @@ import { penaltyClockBody } from './penalty-clock.js';
 import { stakeContext } from './price-service.js';
 import { sha256Hex, stableJSON } from '../core/canonical.js';
 import { proofClockSettings } from './settings.js';
+import { reservationId } from './ledger.js';
+import { verifyOrphanReady } from './orphan.js';
 
 const hash = value => sha256Hex(stableJSON(value));
 export class PenaltyCoordinator {
@@ -51,7 +53,9 @@ export class PenaltyCoordinator {
   }
   async tickEpoch(context) {
     const lists = await this.all(context, 'penaltyList', {});
-    const found = [...new Set(lists.flat())].sort();
+    const unfinished = this.store.list('stake-penalty-job-').map(name => this.store.get(name)).filter(job =>
+      job.reservation.admission.policy.epoch.id === context.epoch.id && job.resolved && (job.resolvedMembers?.length ?? 0) < context.epoch.n);
+    const found = [...new Set([...lists.flat(), ...unfinished.map(job => job.id)])].sort();
     this.listAfterByEpoch ??= new Map();
     const start = found.findIndex(id => id > (this.listAfterByEpoch.get(context.epoch.id) ?? ''));
     const ids = (start < 0 ? found : [...found.slice(start), ...found.slice(0, start)]).slice(0, 32);
@@ -65,11 +69,17 @@ export class PenaltyCoordinator {
   }
   async advance(id, context) {
     let job = this.store.get(`stake-penalty-job-${id}`);
+    if (job?.resolved) { await this.commitClosure(job, context); return; }
     const states = await this.all(context, 'penaltyState', { reservationId: id });
-    if (states.length < 3) throw new Error('Penalty state quorum unavailable');
     if (!job) {
-      const original = states.find(s => states.filter(other => stableJSON(other.reservation.body) === stableJSON(s.reservation.body)).length >= 3);
-      if (!original) throw new Error('Reservation quorum unavailable');
+      // Discovery is not authorization. A single surviving holder can supply
+      // the signed admission; every closure still needs three verified votes.
+      const candidates = states.filter(s => {
+        try { return reservationId(s.reservation.body) === id && s.reservation.admission.policy.epoch.id === context.epoch.id; }
+        catch { return false; }
+      });
+      const original = candidates[0];
+      if (!original) throw new Error('Reservation unavailable');
       const r = original.reservation;
       if (r.admission.policy.epoch.id !== context.epoch.id) return;
       job = { id, reservation: r, funded: original.funded }; this.save(job);
@@ -95,10 +105,21 @@ export class PenaltyCoordinator {
       try {
         job.pendingResolve ??= { reservationId: id, throughSlot: clock.slot, evidenceDigest: hash({ id, candidates, throughSlot: clock.slot }) };
         this.save(job);
-        job.resolved = await this.certificate(context, 'penaltyResolveVote', job.pendingResolve, 'resolved');
-        this.save(job); await this.all(context, 'penaltyResolveCommit', { reservationId: id, certificate: job.resolved }); return;
+        let votes = await this.all(context, 'penaltyResolveVote', job.pendingResolve);
+        if (votes.length < 3 && clock.at > terms.sendBy + terms.graceSec) {
+          if (!job.orphanReady) {
+            const ready = await this.request(terms.seller.dexKey, 'orphanPrepare', { reservation: r });
+            verifyOrphanReady(ready, r, context); job.orphanReady = ready; this.save(job);
+          }
+          const extra = await this.all(context, 'penaltyOrphanVote', { ...job.pendingResolve, reservation: r, ready: job.orphanReady });
+          votes = [...new Map([...votes, ...extra].map(v => [v.from, v])).values()];
+        }
+        job.resolved = matchingCertificate(votes, context, 'resolved');
+        this.save(job); await this.commitClosure(job, context); return;
       } catch { /* A qualifying unclaimed lock stays reserved. */ }
     }
+    if (states.filter(s => stableJSON(s.reservation.body) === stableJSON(r.body)).length < 3)
+      throw new Error('Penalty state quorum unavailable');
     if (clock.at < timing.triggerAt) return;
     if (job.cutoff) await this.all(context, 'penaltyCutoffCommit', { reservationId: id, certificate: job.cutoff });
     const position = await this.position();
@@ -147,6 +168,21 @@ export class PenaltyCoordinator {
     await this.all(context, 'penaltySample', { reservationId: id, position: await this.position() });
     job.decision = await this.certificate(context, 'penaltyVote', { reservationId: id, ...job.pendingDecision }, 'decision'); this.save(job); this.archiveAward(job);
     await this.all(context, 'penaltyCommit', { reservationId: id, certificate: job.decision });
+  }
+  async commitClosure(job, context) {
+    const results = await Promise.allSettled(context.epoch.members.map(async member => {
+      const body = { reservationId: job.id, certificate: job.resolved };
+      let result;
+      try { result = await this.request(member.dexKey, 'penaltyResolveCommit', body); }
+      catch (error) {
+        if (job.resolved[0].fact.body.outcome !== 'unfunded') throw error;
+        result = await this.request(member.dexKey, 'penaltyResolveCommit', { ...body, reservation: job.reservation });
+      }
+      if (result?.resolved !== true) throw new Error('Closure not confirmed');
+      return member.dexKey;
+    }));
+    job.resolvedMembers = [...new Set([...(job.resolvedMembers ?? []), ...results.flatMap(r => r.status === 'fulfilled' ? [r.value] : [])])];
+    this.save(job);
   }
   collection(id, certificate) {
     const job = this.store.get(`stake-penalty-job-${id}`);

@@ -4,6 +4,8 @@ import { makeHandlers } from '../../../peer/src/trac/handlers.js';
 import { openResetReader } from '../../../peer/src/trac/reset-reader.js';
 import PeerWallet from '../../../peer/node_modules/trac-wallet/index.js';
 import nodeEntry from '../../../peer/node_modules/trac-msb/src/core/state/utils/nodeEntry.js';
+import { HYPERCORE_STALLFIX_MARKER } from '../../../peer/node_modules/trac-msb/src/utils/hypercoreStallfix.js';
+import { SignerReaderHealth } from '../../../src/stake/reader-health.js';
 
 function fixture() {
   return { config: { addressPrefix: 'trac', bootstrap: Buffer.alloc(32, 1), networkId: 918 },
@@ -15,7 +17,7 @@ function fixture() {
 test('bridge handlers return local MSB context and only a broadcast hash', async () => {
   const bus = fixture();
   const handlers = makeHandlers({ bus, peer: {}, config: {} });
-  assert.deepEqual(Object.keys(handlers).sort(), ['dex_balances', 'dex_msb_info', 'dex_reset_context', 'dex_stake_delivery', 'dex_stake_position', 'dex_tnk_broadcast', 'dex_verify']);
+  assert.deepEqual(Object.keys(handlers).sort(), ['dex_balances', 'dex_msb_info', 'dex_reader_health', 'dex_reset_context', 'dex_stake_delivery', 'dex_stake_position', 'dex_tnk_broadcast', 'dex_verify']);
   assert.deepEqual(await handlers.dex_msb_info(), { networkId: 918, txv: '02'.repeat(32), addressPrefix: 'trac', msbBootstrap: '01'.repeat(32), feeTnk: '30000000000000000' });
   assert.deepEqual(await handlers.dex_tnk_broadcast({ payload: { type: 13, tro: { tx: '03'.repeat(32) } } }), { txHash: '03'.repeat(32) });
   await assert.rejects(handlers.dex_tnk_broadcast({}));
@@ -33,6 +35,35 @@ test('RESET context uses only the pinned local reader', async () => {
   const handlers = makeHandlers({ bus, resetPeer, config });
   assert.deepEqual(await handlers.dex_reset_context(), { networkId: 918, txv: '02'.repeat(32), addressPrefix: 'trac', subnet: '03'.repeat(32), msb: '01'.repeat(32) });
   assert.throws(() => makeHandlers({ bus, resetPeer, config: { trac: { reset: { bootstrap: '04'.repeat(32) } } } }));
+});
+
+test('reader health warns about an unpatched loaded Hypercore even while its signed view advances', async () => {
+  class PatchedReplicator { static STALLFIX = HYPERCORE_STALLFIX_MARKER; }
+  class OriginalReplicator {}
+  const systemCore = Replicator => ({ core: { replicator: new Replicator() } });
+  const bus = fixture();
+  bus.state.base = { core: systemCore(PatchedReplicator), view: { core: { signedLength: 8 } } };
+  const resetPeer = { base: { key: Buffer.alloc(32, 3), core: systemCore(OriginalReplicator),
+    view: { core: { signedLength: 12 }, checkout() {} } } };
+  const handlers = makeHandlers({ bus, resetPeer, config: { trac: { reset: { bootstrap: '03'.repeat(32) } } } });
+  const poller = new SignerReaderHealth({ bridge: { call: async method => handlers[method]() } });
+  await poller.poll();
+  const warning = poller.status();
+  assert.equal(warning.status, 'degraded');
+  assert.match(warning.message, /WARNING: RESET Hypercore replication stall fix is not active/);
+  assert.match(warning.message, /npm run postinstall --prefix peer/);
+  assert.equal(warning.readers.MSB.hypercoreStallfix.patched, true);
+  assert.equal(warning.readers.RESET.hypercoreStallfix.patched, false);
+  assert.equal(warning.readers.RESET.hypercoreStallfix.marker, null);
+  resetPeer.base.view.core.signedLength++;
+  await poller.poll();
+  assert.equal(poller.status().readers.RESET.status, 'advancing');
+  assert.equal(poller.status().status, 'degraded', 'progress alone does not clear a missing patch');
+  resetPeer.base.core = systemCore(PatchedReplicator);
+  await poller.poll();
+  assert.equal(poller.status().status, 'online');
+  assert.equal(poller.status().message, '');
+  assert.equal(resetPeer.base.view.core.signedLength, 13, 'health does not mutate the reader');
 });
 
 test('a RESET reader still opening answers not ready, TNK checks work at once, and a wrong reader is refused when it opens', async () => {

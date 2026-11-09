@@ -1,10 +1,12 @@
 import { bufferToBigInt } from 'trac-msb/src/utils/amountSerialization.js';
+import { hypercoreStallfixStatus } from 'trac-msb/src/utils/hypercoreStallfix.js';
 import { broadcastTnkTransfer } from './broadcast.js';
 import { createTransferVerifier } from './verify-transfer.js';
 import PeerWallet from 'trac-wallet';
 import { readBalances } from './balances.js';
 import { signedPosition } from './stake-position.js';
 import { createStakeDeliveryVerifier } from './stake-delivery.js';
+import { readerHealth } from './reader-health.js';
 
 // resetPeer may still be opening (a promise): until it is open, RESET balances and context fail as not ready, and a
 // RESET transfer check answers reset_reader_required (not final), which every caller retries.
@@ -22,12 +24,17 @@ export function makeHandlers({ bus, config, resetPeer = null }) {
     return reader;
   };
   const balances = new Map();
+  const health = readerHealth({
+    sources: () => ({ MSB: bus.state.base?.view?.core, RESET: reader?.base?.view?.core }),
+    stallfix: () => ({ MSB: hypercoreStallfixStatus(bus.state.base?.core), RESET: hypercoreStallfixStatus(reader?.base?.core) })
+  });
   async function info() {
     return { networkId: bus.config.networkId, txv: (await bus.state.getIndexerSequenceState()).toString('hex'),
       addressPrefix: bus.config.addressPrefix, msbBootstrap: bus.config.bootstrap.toString('hex'),
       feeTnk: bufferToBigInt(bus.state.getFee()).toString() };
   }
   return {
+    dex_reader_health: health,
     async dex_balances({ address } = {}) {
       const key = typeof address === 'string' && PeerWallet.decodeBech32mSafe(address);
       if (!key || key.length !== 32 || PeerWallet.encodeBech32mSafe(bus.config.addressPrefix, key) !== address) throw new Error('Invalid Trac address');

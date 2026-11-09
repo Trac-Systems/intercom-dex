@@ -9,7 +9,13 @@ import { ResultCode } from '../../../peer/node_modules/trac-msb/src/utils/consta
 import { fanOutValidatorSends } from '../../../peer/runtime/fanout.js';
 
 function fixture(t) {
-  const config = createConfig(ENV.DEVELOPMENT, { maxRetries: 1 });
+  // Exercise delayed replies with an explicit supported configuration. This
+  // test must not depend on a locally patched dependency's default timeouts.
+  const defaults = createConfig(ENV.DEVELOPMENT, { maxRetries: 1 });
+  const config = { addressPrefix: defaults.addressPrefix, maxRetries: 1,
+    messageThreshold: defaults.messageThreshold, messageValidatorResponseTimeout: defaults.messageValidatorResponseTimeout,
+    maxPendingRequestsInPendingRequestsService: defaults.maxPendingRequestsInPendingRequestsService,
+    pendingRequestTimeout: 10000, txCommitTimeout: 5000 };
   const pending = new PendingRequestService(config), sent = [], removed = [];
   const validators = ['11', '22', '33', '44', '55'].map(byte => byte.repeat(32));
   const manager = {
