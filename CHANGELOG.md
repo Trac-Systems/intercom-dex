@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.61
+
+- Hypercore closed-stream guard (#911): closed connections no longer keep their unsent data in memory.
+
 ## 0.1.60
 
 - Stake reserved by only one or two signers after a failed trade can now be freed after the updated seller app
