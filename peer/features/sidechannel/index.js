@@ -124,7 +124,9 @@ class Sidechannel extends Feature {
     this.channels = new Map();
     this.connections = new Map();
     this._openGeneration = 0;
-    this.rateLimits = new Map();
+    // Limiter state follows the connection's lifetime; a closed transport must
+    // not stay reachable through its token bucket.
+    this.rateLimits = new WeakMap();
     this.started = false;
     this._dhtBootPromise = null;
     this.onMessage = typeof config.onMessage === 'function' ? config.onMessage : null;

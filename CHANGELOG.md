@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.62
+
+- Peer memory: a closed peer connection no longer stays in memory through the sidechannel rate limiter, so a long-running
+  peer no longer grows with every reconnect.
+- Locks peers: a balance read that times out now closes its RESET read session; at most 64 interactive reads run at once.
+
 ## 0.1.61
 
 - Hypercore closed-stream guard (#911): closed connections no longer keep their unsent data in memory.

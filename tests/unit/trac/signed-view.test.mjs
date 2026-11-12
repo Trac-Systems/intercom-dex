@@ -138,3 +138,26 @@ test('missing signed blocks fail within the deadline even when the applied batch
   await turn(); await turn();
   assert.equal(core.sessions.length, sessions);
 });
+
+test('repeated named signed reads release Corestore sessions on success and timeout', async t => {
+  const { base, core, streams } = await replicatedBeforeCommit(t);
+  const retained = () => ({ cores: base.store.cores.size, sessions: base.store.sessions.list().length,
+    coreSessions: core.sessions.length,
+    appendListeners: core.listenerCount('append'), truncateListeners: core.listenerCount('truncate') });
+  const initial = retained();
+  for (let i = 0; i < 1000; i++) {
+    assert.equal((await signedBalanceRead(base, 'bal/account', 'RESET', 1000)).value, '200000');
+    assert.deepEqual(retained(), initial);
+  }
+  t.diagnostic(JSON.stringify({ successfulReads: 1000, initial, after: retained() }));
+  for (const stream of streams) stream.destroy();
+  await turn(); await turn();
+  await core.clear(2, core.length);
+  for (let i = 0; i < 32; i++) {
+    await assert.rejects(signedBalanceRead(base, 'bal/account', 'RESET', 10),
+      error => ['BALANCE_READ_TIMEOUT', 'REQUEST_TIMEOUT'].includes(error.code));
+    await turn(); await turn();
+    assert.deepEqual(retained(), initial);
+  }
+  t.diagnostic(JSON.stringify({ timedOutReads: 32, initial, after: retained() }));
+});

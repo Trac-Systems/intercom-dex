@@ -91,7 +91,7 @@ test('invalid delivery flags grant no preference and a venue always forwards to 
     options.onopen(2); assert.equal(node.publicLeaves.has(connection), false);
     const state = data => ({ start: 0, end: data.length, buffer: data });
     assert.throws(() => options.handshake.decode(state(Buffer.from([255]))), /Malformed public delivery frame/);
-    node.rateLimits.clear(); node.rateBurstBytes = 1;
+    node.rateLimits = new WeakMap(); node.rateBurstBytes = 1;
     assert.equal(options.handshake.decode(state(Buffer.from([0]))), 0);
     assert.equal(options.handshake.decode(state(Buffer.from([1]))), -1, 'delivery controls share the connection admission budget');
     options.onopen(1); assert.equal(node.publicLeaves.has(connection), true);
@@ -169,7 +169,7 @@ test('sidechannel counts encoded duplicate and rejected receives; distinguishes 
   assert.equal(count(meters[0].snapshot(), 'sidechannel', 'originated'), c.encode(c.json, payload).length * 2);
   assert.equal(count(meters[1].snapshot(), 'sidechannel', 'received'), c.encode(c.json, payload).length * 2);
   nodes[1].rateBurstBytes = 1;
-  nodes[1].rateLimits.clear();
+  nodes[1].rateLimits = new WeakMap();
   nodes[0]._send(records[0], 'test', payload, 'relayed'); await turn();
   assert.equal(count(meters[0].snapshot(), 'sidechannel', 'relayed'), c.encode(c.json, payload).length);
   assert.equal(count(meters[1].snapshot(), 'sidechannel', 'received'), c.encode(c.json, payload).length * 3);

@@ -32,18 +32,44 @@ export function locksTransport(config) {
 }
 
 const number = n => { if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid height or cursor'); return n; };
-export function makeLocksHandlers({ bus, config, resetPeer }) {
+export const LOCKS_READ_MS = 30000;
+export const LOCKS_MAX_READS = 64;
+export function makeLocksHandlers({ bus, config, resetPeer, readTimeoutMs = LOCKS_READ_MS }) {
   const index = new LocksHeaders(config.storeDirectory ? path.join(config.storeDirectory, 'locks-headers') : null);
-  async function read(fn) {
-    const peer = await resetPeer;
-    if (!peer || peer.base.key.toString('hex') !== config.trac.reset.bootstrap) throw new Error('Untrusted RESET reader');
-    const view = peer.base.view.checkout(peer.base.view.core.signedLength);
-    try { return await fn(view, peer); } finally { await view.close(); }
+  let activeReads = 0;
+  async function read(fn, background = false) {
+    if (!background && activeReads >= LOCKS_MAX_READS) throw new Error('Locks reader busy; retry shortly');
+    if (!background) activeReads++;
+    let view, closing, timer, cancelled = false;
+    const close = () => closing ??= Promise.resolve().then(() => view?.close());
+    // Keep the slot until all work and close settle, including an upstream MSB
+    // read that outlives our deadline and cannot be cancelled through its API.
+    const work = Promise.resolve().then(async () => {
+      try {
+        const peer = await resetPeer;
+        if (cancelled) throw new Error('Locks read timed out');
+        if (!peer || peer.base.key.toString('hex') !== config.trac.reset.bootstrap) throw new Error('Untrusted RESET reader');
+        view = peer.base.view.checkout(peer.base.view.core.signedLength);
+        return await fn(view, peer);
+      } finally { await close(); }
+    }).finally(() => { if (!background) activeReads--; });
+    // The index already serializes its work and bounds each block read. Keep
+    // long history scans progressing independently of interactive RPC limits.
+    if (background) return work;
+    try {
+      return await Promise.race([work, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          cancelled = true;
+          reject(new Error('Locks read timed out'));
+          if (view) void close().catch(() => {});
+        }, readTimeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
   }
   let indexing = false, dirty = false;
   const update = async () => {
     dirty = true; if (indexing) return; indexing = true;
-    try { while (dirty) { dirty = false; await read(view => index.update(view)); } }
+    try { while (dirty) { dirty = false; await read(view => index.update(view), true); } }
     catch {} finally { indexing = false; }
   };
   Promise.resolve(resetPeer).then(peer => {
