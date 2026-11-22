@@ -1,6 +1,7 @@
 import { RewardOffers } from './reward-book.js';
 import { PenaltySigner } from './penalty-signer.js';
 import { PenaltyCoordinator } from './penalty-coordinator.js';
+import { stakeHistoryReader } from './history-reader.js';
 import { StakeAwardClient } from './award-client.js';
 import { tradeId as termsTradeId } from '../core/terms.js';
 import { bondAck, bondReservation } from './admission.js';
@@ -151,7 +152,7 @@ export function createStakeRuntime({ type, role, bridge, identity, box, store, s
     verifyFunding: args => verifyStakeFunding({ bridge, ...args }) });
   const position = p => bridge.call('dex_stake_position', p ? { position: p } : {});
   if (type === 'signer') {
-    penalty = new PenaltySigner({ store, identity, clock, position, history: args => solana.stakeEscrowHistory(args),
+    penalty = new PenaltySigner({ store, identity, clock, position, history: stakeHistoryReader({ solana, rpc }),
       policyFor: terms => retainedOrphanPolicy(terms, role.registry.snapshot(terms?.registryVersion)?.sellerBond,
         store.get(`stake-retained-epoch-${terms?.bond?.epochId}`), registry()?.sellerBond),
       verifyDelivery: (terms, txHash, position) => {

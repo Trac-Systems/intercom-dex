@@ -480,3 +480,23 @@ test('a holder signs a partial closure only with two other members\' votes, afte
   g.set({ now: 5301 }); const ready = g.prepare(early); g.set({ now: 5300 });
   await assert.rejects(g.signers[3].handle('penaltyPartialVote', { ...body, reservationId: g.id, reservation: early, ready }, g.context.venueKey), /window is still open/);
 });
+
+test('a timely delivery closes without escrow history; the unfunded closure still needs it', async () => {
+  // 11-22: signers had one trade reader since 11-10, so every history read failed and no delivered reservation ever
+  // closed; after eight of them the seller's next bond was refused (bond_setup_unavailable).
+  const f = fixture();
+  for (const s of f.signers) s.history = async () => { throw new Error('Two distinct history readers required'); };
+  f.set({ deliveredAt: 10 }); await f.evidence(hex(53)); await f.tick(5001);
+  const result = f.coordinator.result(f.id);
+  assert.equal(result.resolved?.[0].fact.body.outcome, 'delivered', result.error);
+  for (const s of f.signers) {
+    const { ledger, r } = s.find(f.id);
+    assert.equal(r.state, 'delivered');
+    assert.ok(r.body.pieces.every(ref => ledger.read().pieces[ref.unitId].state === 'free'));
+  }
+  const unfunded = fixture(); unfunded.set({ timely: false });
+  for (const s of unfunded.signers) s.history = async () => ({ status: 'unknown' });
+  await unfunded.tick(5301);
+  assert.equal(unfunded.coordinator.result(unfunded.id).resolved, null);
+  assert.ok(unfunded.signers.every(s => s.find(unfunded.id).r.state === 'reserved'));
+});

@@ -268,8 +268,11 @@ export class PenaltySigner {
       this.save(id, rec); return rec.clock;
     }
     if (method === 'penaltyResolveVote') {
-      const checked = await this.check(id, clock.slot);
+      // A timely delivery proof decides on its own; the escrow history only decides the unfunded outcome. Requiring it
+      // here kept every delivered reservation open while history was unreadable (one trade reader since 11-10), and
+      // after eight of them the seller's bonds were refused (11-22).
       const delivered = !!ledger.read().reservations[id].delivery;
+      const checked = delivered ? null : await this.check(id, clock.slot);
       const outcome = delivered ? 'delivered' : !checked.timely && clock.at > terms.sendBy ? 'unfunded' : null;
       if (!outcome || r.state !== 'reserved' || r.body.pieces.some(ref => ledger.read().pieces[ref.unitId].decisionVote)) throw new Error('No safe reservation closure');
       const body = { reservationId: id, outcome, pieces: r.body.pieces, evidenceDigest: b.evidenceDigest };

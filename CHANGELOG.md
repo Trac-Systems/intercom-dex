@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.64
+
+- Signers: a bond reservation with a timely delivery proof now closes as delivered without reading the Solana escrow
+  history. The history needs two agreeing readers; signers configured with one own endpoint could never read it, so no
+  delivered reservation closed, and after eight delivered trades every later trade with that seller failed ("The seller
+  cannot deliver this trade right now").
+- Signers read the escrow history through the two-reader stake endpoints (the clock endpoints when configured), so
+  unfunded closures and penalty decisions work again with one own trade endpoint. An escrow whose history could not be
+  read waits five minutes before the next read.
+- Signer-only release: no change for buyer and seller apps.
+
 ## 0.1.63
 
 - Signers: a bond reservation that fewer than three signers hold now closes as unfunded, with no penalty, once the trade

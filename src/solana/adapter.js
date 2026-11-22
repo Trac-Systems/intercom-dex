@@ -867,7 +867,8 @@ export function createSolanaAdapter({
   return {
     lockEscrow: input => guarded(`lock:${input?.hashHex}`, () => lockEscrow(input)),
     checkEscrow: input => inspectTrade(input),
-    stakeEscrowHistory: input => stakeEscrowHistory({ ...input, endpoints: urls, need, timeoutMs, programId: program }),
+    // Stake adjudication may name its own two-reader quorum (src/stake/history-reader.js); the program stays fixed.
+    stakeEscrowHistory: input => stakeEscrowHistory({ endpoints: urls, need, timeoutMs, ...input, programId: program }),
     buyerPayment: input => buyerPayment({ ...input, endpoints: urls, need, timeoutMs, programId: program }),
     // Read-only: null means a successful read found no settlement; pending means the read could not decide.
     settlementSignature: async ({ terms, hashHex }) => {
