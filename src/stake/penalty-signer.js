@@ -128,6 +128,44 @@ export class PenaltySigner {
       ledger.orphanClosure(body, admission, closure);
       rec.resolveVote = this.sign(context, 'resolved', closure); this.save(b.reservationId, rec); return rec.resolveVote;
     }
+    if (method === 'penaltyPartialVote') {
+      // A bond takes three acknowledgements and only a holder acknowledges. Two members that never held the
+      // reservation therefore prove no deal formed, even with a timely buyer lock: signers that refused the seller
+      // funds after the lock left one or two holders, which could neither close (no three holders) nor take the
+      // orphan path (the lock qualifies), and kept the seller's pieces and one of its eight slots for good (11-22).
+      const policy = this.policyFor?.(b.reservation?.admission?.terms);
+      const { body, admission, context, terms } = verifyOrphanReservation(b.reservation, policy, b.reservationId);
+      if (from !== context.venueKey || !context.epoch.members.some(m => m.dexKey === this.identity.publicKey))
+        throw new Error('Original venue and signer required');
+      // As on the orphan path, the seller's app records the closure too and moves to the same generations.
+      verifyOrphanReady(b.ready, b.reservation, context);
+      hex.parse(b.evidenceDigest);
+      const closure = { reservationId: b.reservationId, outcome: 'unfunded', pieces: body.pieces, evidenceDigest: b.evidenceDigest };
+      const rec = this.record(b.reservationId);
+      if (rec.resolveVote) {
+        if (stableJSON(rec.resolveVote.fact.body) !== stableJSON(closure)) throw new Error('Closure already fixed');
+        return rec.resolveVote;
+      }
+      const clock = await this.clock();
+      if (clock.at <= terms.sendBy + terms.graceSec) throw new Error('Trade verification window is still open');
+      const ledger = new StakeLedger({ store: this.store, context, address: terms.seller.tracAddr });
+      const prior = ledger.read().reservations[b.reservationId];
+      // A non-holder's barrier also stops it from acknowledging this trade later.
+      if (!prior || prior.orphanClosure) ledger.orphanClosure(body, admission, closure);
+      else {
+        // Holders never sign first, so two other votes come from members that never held it.
+        const others = new Set();
+        for (const vote of Array.isArray(b.votes) ? b.votes.slice(0, 4) : []) {
+          try {
+            if (vote?.from === this.identity.publicKey || !context.epoch.members.some(m => m.dexKey === vote?.from)) continue;
+            if (stableJSON(verifyFact(vote, context, 'resolved', vote.from).body) === stableJSON(closure)) others.add(vote.from);
+          } catch {}
+        }
+        if (others.size < context.epoch.n - context.epoch.k + 1) throw new Error('Two other closure votes required');
+        ledger.closureIntent(b.reservationId, closure);
+      }
+      rec.resolveVote = this.sign(context, 'resolved', closure); this.save(b.reservationId, rec); return rec.resolveVote;
+    }
     if (method === 'penaltyList') {
       const found = [];
       for (const name of this.store.list('stake-ledger-')) {

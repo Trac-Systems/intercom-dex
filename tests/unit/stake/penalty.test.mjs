@@ -343,9 +343,17 @@ test('orphan votes independently reject live locks, incomplete history, forged t
 test('two votes cannot free any orphan; conflicting local custody cannot be overwritten', async () => {
   const f = fixture(null, 2); f.set({ timely: false });
   for (const s of f.signers.slice(2)) s.history = async () => ({ status: 'unknown' });
+  // Non-holders on software without the partial closure vote.
+  const handles = f.signers.slice(2).map(s => s.handle.bind(s));
+  f.signers.slice(2).forEach((s, i) => { s.handle = (method, body, from) => method === 'penaltyPartialVote'
+    ? Promise.reject(new Error('Unsupported penalty request')) : handles[i](method, body, from); });
   await f.tick(5301);
   assert.equal(f.coordinator.result(f.id).resolved, null);
   assert.ok(f.signers.slice(0, 2).every(s => s.find(f.id).r.state === 'reserved'));
+  // Upgraded, the two non-holders prove that no deal formed.
+  f.signers.slice(2).forEach((s, i) => { s.handle = handles[i]; });
+  await f.tick(5302);
+  assert.equal(verifyCertificate(f.coordinator.result(f.id).resolved, f.context, 'resolved').body.outcome, 'unfunded');
   const g = fixture(null, 2); g.set({ timely: false, now: 5301 });
   const r = g.signers[0].find(g.id).r;
   const ledger = new StakeLedger({ store: g.stores[2], context: g.context, address: g.terms.seller.tracAddr });
@@ -426,4 +434,49 @@ test('durable non-holder closure vote blocks settlement shares and survives a lo
   assert.deepEqual(await signer.handle('penaltyOrphanVote', b, f.context.venueKey), first);
   assert.throws(() => signer.find(f.id).ledger.deliveryIntent(f.id, { txHash: hex(92), evidenceDigest: hex(93), share: true }), /blocks settlement/);
   await assert.rejects(signer.handle('penaltyOrphanVote', { ...b, evidenceDigest: hex(91) }, f.context.venueKey), /fixed/);
+});
+
+test('a reservation fewer than three signers hold closes unfunded although the buyer locked in time', async () => {
+  // 11-22: signers refused at the seller-funds step after the buyer had locked. The one or two signers that had
+  // reserved could neither close (no three holders) nor use the orphan path (a timely lock exists), so every such
+  // reservation kept the seller's pieces and one of its eight slots for good, until all RESET/USDC trades failed.
+  for (const holders of [1, 2]) {
+    const f = fixture(null, holders);
+    await f.tick(5300);
+    assert.equal(f.coordinator.result(f.id).resolved, null, 'the verification deadline is inclusive');
+    await f.tick(5301);
+    const certificate = f.coordinator.result(f.id).resolved;
+    assert.equal(verifyCertificate(certificate, f.context, 'resolved').body.outcome, 'unfunded');
+    assert.equal(f.coordinator.result(f.id).decision, null, 'no penalty');
+    for (const s of f.signers) assert.equal(s.find(f.id).r.state, 'unfunded');
+    const { ledger, r } = f.signers[0].find(f.id);
+    assert.ok(r.body.pieces.every(ref => ledger.read().pieces[ref.unitId].state === 'free'));
+  }
+  // Three holders may have acknowledged a deal: the penalty path stays as it is.
+  const f = fixture(null, 3);
+  await f.tick(5301);
+  assert.equal(f.coordinator.result(f.id).resolved, null);
+  assert.ok(f.signers.slice(0, 3).every(s => s.find(f.id).r.state === 'reserved'));
+});
+
+test('a holder signs a partial closure only with two other members\' votes, after the trade window', async () => {
+  const f = fixture(null, 2); f.set({ now: 5301 });
+  const reservation = f.signers[0].find(f.id).r, venue = f.context.venueKey;
+  const body = { reservationId: f.id, reservation, ready: f.prepare(reservation), evidenceDigest: hex(90), throughSlot: 1, votes: [] };
+  await assert.rejects(f.signers[3].handle('penaltyPartialVote', { ...body, ready: undefined }, venue), /expected object|signed stake fact/i);
+  await assert.rejects(f.signers[0].handle('penaltyPartialVote', body, venue), /Two other closure votes/);
+  const first = await f.signers[2].handle('penaltyPartialVote', body, venue);
+  await assert.rejects(f.signers[0].handle('penaltyPartialVote', { ...body, votes: [first, first] }, venue), /Two other closure votes/);
+  await assert.rejects(f.signers[0].handle('penaltyPartialVote', { ...body, votes: [first, { ...first, from: f.context.epoch.members[1].dexKey }] }, venue), /Two other closure votes/);
+  await assert.rejects(f.signers[3].handle('penaltyPartialVote', body, f.terms.seller.dexKey), /Original venue/);
+  const second = await f.signers[3].handle('penaltyPartialVote', body, venue);
+  const vote = await f.signers[0].handle('penaltyPartialVote', { ...body, votes: [first, second] }, venue);
+  assert.equal(verifyCertificate([first, second, vote], f.context, 'resolved').body.outcome, 'unfunded');
+  // A non-holder's barrier stops it from acknowledging the trade afterwards.
+  const { ledger, r } = f.signers[2].find(f.id);
+  assert.throws(() => ledger.reserve(r.body, r.admission), /bond_not_reserved/);
+  const g = fixture(null, 1); g.set({ now: 5300 });
+  const early = g.signers[0].find(g.id).r;
+  g.set({ now: 5301 }); const ready = g.prepare(early); g.set({ now: 5300 });
+  await assert.rejects(g.signers[3].handle('penaltyPartialVote', { ...body, reservationId: g.id, reservation: early, ready }, g.context.venueKey), /window is still open/);
 });

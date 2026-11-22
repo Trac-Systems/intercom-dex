@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.63
+
+- Signers: a bond reservation that fewer than three signers hold now closes as unfunded, with no penalty, once the trade
+  window has passed. Such reservations formed when signers refused the seller funds after the buyer had locked; nothing
+  could close them, and once a seller held eight every trade with that seller failed ("The seller cannot deliver this
+  trade right now" / "your wallet does not hold … (or its balance could not be read)").
+- Stake roles reuse one finalized Solana clock reading per process for two seconds, so free public readers no longer
+  throttle the stake checks ("Finalized clocks unavailable or disagree").
+
 ## 0.1.62
 
 - Peer memory: a closed peer connection no longer stays in memory through the sidechannel rate limiter, so a long-running

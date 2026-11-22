@@ -36,6 +36,29 @@ test('finalized stake clock uses lower agreeing readers and fails closed', async
   await assert.rejects(finalizedStakeClock({ endpoints: ['100', '102'], read: async () => { throw Error('offline'); } }), /unavailable/);
 });
 
+test('one finalized clock reading serves a process for the reuse window; concurrent callers share one read', async () => {
+  let reads = 0, fail = false, base = 100;
+  const read = async endpoint => {
+    reads++; if (fail) throw Error('throttled');
+    const data = Buffer.alloc(40); data.writeBigInt64LE(BigInt(base + Number(endpoint)), 32);
+    return { slot: base, value: { owner: 'Sysvar1111111111111111111111111111111111111', data } };
+  };
+  const options = { endpoints: ['0', '1'], read, reuseMs: 200 };
+  const [a, b] = await Promise.all([finalizedStakeClock(options), finalizedStakeClock(options)]);
+  assert.deepEqual(a, { at: 100, slot: 100 }); assert.deepEqual(b, a);
+  assert.equal(reads, 2, 'two readers once, for both callers');
+  base = 105; assert.deepEqual(await finalizedStakeClock(options), { at: 100, slot: 100 });
+  assert.equal(reads, 2);
+  await new Promise(resolve => setTimeout(resolve, 220));
+  fail = true;
+  await assert.rejects(finalizedStakeClock(options), /unavailable/);
+  fail = false;
+  assert.deepEqual(await finalizedStakeClock(options), { at: 105, slot: 105 }, 'a failure is never kept');
+  // A caller's own reader keeps reading every time.
+  reads = 0; await finalizedStakeClock({ endpoints: ['0', '1'], read }); await finalizedStakeClock({ endpoints: ['0', '1'], read });
+  assert.equal(reads, 4);
+});
+
 for (const mode of ['funding-catchup', 'withdraw', 'award', 'handoff', 'exact', 'exact-lagging', 'deferred', 'mixed', 'late-full', 'late-tnk', 'dkg-failed', 'dkg-split', 'many-pieces']) test(mode === 'funding-catchup'
   ? 'a member missing its funding vote verifies receipts after the window and catches up missed generations through bounded app retries'
   : mode === 'many-pieces'

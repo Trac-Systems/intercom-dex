@@ -118,8 +118,27 @@ export class PenaltyCoordinator {
         this.save(job); await this.commitClosure(job, context); return;
       } catch { /* A qualifying unclaimed lock stays reserved. */ }
     }
-    if (states.filter(s => stableJSON(s.reservation.body) === stableJSON(r.body)).length < 3)
+    if (states.filter(s => stableJSON(s.reservation.body) === stableJSON(r.body)).length < 3) {
+      // Fewer than three holders answer: when two members never held it, no deal formed and it closes unfunded
+      // (penaltyPartialVote). With three holders, or members not answering, the signers refuse and nothing changes.
+      if (clock.at > terms.sendBy + terms.graceSec) {
+        job.pendingResolve ??= { reservationId: id, throughSlot: clock.slot, evidenceDigest: hash({ id, candidates, throughSlot: clock.slot }) };
+        this.save(job);
+        if (!job.orphanReady) {
+          const ready = await this.request(terms.seller.dexKey, 'orphanPrepare', { reservation: r });
+          verifyOrphanReady(ready, r, context); job.orphanReady = ready; this.save(job);
+        }
+        const partial = { ...job.pendingResolve, reservation: r, ready: job.orphanReady };
+        let votes = await this.all(context, 'penaltyPartialVote', { ...partial, votes: [] });
+        if (votes.length < 3) votes = [...new Map([...votes, ...await this.all(context, 'penaltyPartialVote', { ...partial, votes })]
+          .map(v => [v.from, v])).values()];
+        if (votes.length >= 3) {
+          job.resolved = matchingCertificate(votes, context, 'resolved');
+          this.save(job); await this.commitClosure(job, context); return;
+        }
+      }
       throw new Error('Penalty state quorum unavailable');
+    }
     if (clock.at < timing.triggerAt) return;
     if (job.cutoff) await this.all(context, 'penaltyCutoffCommit', { reservationId: id, certificate: job.cutoff });
     const position = await this.position();
